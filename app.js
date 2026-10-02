@@ -8,7 +8,7 @@ const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '1.8（10/2 夜・點框直接分類）'
+const VERSION = '1.9（10/3・手動分類不再被蓋掉）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -652,6 +652,8 @@ ${catalogLines().join('\n')}`
       const idx = indices[id - 1]
       if (idx === undefined) continue
       const o = objects[idx]
+      // 比對要等一陣子：這段時間你手動改過的框，以你改的為準，不要蓋掉
+      if (o.edited) continue
       const next = { label: cleanLabel(g.label) || o.label, brand: String(g.brand || '').trim(), model: String(g.model || '').trim(), spec: String(g.spec || '').trim() }
       if (FIELDS.some((f) => (o[f] || '') !== next[f])) changed += 1
       Object.assign(o, next, { refined: true })
@@ -680,11 +682,24 @@ function groupsOf(session) {
       g.refs.push({ pi, oi })
     }),
   )
-  // 固定排序（品名 → 尺寸 → 品牌 → 型號），修改後編號和顏色不會亂跳
+  // 編號和顏色固定：第一次出現的順序記在 session.order／session.colorOf；新出現的種類排在最後、拿新的顏色。
+  // （以前照名稱排序：新增一種「銅管接頭」會插到「銅管接頭・三通」前面，原本的 3 號變 4 號、顏色也換掉，很容易看錯）
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
-  const groups = [...map.values()].map((g) => ({ ...g, conf: g.boxes ? g.conf / g.boxes : 1 })).sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.brand, b.brand) || cmp(a.model, b.model))
+  const order = (session.order ??= [])
+  const colorOf = (session.colorOf ??= {})
+  const fresh = [...map.values()].filter((g) => !order.includes(g.key)).sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.brand, b.brand) || cmp(a.model, b.model))
+  for (const g of fresh) order.push(g.key)
+  const groups = [...map.values()].map((g) => ({ ...g, conf: g.boxes ? g.conf / g.boxes : 1 })).sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key))
   for (const m of session.manual || []) groups.push({ key: `manual:${m.id}`, label: m.label, brand: m.brand || '', model: m.model || '', spec: m.spec || '', boxes: 0, conf: 1, refs: [], manual: m })
-  return groups.map((g, i) => ({ ...g, color: COLORS[i % COLORS.length], count: g.manual ? g.manual.count : (session.counts?.[g.key] ?? g.boxes) }))
+  for (const g of groups) {
+    if (colorOf[g.key] === undefined) {
+      const used = new Set(groups.map((x) => colorOf[x.key]).filter((c) => c !== undefined))
+      let c = 0
+      while (used.has(c) && c < COLORS.length) c++
+      colorOf[g.key] = c % COLORS.length
+    }
+  }
+  return groups.map((g) => ({ ...g, color: COLORS[colorOf[g.key]], count: g.manual ? g.manual.count : (session.counts?.[g.key] ?? g.boxes) }))
 }
 
 /** 改數量（手動新增的存在品項上；AI 的存成覆寫值） */
@@ -1135,7 +1150,7 @@ function quickSheet(pi, startOi) {
           <h2 class="sheet-title" style="margin:0">這一個是哪一種？</h2>
           <span class="muted" style="font-size:15px">第 ${cur + 1} / ${order.length} 個</span>
         </div>
-        <img id="q-img" alt="這一個框的放大圖" style="display:block;width:100%;height:150px;object-fit:contain;margin:12px 0 8px;border-radius:12px;background:var(--card-2)">
+        <img id="q-img" alt="這一個框的放大圖" style="display:block;width:100%;height:120px;object-fit:contain;margin:10px 0 8px;border-radius:12px;background:var(--card-2)">
         <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${esc(detailOf(o))}` : ''}` : esc(o.label)}</p>
         <div class="group">
           ${groups
@@ -1175,11 +1190,16 @@ function quickSheet(pi, startOi) {
         formOpen = true
         const form = body.querySelector('#q-form')
         form.style.display = 'block'
-        form.innerHTML = `${fieldsHtml({ label: o.label }, await suggestions())}<button class="btn block" id="q-create" style="margin-top:12px">建立並改成這一種</button>`
+        form.innerHTML = `<p class="sheet-sub" style="margin:12px 2px 0">品名可以一樣，<b>尺寸要填不一樣的</b>（例如「4分 等徑」「5分×3分 異徑」），才會變成新的一種。</p>${fieldsHtml({ label: o.label, brand: o.brand, model: o.model }, await suggestions())}<button class="btn block" id="q-create" style="margin-top:12px">建立並改成這一種</button>`
+        form.scrollIntoView({ block: 'start', behavior: 'smooth' })
         form.querySelector('#f-spec').focus()
         form.querySelector('#q-create').onclick = () => {
           const v = readFields(form)
           if (!v.label) return toast('品名不能空白')
+          // 填的跟某一種完全一樣：不是新的一種
+          const same = groups.find((g) => g.key === keyOf(v))
+          if (same === mine) return toast('跟目前這一種一樣：請填不同的尺寸（例如 4分 等徑）')
+          if (same) toast(`已經有這一種（第 ${groups.indexOf(same) + 1} 種），直接改成它`)
           assign(v)
         }
       }
