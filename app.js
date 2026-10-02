@@ -7,6 +7,8 @@
 const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
+/** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
+const VERSION = '1.3（10/2 晚）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -241,17 +243,27 @@ function prompt() {
 ${catalogLines().join('\n')}`
 }
 
-/** 用某個模型送一次辨識 */
-async function generate(model, image, thinkingOff = true) {
+/** 簡化模式不用 responseSchema，改在文字裡說明要的格式 */
+const JSON_HINT = `
+只回 JSON，不要其他文字，格式：
+{"objects":[{"label":"品名","brand":"品牌","model":"型號","spec":"尺寸／規格","box_2d":[ymin,xmin,ymax,xmax],"confidence":0.9}],"note":"需要人工確認的地方"}`
+
+/**
+ * 用某個模型送一次辨識。
+ * simple＝簡化請求（不帶 responseSchema、不帶思考設定）：有些時候完整設定會讓 Google 一直回 500，簡化後就過了。
+ */
+async function generate(model, image, simple = false) {
   const body = {
-    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: image } }, { text: prompt() }] }],
-    generationConfig: {
-      temperature: 0,
-      responseMimeType: 'application/json',
-      responseSchema: SCHEMA,
-      // 2.5 Flash 預設會先「想」很久；關掉思考，速度快很多
-      ...(thinkingOff && /2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
-    },
+    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: image } }, { text: prompt() + (simple ? JSON_HINT : '') }] }],
+    generationConfig: simple
+      ? { temperature: 0, responseMimeType: 'application/json' }
+      : {
+          temperature: 0,
+          responseMimeType: 'application/json',
+          responseSchema: SCHEMA,
+          // 2.5 Flash 預設會先「想」很久；關掉思考，速度快很多
+          ...(/2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+        },
   }
   const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   const cand = data?.candidates?.[0]
@@ -259,7 +271,8 @@ async function generate(model, image, thinkingOff = true) {
   if (!text) throw new ApiError(cand?.finishReason === 'SAFETY' ? 'AI 拒絕分析這張照片，請換一張。' : 'AI 沒有回傳結果，請再試一次。', 0, `empty response ${cand?.finishReason || ''}`)
   let parsed
   try {
-    parsed = JSON.parse(text)
+    // 簡化模式偶爾會包 ```json …```，先剝掉
+    parsed = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, ''))
   } catch {
     throw new ApiError('AI 回傳的格式壞掉了，請再試一次。', 0, `bad json: ${text.slice(0, 120)}`)
   }
@@ -280,42 +293,49 @@ async function generate(model, image, thinkingOff = true) {
 }
 
 /**
- * 分析一張照片：同一個模型遇到「太多人用」會等一下重試（2、4、8 秒）；
- * 還是不行就換下一個模型（例如 Flash → Flash-Lite）；模型下架（404）就重新抓清單。
+ * 分析一張照片：
+ * 1. 先用完整設定送；伺服器錯誤（5xx）或設定不被接受（400）→ 同一個模型改用簡化請求再試。
+ * 2. 還是忙（503／429）→ 等 2 秒再試一次，不行就換下一個模型（例如 Flash → Flash-Lite），不要讓人一直等。
+ * 3. 模型下架（404）→ 換下一個並重新挑預設模型。
  * onStatus 用來在畫面上顯示目前在做什麼。
  */
 async function analyze(photo, onStatus = () => {}) {
   const image = await blobToBase64(photo.blob)
   const first = await currentModel()
   const list = modelCache ?? (await fetchModels().catch(() => [first]))
-  const models = [first, ...list.filter((m) => m !== first)].slice(0, 3)
+  const models = [first, ...list.filter((m) => m !== first)].slice(0, 4)
   let lastErr
   for (const [mi, model] of models.entries()) {
-    if (mi > 0) onStatus(`改用 ${model} 再試`)
-    let thinkingOff = true
-    for (let attempt = 0; attempt < 4; attempt++) {
+    onStatus(mi === 0 ? `用 ${model} 辨識中` : `改用 ${model} 再試`)
+    const plan = [
+      { simple: false, wait: 0 },
+      { simple: true, wait: 0 },
+      { simple: true, wait: 2000 },
+    ]
+    for (const [pi, step] of plan.entries()) {
+      if (step.wait) {
+        onStatus(`Google 忙線，${step.wait / 1000} 秒後再試（${model}）`)
+        await sleep(lastErr?.retryAfter ? Math.min(lastErr.retryAfter * 1000, 15000) : step.wait)
+      }
       try {
-        return await generate(model, image, thinkingOff)
+        const r = await generate(model, image, step.simple)
+        if (mi > 0) ls.set(LS.model, model) // 這個模型比較順：之後先用它
+        return r
       } catch (e) {
         lastErr = e
         if (state.cancel) throw e
-        // 有的模型不接受「關掉思考」的參數：拿掉再試一次
-        if (e instanceof ApiError && e.status === 400 && /thinking/i.test(e.detail) && thinkingOff) {
-          thinkingOff = false
-          continue
-        }
-        if (e instanceof ApiError && e.status === 404) {
-          ls.set(LS.model, '')
+        if (!(e instanceof ApiError)) throw e
+        if (e.status === 404) {
+          if (mi === 0) ls.set(LS.model, '')
           break
         }
-        if (!retryable(e) || attempt === 3) break
-        const wait = e.retryAfter ? e.retryAfter * 1000 : 2000 * 2 ** attempt
-        onStatus(`Google 忙線（${e.status}），${Math.round(wait / 1000)} 秒後自動重試（第 ${attempt + 2} 次）`)
-        await sleep(wait)
+        // 第一次失敗（不管 5xx 還是 400）就換簡化請求；簡化後還是 400 就是別的問題（Key、照片），不用再試
+        if (pi === 0 && (retryable(e) || e.status === 400)) continue
+        if (!retryable(e)) throw e
+        // 簡化後還是 500：換模型比較快；503／429：等一下再試一次
+        if (e.status === 500 || pi === plan.length - 1) break
       }
     }
-    // 只有「忙線、暫時錯誤、模型下架」才換模型；Key 錯、照片問題換模型也沒用
-    if (!(retryable(lastErr) || lastErr?.status === 404)) break
   }
   throw lastErr
 }
@@ -553,9 +573,13 @@ function viewSettings() {
     <textarea class="field" id="catalog" spellcheck="false">${esc(catalogLines().join('\n'))}</textarea>
     <p class="footnote">一行一種品項，括號裡寫規格或別名。AI 會照這裡的名稱寫，修正時也會跳出來給你選。</p>
     <div class="row-actions" style="margin-top:10px"><button class="btn small" data-action="save-catalog">儲存清單</button><button class="btn small secondary" data-action="reset-catalog">恢復預設</button></div>
+    <p class="section-title">連線測試</p>
+    <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
+    <p class="footnote">辨識一直失敗時按這個，把結果截圖給我看。</p>
     <p class="section-title">資料</p>
     <div class="row-actions"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>
     <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。</p>
+    <p class="footnote" style="margin-top:18px;text-align:center">拍照盤點 版本 ${VERSION}</p>
   </main>`
 }
 
@@ -907,7 +931,27 @@ $app.addEventListener('click', async (e) => {
         toast(err.message)
       }
       return
-    case 'use-model':
+    case 'diagnose': {
+      const out = document.getElementById('diag')
+      const lines = []
+      const show = () => (out.innerHTML = `<div class="group">${lines.map((l) => `<div class="row"><span class="grow" style="font-size:14px;word-break:break-all">${l}</span></div>`).join('')}</div>`)
+      lines.push('版本 ' + esc(VERSION))
+      lines.push('API Key：' + (ls.get(LS.key) ? '有（' + esc(ls.get(LS.key).slice(0, 6)) + '…）' : '<b>沒有</b>'))
+      show()
+      try {
+        const list = await fetchModels()
+        lines.push('✅ 模型清單：找到 ' + list.length + ' 個可用（' + esc(list.slice(0, 3).join('、')) + '）')
+        show()
+        const model = await currentModel()
+        const t0 = Date.now()
+        const data = await call('models/' + model + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: '只回答 OK' }] }] }) })
+        const reply = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '（沒有回覆）'
+        lines.push('✅ ' + esc(model) + ' 回覆「' + esc(reply.trim().slice(0, 20)) + '」，花 ' + ((Date.now() - t0) / 1000).toFixed(1) + ' 秒')
+      } catch (err) {
+        lines.push('❌ ' + esc(err.message) + (err.detail ? '<br><span class="muted">' + esc(err.detail) + '</span>' : ''))
+      }
+      return show()
+    }    case 'use-model':
       ls.set(LS.model, d.model)
       toast(`改用 ${d.model}`)
       return render()
