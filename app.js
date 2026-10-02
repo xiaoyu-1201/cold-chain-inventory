@@ -5,10 +5,10 @@
  */
 
 const API = 'https://generativelanguage.googleapis.com/v1beta'
-const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog' }
+const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '1.4（10/2 夜・樣品照）'
+const VERSION = '1.5（10/2 夜・相似品再比對）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -65,6 +65,12 @@ const ls = {
 }
 const catalogLines = () => (ls.get(LS.catalog) || DEFAULT_CATALOG).split('\n').map((l) => l.trim()).filter(Boolean)
 const catalogNames = () => catalogLines().map((l) => l.replace(/（.*$/, '').trim())
+/** AI 有時把清單整行（含括號說明）當品名，例如「銅管接頭（彎頭、三通…）」→ 只留「銅管接頭」 */
+const cleanLabel = (label) => {
+  const s = String(label ?? '').trim()
+  const base = s.replace(/\s*[（(].*$/, '').trim()
+  return base && base !== s && catalogNames().includes(base) ? base : s
+}
 
 let toastTimer = 0
 function toast(msg) {
@@ -247,7 +253,8 @@ async function fetchModels() {
 }
 async function currentModel(force = false) {
   const saved = ls.get(LS.model)
-  if (saved && !force) return saved
+  // 之前忙線時自動換成 Lite 的，下次重新挑（Lite 只當備用）；自己在設定選的就照用
+  if (saved && !force && (!/lite/.test(saved) || ls.get(LS.pinned) === saved)) return saved
   const list = await fetchModels()
   if (!list.length) throw new ApiError('這個 API Key 找不到能看圖的 Gemini 模型。', 0)
   ls.set(LS.model, list[0])
@@ -341,7 +348,7 @@ async function generate(model, image, simple = false, refs = []) {
     objects: (parsed.objects || [])
       .filter((o) => Array.isArray(o.box_2d) && o.box_2d.length === 4 && o.label)
       .map((o) => ({
-        label: String(o.label).trim(),
+        label: cleanLabel(o.label),
         brand: String(o.brand || '').trim(),
         model: String(o.model || '').trim(),
         spec: String(o.spec || '').trim(),
@@ -387,7 +394,8 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
       }
       try {
         const r = await generate(model, image, step.simple, refs)
-        if (mi > 0) ls.set(LS.model, model) // 這個模型比較順：之後先用它
+        // 這個模型比較順：之後先用它（但不要換成 Lite：Lite 分不出相似品，只當備用）
+        if (mi > 0 && !/lite/.test(model)) ls.set(LS.model, model)
         return r
       } catch (e) {
         lastErr = e
@@ -406,6 +414,147 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
     }
   }
   throw lastErr
+}
+
+// ───────────────────────── 相似品再比對（第二輪） ─────────────────────────
+/**
+ * 第一輪是整張照片一起看，同類的小東西（三通、彎頭）常被歸成同一種。
+ * 第二輪：把同一類的框用「同一個比例」切成小圖並排給 AI 比（東西越大、小圖越大），一個一個比粗細和接口，再分組。
+ */
+const REFINE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    groups: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          ids: { type: 'ARRAY', items: { type: 'INTEGER' }, description: '這一組的物件編號' },
+          label: { type: 'STRING' },
+          brand: { type: 'STRING' },
+          model: { type: 'STRING' },
+          spec: { type: 'STRING', description: '這一組跟其他組的差別，例如 等徑・粗、異徑・側口細、4分×3分' },
+          why: { type: 'STRING', description: '一句話說這一組的特徵' },
+        },
+        required: ['ids', 'label', 'brand', 'model', 'spec', 'why'],
+      },
+    },
+  },
+  required: ['groups'],
+}
+const MAX_REFINE = 24
+
+/** 框的實際大小（像素） */
+function boxPx(photo, o) {
+  const [y1, x1, y2, x2] = o.box
+  const w = ((x2 - x1) / 1000) * photo.w
+  const h = ((y2 - y1) / 1000) * photo.h
+  return { w, h, long: Math.max(w, h), short: Math.min(w, h) }
+}
+
+/**
+ * 哪些框值得再比一次：同一個品名有 2 個以上，而且框的大小差很多（差 15% 以上＝可能是不同尺寸）；
+ * 或者有這個品名的樣品照。全部大小都一樣（例如一排同樣的過濾器）就不用多花一次。
+ */
+function refineCandidates(photo, objects, refs = []) {
+  const byLabel = new Map()
+  objects.forEach((o, i) => {
+    const k = norm(o.label)
+    if (!byLabel.has(k)) byLabel.set(k, [])
+    byLabel.get(k).push(i)
+  })
+  const out = []
+  for (const [k, idx] of byLabel) {
+    if (idx.length < 2) continue
+    const sizes = idx.map((i) => boxPx(photo, objects[i]))
+    const spread = (f) => Math.max(...sizes.map((s) => s[f])) / Math.max(1, Math.min(...sizes.map((s) => s[f])))
+    const hasSample = refs.some((r) => norm(r.label) === k)
+    if (hasSample || spread('long') > 1.15 || spread('short') > 1.15) out.push(...idx)
+  }
+  return out.slice(0, MAX_REFINE)
+}
+
+/** 用同一個比例切小圖：最大的那個長邊 512px，其他照比例縮 */
+async function sameScaleCrops(photo, objects, indices) {
+  const bmp = await createImageBitmap(photo.blob)
+  const boxes = indices.map((i) => {
+    const [y1, x1, y2, x2] = objects[i].box.map((n) => n / 1000)
+    const padX = (x2 - x1) * 0.1
+    const padY = (y2 - y1) * 0.1
+    const sx = Math.max(0, (x1 - padX) * bmp.width)
+    const sy = Math.max(0, (y1 - padY) * bmp.height)
+    const ex = Math.min(bmp.width, (x2 + padX) * bmp.width)
+    const ey = Math.min(bmp.height, (y2 + padY) * bmp.height)
+    return { sx, sy, sw: ex - sx, sh: ey - sy }
+  })
+  const scale = Math.min(2, 512 / Math.max(...boxes.map((b) => Math.max(b.sw, b.sh))))
+  const crops = []
+  for (const b of boxes) {
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(b.sw * scale))
+    canvas.height = Math.max(1, Math.round(b.sh * scale))
+    canvas.getContext('2d').drawImage(bmp, b.sx, b.sy, b.sw, b.sh, 0, 0, canvas.width, canvas.height)
+    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.9))
+    crops.push({ data: await blobToBase64(blob), w: canvas.width, h: canvas.height })
+  }
+  bmp.close?.()
+  return crops
+}
+
+/** 第二輪用最強的非 Lite 模型（Lite 看不出粗細差別） */
+async function refineModel() {
+  const list = modelCache ?? (await fetchModels().catch(() => []))
+  const saved = ls.get(LS.model)
+  if (saved && !/lite/.test(saved)) return saved
+  return list.find((m) => !/lite/.test(m)) ?? saved ?? list[0]
+}
+
+/** 把 objects 裡 indices 這些框重新分組；失敗就保留原本的結果 */
+async function refineObjects(photo, objects, indices, refs = [], onStatus = () => {}) {
+  if (indices.length < 2) return { changed: 0 }
+  const crops = await sameScaleCrops(photo, objects, indices)
+  const model = await refineModel()
+  onStatus(`用 ${model} 比對相似品（${indices.length} 個）`)
+  const sampleParts = refs.length
+    ? [
+        { text: '【店內樣品】每張只拍一個商品，名稱是正確的：' },
+        ...refs.flatMap((r, i) => [{ text: `樣品 ${i + 1}：${[r.label, r.brand, r.model, r.spec].map((v) => v || '—').join('｜')}` }, { inline_data: { mime_type: 'image/jpeg', data: r.data } }]),
+      ]
+    : []
+  const objectParts = [
+    { text: '【要比對的物件】每張小圖都是從同一張照片、用同一個比例切下來的：小圖越大，東西越大。' },
+    ...crops.flatMap((c, k) => [{ text: `物件 ${k + 1}（小圖 ${c.w}×${c.h} px）` }, { inline_data: { mime_type: 'image/jpeg', data: c.data } }]),
+  ]
+  const text = `這些物件在照片裡都被認成「${objects[indices[0]].label}」這一類。請一個一個仔細比較，再分組：
+1. 形狀：三通、彎頭、直接頭……
+2. 主管有多粗：比較小圖的大小和管口的圓有多大（小圖是同一個比例）。
+3. 每個接口是不是一樣粗：一樣粗＝等徑；有一個比較細＝異徑。
+4. 長短比例。
+完全一樣的才放同一組；只要形狀、粗細或接口不一樣，就分成不同組。每個物件編號都要出現在剛好一組裡。
+每組的 label 是品名（用店內品項清單的寫法，不要把括號裡的說明寫進去）；spec 寫出這組跟其他組的差別（例如「等徑・粗」「等徑・細」「異徑・側口細」，看得出分數就寫「4分」「4分×3分」）；brand、model 看不出來就空字串；why 用一句話說這組的特徵。
+${refs.length ? '如果某一組跟某張樣品一樣，label、brand、model、spec 就照那張樣品填，一字不差。\n' : ''}店內品項清單：
+${catalogLines().join('\n')}`
+  const body = {
+    contents: [{ role: 'user', parts: [...sampleParts, ...objectParts, { text }] }],
+    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: REFINE_SCHEMA },
+  }
+  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
+  const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, ''))
+  let changed = 0
+  let used = 0
+  for (const g of parsed.groups || []) {
+    if ((g.ids || []).some((id) => indices[id - 1] !== undefined)) used += 1
+    for (const id of g.ids || []) {
+      const idx = indices[id - 1]
+      if (idx === undefined) continue
+      const o = objects[idx]
+      const next = { label: cleanLabel(g.label) || o.label, brand: String(g.brand || '').trim(), model: String(g.model || '').trim(), spec: String(g.spec || '').trim() }
+      if (FIELDS.some((f) => (o[f] || '') !== next[f])) changed += 1
+      Object.assign(o, next, { refined: true })
+    }
+  }
+  return { changed, groups: used, model }
 }
 
 // ───────────────────────── 盤點結果：把框合併成品項 ─────────────────────────
@@ -736,6 +885,7 @@ async function editSheet(key) {
      <p class="sheet-sub">${g.manual ? '手動新增的品項' : `照片裡 ${g.boxes} 個框會一起改；只有其中幾個不一樣，請在照片上點那個框`}</p>
      ${fieldsHtml(g, sug)}
      <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="e-save">儲存</button><button class="btn danger" id="e-del">刪掉</button></div>
+     ${g.manual || g.boxes < 2 ? '' : `<button class="btn secondary block" id="e-refine" style="margin-top:10px">再比對一次：把這 ${g.boxes} 個分得更細</button><p class="footnote" style="margin:8px 2px 0">把這一列的框切成小圖並排給 AI，一個一個比粗細和接口（要網路，約 10～30 秒）。</p>`}
      ${g.manual ? '' : '<button class="btn secondary block" id="e-sample" style="margin-top:10px">儲存，並存成樣品照</button><p class="footnote" style="margin:8px 2px 0">用照片上第一個框當樣品。這一列混了不同尺寸的話，請先點照片上那一個框、再點一次，從那裡存。</p>'}`,
     (el, close) => {
       el.querySelector('#e-save').onclick = async () => {
@@ -748,6 +898,33 @@ async function editSheet(key) {
         close()
         render()
       }
+      el.querySelector('#e-refine')?.addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget
+        btn.disabled = true
+        btn.textContent = '比對中…（約 10～30 秒）'
+        try {
+          const refs = await sampleRefs()
+          // 同一張照片的框一起比（大小比較才有意義）
+          const byPhoto = new Map()
+          g.refs.forEach((r) => byPhoto.set(r.pi, [...(byPhoto.get(r.pi) || []), r.oi]))
+          let groups = 0
+          for (const [pi, ois] of byPhoto) {
+            const rr = await refineObjects(s.photos[pi], s.photos[pi].objects, ois, refs, (m) => (btn.textContent = m))
+            groups = Math.max(groups, rr.groups || 0)
+          }
+          // 原本手動改過的數量是給「一整列」的，分組後不再適用
+          if (s.counts) delete s.counts[g.key]
+          state.focus = null
+          await save()
+          close()
+          render()
+          toast(groups > 1 ? `分成 ${groups} 種了，請對照照片確認` : 'AI 比對後還是認為是同一種；可以點框個別修改，或存樣品照')
+        } catch (e) {
+          btn.disabled = false
+          btn.textContent = `再比對一次：把這 ${g.boxes} 個分得更細`
+          toast(e.message || '比對失敗，請再試一次')
+        }
+      })
       el.querySelector('#e-sample')?.addEventListener('click', async () => {
         const v = readFields(el)
         if (!v.label) return toast('品名不能空白')
@@ -942,20 +1119,27 @@ async function runAnalysis(indices) {
     if (el) el.textContent = `已經 ${Math.round((Date.now() - state.progress.started) / 1000)} 秒`
   }, 500)
   const refs = await sampleRefs()
+  const status = (msg) => {
+    const el = document.getElementById('ai-status')
+    if (el) el.textContent = msg + (refs.length ? `（附 ${refs.length} 張樣品照）` : '')
+  }
   for (const i of indices) {
     if (state.cancel) break
     const photo = s.photos[i]
     try {
-      const r = await analyze(
-        photo,
-        (msg) => {
-          const el = document.getElementById('ai-status')
-          if (el) el.textContent = msg + (refs.length ? `（附 ${refs.length} 張樣品照）` : '')
-        },
-        refs,
-      )
+      const r = await analyze(photo, status, refs)
       Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '' })
       s.model = r.model
+      // 第二輪：同一類、但大小不一樣的框，切小圖並排再比一次
+      const cand = refineCandidates(photo, photo.objects, refs)
+      if (cand.length && !state.cancel) {
+        try {
+          const rr = await refineObjects(photo, photo.objects, cand, refs, status)
+          if (rr.model) s.model = rr.model === r.model ? `${r.model}（含相似品比對）` : `${r.model} ＋ ${rr.model} 比對`
+        } catch {
+          photo.note = [photo.note, '相似品再比對沒有成功，先保留第一輪的結果；可以點品項的 ✎ →「再比對一次」。'].filter(Boolean).join(' ')
+        }
+      }
     } catch (e) {
       Object.assign(photo, { status: 'error', error: e.message || String(e), errorDetail: e.detail || '' })
     }
@@ -1104,8 +1288,10 @@ $app.addEventListener('click', async (e) => {
         lines.push('❌ ' + esc(err.message) + (err.detail ? '<br><span class="muted">' + esc(err.detail) + '</span>' : ''))
       }
       return show()
-    }    case 'use-model':
+    }
+    case 'use-model':
       ls.set(LS.model, d.model)
+      ls.set(LS.pinned, d.model) // 自己選的：之後照用，不會被自動換掉
       toast(`改用 ${d.model}`)
       return render()
     case 'save-catalog':
