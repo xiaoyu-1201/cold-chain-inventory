@@ -8,7 +8,7 @@ const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '1.3（10/2 晚）'
+const VERSION = '1.4（10/2 夜・樣品照）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -35,7 +35,7 @@ const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
 風扇馬達
 風扇調速器
 鰭片清洗劑
-銅管接頭（彎頭、三通、直接頭）
+銅管接頭（彎頭、三通、直接頭；等徑、異徑，例如 4分×3分）
 喇叭口螺帽`
 
 /** 每一種品項一個顏色（框和清單同色） */
@@ -79,32 +79,44 @@ function toast(msg) {
 }
 
 // ───────────────────────── 存檔（IndexedDB，照片也存在手機） ─────────────────────────
-const db = (() => {
+/** sessions＝盤點紀錄；samples＝樣品照（第 2 版新增） */
+const idb = (() => {
   let p
   const open = () =>
     (p ??= new Promise((resolve, reject) => {
-      const req = indexedDB.open('inventory', 1)
-      req.onupgradeneeded = () => req.result.createObjectStore('sessions', { keyPath: 'id' })
-      req.onsuccess = () => resolve(req.result)
+      const req = indexedDB.open('inventory', 2)
+      req.onupgradeneeded = () => {
+        const d = req.result
+        if (!d.objectStoreNames.contains('sessions')) d.createObjectStore('sessions', { keyPath: 'id' })
+        if (!d.objectStoreNames.contains('samples')) d.createObjectStore('samples', { keyPath: 'id' })
+      }
+      req.onblocked = () => toast('App 更新了：請關掉其他開著盤點 App 的分頁，再重新整理')
+      req.onsuccess = () => {
+        // 別的分頁要升級資料庫時，這邊先關掉，不要卡住它
+        req.result.onversionchange = () => req.result.close()
+        resolve(req.result)
+      }
       req.onerror = () => reject(req.error)
     }))
-  const tx = async (mode, fn) => {
+  const tx = async (store, mode, fn) => {
     const d = await open()
     return new Promise((resolve, reject) => {
-      const t = d.transaction('sessions', mode)
-      const r = fn(t.objectStore('sessions'))
+      const t = d.transaction(store, mode)
+      const r = fn(t.objectStore(store))
       t.oncomplete = () => resolve(r?.result)
       t.onerror = () => reject(t.error)
     })
   }
-  return {
-    all: async () => ((await tx('readonly', (s) => s.getAll())) ?? []).sort((a, b) => b.createdAt - a.createdAt),
-    get: (id) => tx('readonly', (s) => s.get(id)),
-    put: (session) => tx('readwrite', (s) => s.put(session)),
-    del: (id) => tx('readwrite', (s) => s.delete(id)),
-    clear: () => tx('readwrite', (s) => s.clear()),
-  }
+  const storeOf = (store) => ({
+    all: async () => ((await tx(store, 'readonly', (s) => s.getAll())) ?? []).sort((a, b) => b.createdAt - a.createdAt),
+    get: (id) => tx(store, 'readonly', (s) => s.get(id)),
+    put: (item) => tx(store, 'readwrite', (s) => s.put(item)),
+    del: (id) => tx(store, 'readwrite', (s) => s.delete(id)),
+    clear: () => tx(store, 'readwrite', (s) => s.clear()),
+  })
+  return { sessions: storeOf('sessions'), samples: storeOf('samples') }
 })()
+const db = idb.sessions
 
 // ───────────────────────── 照片：縮圖 ─────────────────────────
 async function prepareImage(file) {
@@ -128,6 +140,37 @@ const blobToBase64 = (blob) =>
     r.onerror = () => reject(r.error)
     r.readAsDataURL(blob)
   })
+/** 樣品照縮到長邊 512px：AI 看得出形狀和粗細就好，送多張也不會太慢 */
+const SAMPLE_SIDE = 512
+async function drawToBlob(bmp, sx, sy, sw, sh, maxSide) {
+  const scale = Math.min(1, maxSide / Math.max(sw, sh))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(sw * scale))
+  canvas.height = Math.max(1, Math.round(sh * scale))
+  canvas.getContext('2d').drawImage(bmp, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+  return new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.85))
+}
+/** 從盤點照片切下一個框（四周多留一點邊），當樣品照 */
+async function cropBox(photo, box) {
+  const bmp = await createImageBitmap(photo.blob)
+  const [y1, x1, y2, x2] = box.map((n) => n / 1000)
+  const padX = (x2 - x1) * 0.08
+  const padY = (y2 - y1) * 0.08
+  const sx = Math.max(0, (x1 - padX) * bmp.width)
+  const sy = Math.max(0, (y1 - padY) * bmp.height)
+  const ex = Math.min(bmp.width, (x2 + padX) * bmp.width)
+  const ey = Math.min(bmp.height, (y2 + padY) * bmp.height)
+  const blob = await drawToBlob(bmp, sx, sy, ex - sx, ey - sy, SAMPLE_SIDE)
+  bmp.close?.()
+  return blob
+}
+/** 直接拍一張樣品照（整張縮小） */
+async function sampleFromFile(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => createImageBitmap(file))
+  const blob = await drawToBlob(bmp, 0, 0, bmp.width, bmp.height, SAMPLE_SIDE)
+  bmp.close?.()
+  return blob
+}
 const urls = new Map()
 const urlOf = (photo) => {
   if (!urls.has(photo.id)) urls.set(photo.id, URL.createObjectURL(photo.blob))
@@ -179,7 +222,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const retryable = (e) => e instanceof ApiError && [429, 500, 502, 503, 504].includes(e.status)
 
 /** 自動挑模型：可用、會看圖、名字有 flash；穩定版優先、版本新的優先、lite 排後面 */
-function rankModels(models) {
+function rankModels(models, kind = /flash/) {
   const score = (name) => {
     const v = parseFloat((name.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0')
     const unstable = /preview|exp/.test(name) ? 1 : 0
@@ -190,13 +233,16 @@ function rankModels(models) {
   return models
     .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
     .map((m) => m.name.replace(/^models\//, ''))
-    .filter((n) => /flash/.test(n) && !/image|tts|audio|live|embedding|thinking|8b/.test(n))
+    .filter((n) => kind.test(n) && !/image|tts|audio|live|embedding|thinking|8b|computer|robotics/.test(n))
     .sort((a, b) => score(b) - score(a))
 }
 let modelCache = null
+/** Pro：看得比較細（相似品分得比較開），但比較慢、免費額度比 Flash 少很多；只在設定裡手動選 */
+let proCache = []
 async function fetchModels() {
   const data = await call('models?pageSize=200')
   modelCache = rankModels(data.models || [])
+  proCache = rankModels(data.models || [], /-pro/)
   return modelCache
 }
 async function currentModel(force = false) {
@@ -231,7 +277,7 @@ const SCHEMA = {
   required: ['objects', 'note'],
 }
 
-function prompt() {
+function prompt(sampleCount = 0) {
   return `你是冷凍空調材料行的盤點助手。請找出照片裡每一個「商品」，每一個各給一個框。
 規則：
 1. 名稱優先用下面「店內品項清單」的寫法；清單沒有就用最具體的中文名稱（例如「乾燥過濾器」，不要只寫「零件」）。
@@ -239,7 +285,14 @@ function prompt() {
 3. 同一種東西有幾個就給幾個框，不要合併成一個；品牌、型號或尺寸不同就算不同的東西。被擋住一半以上的也要算，但 confidence 給低一點。
 4. 貨架、標價牌、手、紙箱外的雜物不算商品。
 5. box_2d 用 [ymin, xmin, ymax, xmax]，是相對整張照片的 0～1000。
-店內品項清單：
+6. 外觀很像、只差尺寸或形狀的同類商品（例如銅管三通、彎頭、接頭），要逐個比較：管子粗細、三個接口是不是一樣粗（等徑）還是有一個比較細（異徑）、長短。不一樣的就分成不同品項，spec 寫出差別（例如「等徑・粗」「等徑・細」「異徑・側口細」）；看得出分數（2分、3分、4分…）就寫分數。不要把不同尺寸全部歸成同一種。
+${
+  sampleCount
+    ? `7. 前面附了 ${sampleCount} 張「店內樣品」照片，每張只拍一個商品，名稱是正確的。【要盤點的照片】裡的商品如果跟某張樣品一樣（形狀、粗細比例、接口大小都一樣），label、brand、model、spec 就照那張樣品填，一字不差；跟每張樣品都不像，才照一般規則寫。
+8. box_2d 只標【要盤點的照片】裡的位置；樣品照不要框、不要算數量。
+`
+    : ''
+}店內品項清單：
 ${catalogLines().join('\n')}`
 }
 
@@ -252,9 +305,17 @@ const JSON_HINT = `
  * 用某個模型送一次辨識。
  * simple＝簡化請求（不帶 responseSchema、不帶思考設定）：有些時候完整設定會讓 Google 一直回 500，簡化後就過了。
  */
-async function generate(model, image, simple = false) {
+async function generate(model, image, simple = false, refs = []) {
+  // 有樣品照：先放樣品（每張前面寫正確名稱），最後才放要盤點的照片，緊接著說明
+  const sampleParts = refs.length
+    ? [
+        { text: '【店內樣品】每張只拍一個商品，名稱是正確的：' },
+        ...refs.flatMap((r, i) => [{ text: `樣品 ${i + 1}：${[r.label, r.brand, r.model, r.spec].map((v) => v || '—').join('｜')}` }, { inline_data: { mime_type: 'image/jpeg', data: r.data } }]),
+        { text: '【要盤點的照片】' },
+      ]
+    : []
   const body = {
-    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: image } }, { text: prompt() + (simple ? JSON_HINT : '') }] }],
+    contents: [{ role: 'user', parts: [...sampleParts, { inline_data: { mime_type: 'image/jpeg', data: image } }, { text: prompt(refs.length) + (simple ? JSON_HINT : '') }] }],
     generationConfig: simple
       ? { temperature: 0, responseMimeType: 'application/json' }
       : {
@@ -299,7 +360,14 @@ async function generate(model, image, simple = false) {
  * 3. 模型下架（404）→ 換下一個並重新挑預設模型。
  * onStatus 用來在畫面上顯示目前在做什麼。
  */
-async function analyze(photo, onStatus = () => {}) {
+/** 一次最多送幾張樣品照（越多越慢；新存的優先） */
+const MAX_SAMPLES = 30
+async function sampleRefs() {
+  const list = (await idb.samples.all().catch(() => [])).slice(0, MAX_SAMPLES)
+  return Promise.all(list.map(async (s) => ({ label: s.label, brand: s.brand, model: s.model, spec: s.spec, data: await blobToBase64(s.blob) })))
+}
+
+async function analyze(photo, onStatus = () => {}, refs = []) {
   const image = await blobToBase64(photo.blob)
   const first = await currentModel()
   const list = modelCache ?? (await fetchModels().catch(() => [first]))
@@ -318,7 +386,7 @@ async function analyze(photo, onStatus = () => {}) {
         await sleep(lastErr?.retryAfter ? Math.min(lastErr.retryAfter * 1000, 15000) : step.wait)
       }
       try {
-        const r = await generate(model, image, step.simple)
+        const r = await generate(model, image, step.simple, refs)
         if (mi > 0) ls.set(LS.model, model) // 這個模型比較順：之後先用它
         return r
       } catch (e) {
@@ -476,6 +544,7 @@ function viewCapture() {
       <div class="row"><span>① 一次拍一層貨架，正面拍，不要太斜</span></div>
       <div class="row"><span>② 光線夠、不要反光；標籤朝外最好</span></div>
       <div class="row"><span>③ 疊在一起的、被擋住的，結果出來再用 ＋／－ 修正</span></div>
+      <div class="row"><span>④ 長得很像、只差尺寸的（例如三通），每一種先存一張「樣品照」，AI 就會照著分；或同一種放一起拍</span></div>
     </div>
   </main>
   <div class="toolbar"><div class="inner"><button class="btn" data-action="analyze" ${s.photos.length ? '' : 'disabled'}>開始辨識${s.photos.length ? `（${s.photos.length} 張）` : ''}</button></div></div>`
@@ -553,9 +622,10 @@ function viewReview() {
   <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn" data-go="home">完成</button></div></div>`
 }
 
-function viewSettings() {
+async function viewSettings() {
   const key = ls.get(LS.key)
   const model = ls.get(LS.model)
+  const samples = await idb.samples.all().catch(() => [])
   return `
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}</div>
@@ -567,12 +637,25 @@ function viewSettings() {
       <p class="footnote" style="margin:0">沒有 Key？到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style="color:var(--tint)">Google AI Studio</a> 免費建立。Key 只存在這支手機，照片只會送到 Google Gemini 分析。</p>
     </div>
     <p class="section-title">辨識模型</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model || '自動挑選')}</span><br><span class="meta">自動挑能看圖、最新又快的 Flash；被下架會自動換</span></span><button class="btn small secondary" data-action="pick-model">重新挑選</button></div></div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model || '自動挑選')}</span><br><span class="meta">自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro</span></span><button class="btn small secondary" data-action="pick-model">重新挑選</button></div></div>
     <div id="models"></div>
     <p class="section-title">店內品項清單</p>
     <textarea class="field" id="catalog" spellcheck="false">${esc(catalogLines().join('\n'))}</textarea>
     <p class="footnote">一行一種品項，括號裡寫規格或別名。AI 會照這裡的名稱寫，修正時也會跳出來給你選。</p>
     <div class="row-actions" style="margin-top:10px"><button class="btn small" data-action="save-catalog">儲存清單</button><button class="btn small secondary" data-action="reset-catalog">恢復預設</button></div>
+    <p class="section-title">樣品照（${samples.length}）</p>
+    ${
+      samples.length
+        ? `<div class="group">${samples
+            .map(
+              (s, i) =>
+                `<div class="row"><img src="${sampleUrl(s)}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:contain;background:var(--card-2)"><span class="grow"><span class="title">${esc(s.label)}</span><br><span class="meta">${esc(detailOf(s) || '沒有填品牌、型號、尺寸')}${i >= MAX_SAMPLES ? '・超過 30 張，這張不會送' : ''}</span></span><button class="btn small danger" data-action="del-sample" data-id="${esc(s.id)}">刪除</button></div>`,
+            )
+            .join('')}</div>`
+        : ''
+    }
+    <div class="row-actions" style="margin-top:10px"><label class="btn small secondary">📷 拍一張樣品<input type="file" accept="image/*" capture="environment" id="sample-cam" class="sr-only"></label></div>
+    <p class="footnote">長得很像、只差尺寸的商品（例如不同分數的三通），每一種存一張樣品照，名稱和尺寸寫清楚。辨識時會一起送給 AI 比對（最多 30 張，新的優先）。<br>最快的存法：盤點結果裡先點那個框、再點一次 →「儲存，並存成樣品照」。</p>
     <p class="section-title">連線測試</p>
     <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
     <p class="footnote">辨識一直失敗時按這個，把結果截圖給我看。</p>
@@ -584,7 +667,7 @@ function viewSettings() {
 }
 
 async function render() {
-  const html = state.view === 'home' ? await viewHome() : state.view === 'capture' ? viewCapture() : state.view === 'analyzing' ? viewAnalyzing() : state.view === 'review' ? viewReview() : viewSettings()
+  const html = state.view === 'home' ? await viewHome() : state.view === 'capture' ? viewCapture() : state.view === 'analyzing' ? viewAnalyzing() : state.view === 'review' ? viewReview() : await viewSettings()
   $app.innerHTML = html
   bindInputs()
 }
@@ -652,7 +735,8 @@ async function editSheet(key) {
     `<h2 class="sheet-title">修改品項</h2>
      <p class="sheet-sub">${g.manual ? '手動新增的品項' : `照片裡 ${g.boxes} 個框會一起改；只有其中幾個不一樣，請在照片上點那個框`}</p>
      ${fieldsHtml(g, sug)}
-     <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="e-save">儲存</button><button class="btn danger" id="e-del">刪掉</button></div>`,
+     <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="e-save">儲存</button><button class="btn danger" id="e-del">刪掉</button></div>
+     ${g.manual ? '' : '<button class="btn secondary block" id="e-sample" style="margin-top:10px">儲存，並存成樣品照</button><p class="footnote" style="margin:8px 2px 0">用照片上第一個框當樣品。這一列混了不同尺寸的話，請先點照片上那一個框、再點一次，從那裡存。</p>'}`,
     (el, close) => {
       el.querySelector('#e-save').onclick = async () => {
         const v = readFields(el)
@@ -664,6 +748,18 @@ async function editSheet(key) {
         close()
         render()
       }
+      el.querySelector('#e-sample')?.addEventListener('click', async () => {
+        const v = readFields(el)
+        if (!v.label) return toast('品名不能空白')
+        const first = g.refs[0]
+        const box = s.photos[first.pi].objects[first.oi].box
+        moveObjects(s, g.refs, v)
+        await saveSample(v, await cropBox(s.photos[first.pi], box))
+        state.focus = null
+        await save()
+        close()
+        render()
+      })
       el.querySelector('#e-del').onclick = async () => {
         if (!confirm(`刪掉「${g.label}」${g.manual ? '' : `（${g.boxes} 個框）`}？`)) return
         if (g.manual) s.manual = s.manual.filter((m) => m !== g.manual)
@@ -688,12 +784,24 @@ async function objectSheet(pi, oi) {
     `<h2 class="sheet-title">修改這一個</h2>
      <p class="sheet-sub">只改照片上這一個框；改完會自動歸到對的品項、數量也會跟著變。</p>
      ${fieldsHtml(o, sug)}
-     <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="o-save">儲存</button><button class="btn danger" id="o-del">這不是商品，刪掉這個框</button></div>`,
+     <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="o-save">儲存</button><button class="btn danger" id="o-del">這不是商品，刪掉這個框</button></div>
+     <button class="btn secondary block" id="o-sample" style="margin-top:10px">儲存，並存成樣品照</button>
+     <p class="footnote" style="margin:8px 2px 0">樣品照：AI 以後看到一樣的東西，會照這裡的名稱和尺寸寫。長得很像、只差尺寸的商品，每一種存一張。</p>`,
     (el, close) => {
       el.querySelector('#o-save').onclick = async () => {
         const v = readFields(el)
         if (!v.label) return toast('品名不能空白')
         moveObjects(s, [{ pi, oi }], v)
+        state.focus = keyOf(o)
+        await save()
+        close()
+        render()
+      }
+      el.querySelector('#o-sample').onclick = async () => {
+        const v = readFields(el)
+        if (!v.label) return toast('品名不能空白')
+        moveObjects(s, [{ pi, oi }], v)
+        await saveSample(v, await cropBox(s.photos[pi], o.box))
         state.focus = keyOf(o)
         await save()
         close()
@@ -706,6 +814,44 @@ async function objectSheet(pi, oi) {
         close()
         render()
         toast('已刪掉這個框')
+      }
+    },
+  )
+}
+
+// ───────────────────────── 樣品照 ─────────────────────────
+async function saveSample(fields, blob) {
+  await idb.samples.put({ id: uid(), ...fields, blob, createdAt: Date.now() })
+  toast('已存成樣品照：下次辨識會拿來比對')
+}
+const sampleUrls = new Map()
+const sampleUrl = (s) => {
+  if (!sampleUrls.has(s.id)) sampleUrls.set(s.id, URL.createObjectURL(s.blob))
+  return sampleUrls.get(s.id)
+}
+/** 直接拍一張樣品照，填名稱後存起來 */
+async function newSampleSheet(file) {
+  let blob
+  try {
+    blob = await sampleFromFile(file)
+  } catch {
+    return toast('照片讀不進來，換一張試試')
+  }
+  const sug = await suggestions()
+  const url = URL.createObjectURL(blob)
+  sheet(
+    `<h2 class="sheet-title">新增樣品照</h2>
+     <img src="${url}" alt="樣品照" style="display:block;max-height:180px;margin:0 auto 12px;border-radius:12px">
+     ${fieldsHtml({}, sug)}
+     <button class="btn block" id="s-save" style="margin-top:16px">存成樣品照</button>`,
+    (el, close) => {
+      el.querySelector('#s-save').onclick = async () => {
+        const v = readFields(el)
+        if (!v.label) return toast('請先填品名')
+        await saveSample(v, blob)
+        URL.revokeObjectURL(url)
+        close()
+        render()
       }
     },
   )
@@ -795,14 +941,19 @@ async function runAnalysis(indices) {
     const el = document.getElementById('elapsed')
     if (el) el.textContent = `已經 ${Math.round((Date.now() - state.progress.started) / 1000)} 秒`
   }, 500)
+  const refs = await sampleRefs()
   for (const i of indices) {
     if (state.cancel) break
     const photo = s.photos[i]
     try {
-      const r = await analyze(photo, (msg) => {
-        const el = document.getElementById('ai-status')
-        if (el) el.textContent = msg
-      })
+      const r = await analyze(
+        photo,
+        (msg) => {
+          const el = document.getElementById('ai-status')
+          if (el) el.textContent = msg + (refs.length ? `（附 ${refs.length} 張樣品照）` : '')
+        },
+        refs,
+      )
       Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '' })
       s.model = r.model
     } catch (e) {
@@ -923,10 +1074,12 @@ $app.addEventListener('click', async (e) => {
     case 'pick-model':
       try {
         const list = await fetchModels()
-        document.getElementById('models').innerHTML = `<div class="group" style="margin-top:10px">${list
-          .slice(0, 8)
-          .map((m) => `<button class="row" data-action="use-model" data-model="${esc(m)}"><span class="grow">${esc(m)}</span>${m === ls.get(LS.model) ? '✓' : ''}</button>`)
-          .join('')}</div><p class="footnote">排越前面越推薦（新、穩定、快）。</p>`
+        const rows = (arr) => arr.map((m) => `<button class="row" data-action="use-model" data-model="${esc(m)}"><span class="grow">${esc(m)}</span>${m === ls.get(LS.model) ? '✓' : ''}</button>`).join('')
+        document.getElementById('models').innerHTML = `<p class="section-title">快速（Flash）</p><div class="group">${rows(list.slice(0, 6))}</div><p class="footnote">排越前面越推薦（新、穩定、快）。平常用這個。</p>${
+          proCache.length
+            ? `<p class="section-title">精細（Pro）</p><div class="group">${rows(proCache.slice(0, 3))}</div><p class="footnote">看得比較細，相似品比較分得開；但每張要等比較久，免費額度也比 Flash 少很多。Flash 分不出來、又不想存樣品照時再試。</p>`
+            : ''
+        }`
       } catch (err) {
         toast(err.message)
       }
@@ -962,6 +1115,11 @@ $app.addEventListener('click', async (e) => {
       ls.set(LS.catalog, '')
       toast('已恢復預設清單')
       return render()
+    case 'del-sample':
+      if (!confirm('刪掉這張樣品照？')) return
+      await idb.samples.del(d.id)
+      toast('已刪掉樣品照')
+      return render()
     case 'clear-all':
       if (!confirm('確定刪除全部盤點紀錄？刪了救不回來。')) return
       await db.clear()
@@ -972,6 +1130,7 @@ $app.addEventListener('click', async (e) => {
 function bindInputs() {
   document.getElementById('cam')?.addEventListener('change', (e) => addFiles([...e.target.files]))
   document.getElementById('pick')?.addEventListener('change', (e) => addFiles([...e.target.files]))
+  document.getElementById('sample-cam')?.addEventListener('change', (e) => e.target.files[0] && newSampleSheet(e.target.files[0]))
   document.getElementById('place')?.addEventListener('input', (e) => (state.session.place = e.target.value))
   document.querySelectorAll('[data-count]').forEach((input) =>
     input.addEventListener('change', async (e) => {
