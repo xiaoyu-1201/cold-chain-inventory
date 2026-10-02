@@ -8,7 +8,7 @@ const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '1.7（10/2 夜・自動更新）'
+const VERSION = '1.8（10/2 夜・點框直接分類）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -452,6 +452,7 @@ async function attemptChain(models, image, refs, onStatus, signal) {
       { simple: true, thinking: false, wait: 1500 },
     ]
     for (const [pi, step] of plan.entries()) {
+      let t0 = Date.now()
       if (step.wait) {
         onStatus(`Google 忙線，${step.wait / 1000} 秒後再試（${model}）`)
         await sleep(lastErr?.retryAfter ? Math.min(lastErr.retryAfter * 1000, 15000) : step.wait)
@@ -459,13 +460,16 @@ async function attemptChain(models, image, refs, onStatus, signal) {
       try {
         // 第二次：上一次是 400（不接受思考設定）才拿掉；網路斷一下就照原本的快速設定再送
         const think = pi === 1 ? lastErr?.status !== 400 : step.thinking
+        t0 = Date.now()
         const r = await generate(model, image, step.simple, refs, think, signal)
+        onStatus(`${model} 完成（${Math.round((Date.now() - t0) / 1000)} 秒，找到 ${r.objects.length} 個）`)
         // 這個模型比較順：之後先用它（但不要換成 Lite：Lite 分不出相似品，只當備用）
         if (mi > 0 && !/lite/.test(model)) ls.set(LS.model, model)
         return r
       } catch (e) {
         lastErr = e
         if (state.cancel || signal?.aborted) throw e
+        onStatus(`${model} 沒成功：${e.detail || e.message}（${Math.round((Date.now() - t0) / 1000)} 秒）`)
         if (!(e instanceof ApiError)) throw e
         if (e.status === 404) {
           if (mi === 0) ls.set(LS.model, '')
@@ -562,7 +566,9 @@ async function sameScaleCrops(photo, objects, indices) {
     const ey = Math.min(bmp.height, (y2 + padY) * bmp.height)
     return { sx, sy, sw: ex - sx, sh: ey - sy }
   })
-  const scale = Math.min(2, 384 / Math.max(...boxes.map((b) => Math.max(b.sw, b.sh))))
+  // 物件很多時小圖再小一點（送得快）；還是同一個比例
+  const side = indices.length > 12 ? 256 : 384
+  const scale = Math.min(2, side / Math.max(...boxes.map((b) => Math.max(b.sw, b.sh))))
   const crops = []
   for (const b of boxes) {
     const canvas = document.createElement('canvas')
@@ -609,24 +615,35 @@ async function refineObjects(photo, objects, indices, refs = [], onStatus = () =
 每組的 label 是品名（用店內品項清單的寫法，不要把括號裡的說明寫進去）；spec 寫出這組跟其他組的差別（例如「等徑・粗」「等徑・細」「異徑・側口細」，看得出分數就寫「4分」「4分×3分」）；brand、model 看不出來就空字串；why 用一句話說這組的特徵。
 ${refs.length ? '如果某一組跟某張樣品一樣，label、brand、model、spec 就照那張樣品填，一字不差。\n' : ''}店內品項清單：
 ${catalogLines().join('\n')}`
-  const send = (withThinking) => {
-    const think = withThinking ? thinkingFor(model, 'refine') : null
+  // 物件越多，給 AI 的時間越多（背景在跑，不會卡住畫面）
+  const timeout = Math.min(60000, TIMEOUT.refine + indices.length * 1000)
+  const send = (think) => {
     const body = {
       contents: [{ role: 'user', parts: [...sampleParts, ...objectParts, { text }] }],
       generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: REFINE_SCHEMA, ...(think ? { thinkingConfig: think } : {}) },
     }
-    return call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, TIMEOUT.refine)
+    return call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeout)
   }
+  const t0 = Date.now()
   let data
   try {
-    data = await send(true)
+    data = await send(thinkingFor(model, 'refine'))
   } catch (e) {
-    // 不接受思考設定（400）或網路斷一下：拿掉思考設定再送一次
-    if (!(e instanceof ApiError) || ![0, 400].includes(e.status)) throw e
-    data = await send(false)
+    if (!(e instanceof ApiError)) throw e
+    // 等太久或網路斷：思考再調少一點；不接受思考設定（400）：拿掉再送；其他錯誤不重試
+    const retry = [0, 408].includes(e.status) && /gemini-[3-9]/.test(model) ? { thinkingLevel: 'minimal' } : [0, 400, 408].includes(e.status) ? null : undefined
+    if (retry === undefined) throw e
+    onStatus(`比對第一次沒成功（${e.detail || e.status}），再試一次`)
+    data = await send(retry)
   }
   const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
-  const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, ''))
+  let parsed
+  try {
+    parsed = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, ''))
+  } catch {
+    throw new ApiError('比對結果格式壞掉', 0, `bad json: ${raw.slice(0, 80) || data?.candidates?.[0]?.finishReason || 'empty'}`)
+  }
+  onStatus(`${model} 比對完成（${Math.round((Date.now() - t0) / 1000)} 秒）`)
   let changed = 0
   let used = 0
   for (const g of parsed.groups || []) {
@@ -713,11 +730,28 @@ function removeObjects(session, refs) {
 }
 const totalQty = (session) => groupsOf(session).reduce((n, g) => n + (Number(g.count) || 0), 0)
 
+/**
+ * 首頁每一筆的標題：盤了什麼、幾件（重點），不是位置。
+ * 例：「銅管接頭・三通 ×23」「銅管接頭 4 種，共 8 件」「乾燥過濾器、視液鏡等 5 種，共 30 件」
+ */
+function summaryOf(session) {
+  const groups = groupsOf(session).filter((g) => Number(g.count) > 0)
+  if (!groups.length) return '沒有找到商品'
+  const total = totalQty(session)
+  if (groups.length === 1) {
+    const g = groups[0]
+    return `${g.label}${g.spec ? `・${g.spec}` : ''} ×${total}`
+  }
+  const labels = [...new Set(groups.map((g) => g.label))]
+  if (labels.length === 1) return `${labels[0]} ${groups.length} 種，共 ${total} 件`
+  return `${labels.slice(0, 2).join('、')}${labels.length > 2 ? ' 等' : ''} ${groups.length} 種，共 ${total} 件`
+}
+
 // ───────────────────────── 畫面狀態 ─────────────────────────
-const state = { view: 'home', session: null, photoIndex: 0, focus: null, busy: false, cancel: false, progress: null }
+const state = { view: 'home', session: null, photoIndex: 0, focus: null, focusObj: null, busy: false, cancel: false, progress: null, refining: null }
 
 function go(view, extra = {}) {
-  Object.assign(state, { view, focus: null }, extra)
+  Object.assign(state, { view, focus: null, focusObj: null }, extra)
   render()
   window.scrollTo({ top: 0 })
 }
@@ -747,8 +781,9 @@ async function viewHome() {
       sessions.length
         ? `<div class="group">${sessions
             .map((s) => {
-              const n = groupsOf(s).length
-              return `<button class="row" data-open="${s.id}"><img src="${s.photos[0] ? urlOf(s.photos[0]) : ''}" alt="" style="width:48px;height:48px;border-radius:10px;object-fit:cover;background:var(--card-2)"><span class="grow"><span class="title">${esc(s.place || '未命名位置')}</span><br><span class="meta">${fmtTime(s.createdAt)}・${s.photos.length} 張照片・${n} 種、共 ${totalQty(s)} 件</span></span>${chev}</button>`
+              const failed = s.photos.length && s.photos.every((p) => p.status !== 'done')
+              const meta = [fmtTime(s.createdAt), s.place, s.photos.length > 1 ? `${s.photos.length} 張照片` : ''].filter(Boolean).join('・')
+              return `<button class="row" data-open="${s.id}"><img src="${s.photos[0] ? urlOf(s.photos[0]) : ''}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)"><span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>${chev}</button>`
             })
             .join('')}</div>`
         : `<div class="empty"><div class="big">📦</div><p>還沒有盤點紀錄。<br>按下面「新盤點」，拍一層貨架試試看。</p></div>`
@@ -763,7 +798,7 @@ function viewCapture() {
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}</div>
     <h1 class="large-title">新盤點</h1>
-    <div class="group"><label class="row"><span style="width:56px" class="muted">位置</span><input class="inline" id="place" placeholder="例：A 貨架第 2 層" value="${esc(s.place)}" autocomplete="off"></label></div>
+    <div class="group"><label class="row"><span style="width:96px" class="muted">位置（選填）</span><input class="inline" id="place" placeholder="例：A 貨架第 2 層" value="${esc(s.place)}" autocomplete="off"></label></div>
     <p class="section-title">照片（${s.photos.length}）</p>
     ${
       s.photos.length
@@ -811,7 +846,7 @@ function viewReview() {
           const ref = colorOfRef.get(`${state.photoIndex}:${oi}`)
           if (!ref) return ''
           const [y1, x1, y2, x2] = o.box
-          const on = state.focus === ref.key
+          const on = state.focusObj ? state.focusObj === o : state.focus === ref.key
           return `<div class="box ${on ? 'on' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}" data-obj="${state.photoIndex}:${oi}"><span class="tag">${ref.gi + 1}</span></div>`
         })
         .join('')
@@ -826,13 +861,16 @@ function viewReview() {
     ${errors ? `<div class="stack">${errors}</div>` : ''}
     ${
       photo
-        ? `<div class="photo-wrap ${state.focus ? 'focus' : ''}" data-photo><img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">${boxes}</div>
+        ? `<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''}" data-photo><img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">${boxes}</div>
            ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張"><img src="${urlOf(p)}" alt=""></button>`).join('')}</div>` : ''}
-           <p class="footnote">${state.focus ? '再點一次框，可以單獨修改那一個（例如尺寸不一樣）。' : '點框或點清單，對照是哪一個；數量不對就按 ＋／－，名稱不對就點 ✎。'}</p>`
+           <p class="footnote">點照片上的框：直接改成別的種類，改完自動跳下一個。點下面的清單：看那一種在哪裡；數量不對按 ＋／－。</p>`
         : ''
     }
     ${state.refining && state.refining.session === s.id ? `<div class="hint-card" role="status" style="margin-top:12px"><b>正在比對相似品…</b>（${state.refining.done}/${state.refining.total} 張）好了會自動更新，可以先看結果。</div>` : ''}
     ${notes}
+    ${s.photos
+      .map((p, i) => (p.trace?.length ? `<details class="trace"><summary>辨識過程${s.photos.length > 1 ? `（第 ${i + 1} 張）` : ''}：花了多久、用哪個模型</summary>${p.trace.map((l) => `<div>${esc(l)}</div>`).join('')}</details>` : ''))
+      .join('')}
     <p class="section-title">品項（${groups.length}）</p>
     ${
       groups.length
@@ -911,7 +949,8 @@ async function render() {
 }
 
 // ───────────────────────── 底部面板（Sheet）：點旁邊暗處或按 Esc 就關 ─────────────────────────
-function sheet(html, onMount) {
+/** onDismiss：使用者點旁邊暗處或按 Esc 關掉時才呼叫（程式自己 close() 不會） */
+function sheet(html, onMount, onDismiss) {
   const back = document.createElement('div')
   back.className = 'sheet-backdrop'
   back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div class="grabber"></div>${html}</div>`
@@ -919,8 +958,12 @@ function sheet(html, onMount) {
     back.remove()
     document.removeEventListener('keydown', onKey)
   }
-  const onKey = (e) => e.key === 'Escape' && close()
-  back.addEventListener('click', (e) => e.target === back && close())
+  const dismiss = () => {
+    close()
+    onDismiss?.()
+  }
+  const onKey = (e) => e.key === 'Escape' && dismiss()
+  back.addEventListener('click', (e) => e.target === back && dismiss())
   document.addEventListener('keydown', onKey)
   document.body.appendChild(back)
   onMount?.(back.querySelector('.sheet'), close)
@@ -1040,6 +1083,133 @@ async function editSheet(key) {
   )
 }
 
+/**
+ * 點照片上的框：「這一個是哪一種？」按一下就改，自動跳到下一個框；一路點下去就分完。
+ * 順序是由上到下、由左到右；也可以按 ‹ › 自己跳。
+ */
+function quickSheet(pi, startOi) {
+  const s = state.session
+  const photo = s.photos[pi]
+  if (!photo?.objects[startOi]) return
+  const center = (o) => ({ y: (o.box[0] + o.box[2]) / 2, x: (o.box[1] + o.box[3]) / 2 })
+  // 用物件本身記順序（刪掉框時索引會變）
+  const order = [...photo.objects].sort((a, b) => Math.round(center(a).y / 120) - Math.round(center(b).y / 120) || center(a).x - center(b).x)
+  let cur = order.indexOf(photo.objects[startOi])
+  let previewUrl = ''
+  let formOpen = false
+  sheet('<div id="q-body"></div>', (el, close) => {
+    const body = el.querySelector('#q-body')
+    const finish = () => {
+      state.focusObj = null
+      if (previewUrl) URL.revokeObjectURL(previewUrl)
+      close()
+      render()
+    }
+    const go = (i) => {
+      if (i < 0 || i >= order.length) return finish()
+      cur = i
+      formOpen = false
+      draw()
+    }
+    const assign = async (fields) => {
+      const o = order[cur]
+      const oi = photo.objects.indexOf(o)
+      if (oi < 0) return go(cur + 1)
+      moveObjects(s, [{ pi, oi }], fields)
+      await save()
+      render()
+      if (cur + 1 >= order.length) {
+        toast('已經是最後一個了')
+        return finish()
+      }
+      go(cur + 1)
+    }
+    const draw = async () => {
+      const o = order[cur]
+      state.focusObj = o
+      render()
+      const groups = groupsOf(s).filter((g) => !g.manual)
+      const mine = groups.find((g) => g.key === keyOf(o))
+      body.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <h2 class="sheet-title" style="margin:0">這一個是哪一種？</h2>
+          <span class="muted" style="font-size:15px">第 ${cur + 1} / ${order.length} 個</span>
+        </div>
+        <img id="q-img" alt="這一個框的放大圖" style="display:block;width:100%;height:150px;object-fit:contain;margin:12px 0 8px;border-radius:12px;background:var(--card-2)">
+        <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${esc(detailOf(o))}` : ''}` : esc(o.label)}</p>
+        <div class="group">
+          ${groups
+            .map(
+              (g, gi) => `<button class="row" data-q="${gi}" ${g === mine ? 'aria-current="true"' : ''}>
+                <span class="swatch" style="--c:${g.color};pointer-events:none">${gi + 1}</span>
+                <span class="grow"><span class="title">${esc(g.label)}</span><br><span class="meta">${esc(detailOf(g) || '沒有寫尺寸')}・目前 ${g.boxes} 個</span></span>
+                ${g === mine ? '<span class="muted">✓ 目前</span>' : ''}
+              </button>`,
+            )
+            .join('')}
+          <button class="row" id="q-new"><span class="swatch" style="--c:#8e8e93;pointer-events:none">＋</span><span class="grow"><span class="title">新的一種…</span><br><span class="meta">例如同樣是三通，但尺寸不一樣</span></span></button>
+        </div>
+        <div id="q-form" style="display:${formOpen ? 'block' : 'none'}"></div>
+        <div class="row-actions" style="margin-top:14px">
+          <button class="btn secondary" id="q-prev" style="flex:1" ${cur === 0 ? 'disabled' : ''}>‹ 上一個</button>
+          <button class="btn secondary" id="q-next" style="flex:1">${cur + 1 >= order.length ? '完成' : '下一個 ›'}</button>
+        </div>
+        <button class="btn plain block" id="q-more" style="margin-top:8px">改品牌、型號，或存成樣品照…</button>
+        <button class="btn danger block" id="q-del" style="margin-top:8px">這不是商品，刪掉這個框</button>`
+      cropBox(photo, o.box)
+        .then((blob) => {
+          if (previewUrl) URL.revokeObjectURL(previewUrl)
+          previewUrl = URL.createObjectURL(blob)
+          const img = body.querySelector('#q-img')
+          if (img) img.src = previewUrl
+        })
+        .catch(() => {})
+      body.querySelectorAll('[data-q]').forEach((b) =>
+        b.addEventListener('click', () => {
+          const g = groups[Number(b.dataset.q)]
+          if (g === mine) return go(cur + 1)
+          assign({ label: g.label, brand: g.brand, model: g.model, spec: g.spec })
+        }),
+      )
+      body.querySelector('#q-new').onclick = async () => {
+        formOpen = true
+        const form = body.querySelector('#q-form')
+        form.style.display = 'block'
+        form.innerHTML = `${fieldsHtml({ label: o.label }, await suggestions())}<button class="btn block" id="q-create" style="margin-top:12px">建立並改成這一種</button>`
+        form.querySelector('#f-spec').focus()
+        form.querySelector('#q-create').onclick = () => {
+          const v = readFields(form)
+          if (!v.label) return toast('品名不能空白')
+          assign(v)
+        }
+      }
+      body.querySelector('#q-prev').onclick = () => go(cur - 1)
+      body.querySelector('#q-next').onclick = () => go(cur + 1)
+      body.querySelector('#q-del').onclick = async () => {
+        const oi = photo.objects.indexOf(o)
+        if (oi >= 0) removeObjects(s, [{ pi, oi }])
+        order.splice(cur, 1)
+        await save()
+        render()
+        toast('已刪掉這個框')
+        if (!order.length) return finish()
+        go(Math.min(cur, order.length - 1))
+      }
+      body.querySelector('#q-more').onclick = () => {
+        const oi = photo.objects.indexOf(o)
+        finish()
+        if (oi >= 0) objectSheet(pi, oi)
+      }
+    }
+    draw()
+  }, () => {
+    // 點旁邊暗處關掉時，也把標示拿掉
+    state.focusObj = null
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
+    render()
+  })
+}
+
 /** 只改照片上的某一個框（例如同一排保溫管，有一支尺寸不一樣） */
 async function objectSheet(pi, oi) {
   const s = state.session
@@ -1153,11 +1323,11 @@ function csvOf(session) {
   for (const g of groupsOf(session)) rows.push([fmtTime(session.createdAt), session.place, g.label, g.brand, g.model, g.spec, g.count, g.manual ? '' : g.boxes, g.manual ? '' : g.conf.toFixed(2), g.manual ? '手動' : g.edited ? 'AI（有修正）' : 'AI'])
   return '﻿' + rows.map((r) => r.map(cell).join(',')).join('\r\n') // 加 BOM，Excel 開才不會亂碼
 }
-const textOf = (session) => [`盤點：${session.place || '未命名位置'}（${fmtTime(session.createdAt)}）`, ...groupsOf(session).map((g) => `・${g.label}${detailOf(g) ? `（${detailOf(g)}）` : ''}：${g.count}`), `共 ${totalQty(session)} 件`].join('\n')
+const textOf = (session) => [`盤點 ${fmtTime(session.createdAt)}${session.place ? `・${session.place}` : ''}`, ...groupsOf(session).map((g) => `・${g.label}${detailOf(g) ? `（${detailOf(g)}）` : ''}：${g.count}`), `共 ${totalQty(session)} 件`].join('\n')
 
 function exportSheet() {
   const s = state.session
-  const name = `盤點_${(s.place || '未命名').replace(/[\\/:*?"<>|\s]+/g, '_')}_${new Date(s.createdAt).toISOString().slice(0, 10)}.csv`
+  const name = `盤點_${(s.place || summaryOf(s)).replace(/[\\/:*?"<>|\s]+/g, '_')}_${new Date(s.createdAt).toISOString().slice(0, 10)}.csv`
   const canShare = !!navigator.canShare?.({ files: [new File(['x'], 'x.csv', { type: 'text/csv' })] })
   sheet(
     `<h2 style="margin:4px 0 14px;font-size:22px">匯出</h2>
@@ -1218,8 +1388,15 @@ async function runAnalysis(indices) {
   const worker = async () => {
     while (queue.length && !state.cancel) {
       const photo = s.photos[queue.shift()]
+      // 辨識過程（用哪個模型、花幾秒、哪一步失敗）記在照片上，結果頁可以展開看、截圖回報
+      photo.trace = []
+      const t0 = Date.now()
+      const log = (msg) => {
+        photo.trace.push(`${Math.round((Date.now() - t0) / 100) / 10} 秒｜${msg}`)
+        status(msg)
+      }
       try {
-        const r = await analyze(photo, status, refs)
+        const r = await analyze(photo, log, refs)
         Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '' })
         s.model = r.model
       } catch (e) {
@@ -1252,14 +1429,19 @@ async function backgroundRefine(s, indices, refs) {
   state.refining = { session: s.id, total: jobs.length, done: 0 }
   if (state.session === s && state.view === 'review') render()
   let groups = 0
+  let failed = 0
   for (const { photo, objs } of jobs) {
     const free = objs.filter((o) => !o.edited && photo.objects.includes(o))
+    const t0 = Date.now()
+    const log = (msg) => (photo.trace ??= []).push(`比對 ${Math.round((Date.now() - t0) / 100) / 10} 秒｜${msg}`)
     try {
-      const rr = await refineObjects(photo, free, free.map((_, k) => k), refs)
+      const rr = await refineObjects(photo, free, free.map((_, k) => k), refs, log)
       groups += rr.groups || 0
       if (rr.model && !/比對/.test(s.model || '')) s.model = rr.model === s.model ? `${s.model}（含相似品比對）` : `${s.model} ＋ ${rr.model} 比對`
-    } catch {
-      photo.note = [photo.note, '相似品再比對沒有成功，先保留第一輪的結果；可以點品項的 ✎ →「再比對一次」。'].filter(Boolean).join(' ')
+    } catch (e) {
+      failed += 1
+      log(`沒成功：${e.detail || e.message}`)
+      photo.note = [photo.note, 'AI 沒辦法分出相似品的尺寸：請點照片上的框，直接選它是哪一種。'].filter(Boolean).join(' ')
     }
     state.refining.done += 1
     await db.put(s)
@@ -1268,7 +1450,7 @@ async function backgroundRefine(s, indices, refs) {
   state.refining = null
   if (state.session === s && state.view === 'review') {
     render()
-    toast(groups > 1 ? '相似品比對完成，已經分開不同尺寸' : '相似品比對完成')
+    toast(failed ? '相似品沒有比對成功：點照片上的框，直接選它是哪一種' : groups > 1 ? '相似品比對完成，已經分開不同尺寸' : '相似品比對完成：AI 認為都是同一種')
   }
 }
 
@@ -1324,10 +1506,10 @@ $app.addEventListener('click', async (e) => {
     return render()
   }
   if (d.focus !== undefined) {
-    // 已經標示的品項，再點照片上的框＝只改那一個框
-    if (d.obj && state.focus === d.focus) {
+    // 點照片上的框＝「這一個是哪一種？」直接改
+    if (d.obj) {
       const [pi, oi] = d.obj.split(':').map(Number)
-      return objectSheet(pi, oi)
+      return quickSheet(pi, oi)
     }
     const key = state.focus === d.focus ? null : d.focus
     // 點清單時，照片切到有這個品項的那張

@@ -151,6 +151,22 @@ img {
 button.row:active {
   background: var(--card-2);
 }
+button.row[aria-current='true'] {
+  background: var(--tint-soft);
+}
+/* 結果頁「辨識過程」：小字，平常收起來，有問題時展開截圖 */
+.trace {
+  margin: 8px 4px 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.trace summary {
+  cursor: pointer;
+  color: var(--tint);
+  font-size: 14px;
+  padding: 4px 0;
+}
 .row .grow {
   flex: 1;
   min-width: 0;
