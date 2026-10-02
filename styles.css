@@ -382,6 +382,44 @@ textarea.field {
   font-weight: 600;
   overflow-wrap: anywhere;
 }
+/* 品名可以點來修改：整塊是按鈕，名稱後面有藍色 ✎ */
+.edit-btn {
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 4px 0;
+  min-width: 0;
+  border-radius: 8px;
+}
+.edit-btn:active {
+  background: var(--card-2);
+}
+.pencil {
+  margin-left: 6px;
+  color: var(--tint);
+  font-size: 15px;
+}
+.sheet-title {
+  margin: 4px 0 4px;
+  font-size: 22px;
+}
+.sheet-sub {
+  margin: 0 0 14px;
+  color: var(--text-2);
+  font-size: 14px;
+}
+.form {
+  display: grid;
+  gap: 6px;
+}
+.field-label {
+  margin-top: 8px;
+  font-size: 14px;
+  color: var(--text-2);
+}
+.form .field-label:first-child {
+  margin-top: 0;
+}
 .item .spec {
   color: var(--text-2);
   font-size: 14px;

@@ -134,9 +134,13 @@ const urlOf = (photo) => {
 
 // ───────────────────────── Gemini ─────────────────────────
 class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, detail = '') {
     super(message)
     this.status = status
+    /** 原始錯誤（狀態碼＋Google 的訊息），顯示在小字，方便截圖回報 */
+    this.detail = detail
+    /** Google 建議等幾秒再試（429 會附） */
+    this.retryAfter = 0
   }
 }
 function friendly(status, msg = '') {
@@ -145,7 +149,8 @@ function friendly(status, msg = '') {
   if (status === 403) return '這個 API Key 沒有權限用 Gemini，請確認是在 Google AI Studio 建立的金鑰。'
   if (status === 404) return '這個模型已經下架或不能用，已自動改用其他模型，請再試一次。'
   if (status === 429) return '免費額度一分鐘內用太多次了，等 1 分鐘再試。'
-  if (status >= 500) return 'Google 那邊暫時忙不過來，稍等再試。'
+  if (status === 503) return 'Google 的 AI 現在太多人用（免費版尖峰常見），已經自動重試和換模型，還是不行；等幾分鐘再按「再試一次」。'
+  if (status >= 500) return 'Google 那邊暫時出問題，已經自動重試；等一下再按「再試一次」。'
   return msg || '連線失敗，請確認有網路。'
 }
 async function call(path, opts = {}) {
@@ -154,12 +159,22 @@ async function call(path, opts = {}) {
   try {
     res = await fetch(`${API}/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`, opts)
   } catch {
-    throw new ApiError('沒有網路，或連不到 Google。', 0)
+    throw new ApiError('沒有網路，或連不到 Google。', 0, 'network error')
   }
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new ApiError(friendly(res.status, data?.error?.message), res.status)
+  if (!res.ok) {
+    const msg = data?.error?.message || ''
+    const err = new ApiError(friendly(res.status, msg), res.status, `${res.status} ${data?.error?.status || ''} ${msg}`.trim().slice(0, 200))
+    // 429 會告訴你要等多久（例如 "17s"）
+    const retry = (data?.error?.details || []).find((d) => d.retryDelay)?.retryDelay
+    if (retry) err.retryAfter = Math.min(30, parseFloat(retry) || 0)
+    throw err
+  }
   return data
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+/** 這些狀況值得自動重試：太多人用、伺服器暫時錯誤、額度每分鐘上限 */
+const retryable = (e) => e instanceof ApiError && [429, 500, 502, 503, 504].includes(e.status)
 
 /** 自動挑模型：可用、會看圖、名字有 flash；穩定版優先、版本新的優先、lite 排後面 */
 function rankModels(models) {
@@ -176,9 +191,11 @@ function rankModels(models) {
     .filter((n) => /flash/.test(n) && !/image|tts|audio|live|embedding|thinking|8b/.test(n))
     .sort((a, b) => score(b) - score(a))
 }
+let modelCache = null
 async function fetchModels() {
   const data = await call('models?pageSize=200')
-  return rankModels(data.models || [])
+  modelCache = rankModels(data.models || [])
+  return modelCache
 }
 async function currentModel(force = false) {
   const saved = ls.get(LS.model)
@@ -198,11 +215,13 @@ const SCHEMA = {
         type: 'OBJECT',
         properties: {
           label: { type: 'STRING', description: '品名，優先用店內品項清單的寫法' },
-          spec: { type: 'STRING', description: '看得到的型號、尺寸或規格；看不出來就空字串' },
+          brand: { type: 'STRING', description: '品牌（看標籤或外盒）；看不出來就空字串' },
+          model: { type: 'STRING', description: '型號（例如 DML 083、KP 15）；看不出來就空字串' },
+          spec: { type: 'STRING', description: '尺寸／容量／規格（例如 3分、10.9kg、4L）；看不出來就空字串' },
           box_2d: { type: 'ARRAY', items: { type: 'INTEGER' }, description: '[ymin, xmin, ymax, xmax]，0～1000' },
           confidence: { type: 'NUMBER', description: '0～1，有多確定' },
         },
-        required: ['label', 'spec', 'box_2d', 'confidence'],
+        required: ['label', 'brand', 'model', 'spec', 'box_2d', 'confidence'],
       },
     },
     note: { type: 'STRING', description: '看不清楚、被擋住、需要人工確認的地方；沒有就空字串' },
@@ -214,70 +233,160 @@ function prompt() {
   return `你是冷凍空調材料行的盤點助手。請找出照片裡每一個「商品」，每一個各給一個框。
 規則：
 1. 名稱優先用下面「店內品項清單」的寫法；清單沒有就用最具體的中文名稱（例如「乾燥過濾器」，不要只寫「零件」）。
-2. spec 填看得到的型號、尺寸或規格（例如 DML 083、3分、R404A、10.9kg）；看不出來就空字串，不要猜。
-3. 同一種東西有幾個就給幾個框，不要合併成一個；被擋住一半以上的也要算，但 confidence 給低一點。
+2. 標籤看得到就分開填：brand＝品牌（例如 Danfoss）、model＝型號（例如 DML 083、KP 15）、spec＝尺寸／容量／規格（例如 3分、10.9kg、4L、R404A）。看不出來就空字串，不要猜。
+3. 同一種東西有幾個就給幾個框，不要合併成一個；品牌、型號或尺寸不同就算不同的東西。被擋住一半以上的也要算，但 confidence 給低一點。
 4. 貨架、標價牌、手、紙箱外的雜物不算商品。
 5. box_2d 用 [ymin, xmin, ymax, xmax]，是相對整張照片的 0～1000。
 店內品項清單：
 ${catalogLines().join('\n')}`
 }
 
-/** 分析一張照片（模型被下架就自動換一個再試一次） */
-async function analyze(photo, retry = true) {
-  const model = await currentModel()
+/** 用某個模型送一次辨識 */
+async function generate(model, image, thinkingOff = true) {
   const body = {
-    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: await blobToBase64(photo.blob) } }, { text: prompt() }] }],
+    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: image } }, { text: prompt() }] }],
     generationConfig: {
       temperature: 0,
       responseMimeType: 'application/json',
       responseSchema: SCHEMA,
-      // 2.5 系列預設會先「想」很久；關掉思考，速度快很多
-      ...(/2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+      // 2.5 Flash 預設會先「想」很久；關掉思考，速度快很多
+      ...(thinkingOff && /2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
     },
   }
+  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const cand = data?.candidates?.[0]
+  const text = cand?.content?.parts?.map((p) => p.text || '').join('') || ''
+  if (!text) throw new ApiError(cand?.finishReason === 'SAFETY' ? 'AI 拒絕分析這張照片，請換一張。' : 'AI 沒有回傳結果，請再試一次。', 0, `empty response ${cand?.finishReason || ''}`)
+  let parsed
   try {
-    const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
-    const parsed = JSON.parse(text)
-    return {
-      objects: (parsed.objects || [])
-        .filter((o) => Array.isArray(o.box_2d) && o.box_2d.length === 4 && o.label)
-        .map((o) => ({ label: String(o.label).trim(), spec: String(o.spec || '').trim(), box: o.box_2d.map((n) => Math.min(1000, Math.max(0, Number(n) || 0))), confidence: Math.min(1, Math.max(0, Number(o.confidence) || 0)) })),
-      note: String(parsed.note || ''),
-      model,
-    }
-  } catch (e) {
-    if (retry && e instanceof ApiError && e.status === 404) {
-      ls.set(LS.model, '')
-      await currentModel(true)
-      return analyze(photo, false)
-    }
-    if (e instanceof SyntaxError) throw new ApiError('AI 回傳的格式壞掉了，請再試一次。', 0)
-    throw e
+    parsed = JSON.parse(text)
+  } catch {
+    throw new ApiError('AI 回傳的格式壞掉了，請再試一次。', 0, `bad json: ${text.slice(0, 120)}`)
+  }
+  return {
+    objects: (parsed.objects || [])
+      .filter((o) => Array.isArray(o.box_2d) && o.box_2d.length === 4 && o.label)
+      .map((o) => ({
+        label: String(o.label).trim(),
+        brand: String(o.brand || '').trim(),
+        model: String(o.model || '').trim(),
+        spec: String(o.spec || '').trim(),
+        box: o.box_2d.map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
+        confidence: Math.min(1, Math.max(0, Number(o.confidence) || 0)),
+      })),
+    note: String(parsed.note || ''),
+    model,
   }
 }
 
+/**
+ * 分析一張照片：同一個模型遇到「太多人用」會等一下重試（2、4、8 秒）；
+ * 還是不行就換下一個模型（例如 Flash → Flash-Lite）；模型下架（404）就重新抓清單。
+ * onStatus 用來在畫面上顯示目前在做什麼。
+ */
+async function analyze(photo, onStatus = () => {}) {
+  const image = await blobToBase64(photo.blob)
+  const first = await currentModel()
+  const list = modelCache ?? (await fetchModels().catch(() => [first]))
+  const models = [first, ...list.filter((m) => m !== first)].slice(0, 3)
+  let lastErr
+  for (const [mi, model] of models.entries()) {
+    if (mi > 0) onStatus(`改用 ${model} 再試`)
+    let thinkingOff = true
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await generate(model, image, thinkingOff)
+      } catch (e) {
+        lastErr = e
+        if (state.cancel) throw e
+        // 有的模型不接受「關掉思考」的參數：拿掉再試一次
+        if (e instanceof ApiError && e.status === 400 && /thinking/i.test(e.detail) && thinkingOff) {
+          thinkingOff = false
+          continue
+        }
+        if (e instanceof ApiError && e.status === 404) {
+          ls.set(LS.model, '')
+          break
+        }
+        if (!retryable(e) || attempt === 3) break
+        const wait = e.retryAfter ? e.retryAfter * 1000 : 2000 * 2 ** attempt
+        onStatus(`Google 忙線（${e.status}），${Math.round(wait / 1000)} 秒後自動重試（第 ${attempt + 2} 次）`)
+        await sleep(wait)
+      }
+    }
+    // 只有「忙線、暫時錯誤、模型下架」才換模型；Key 錯、照片問題換模型也沒用
+    if (!(retryable(lastErr) || lastErr?.status === 404)) break
+  }
+  throw lastErr
+}
+
 // ───────────────────────── 盤點結果：把框合併成品項 ─────────────────────────
+/** 品名、品牌、型號、規格四個都一樣才算同一種 */
+const FIELDS = ['label', 'brand', 'model', 'spec']
+const keyOf = (o) => FIELDS.map((f) => norm(o[f])).join('|')
+/** 清單第二行：品牌・型號・規格 */
+const detailOf = (o) => [o.brand, o.model, o.spec].filter(Boolean).join('・')
+
 function groupsOf(session) {
   const map = new Map()
   session.photos.forEach((photo, pi) =>
     photo.objects.forEach((o, oi) => {
-      const key = `${norm(o.label)}|${norm(o.spec)}`
-      if (!map.has(key)) map.set(key, { key, label: o.label, spec: o.spec, ai: 0, conf: 0, refs: [] })
+      const key = keyOf(o)
+      if (!map.has(key)) map.set(key, { key, label: o.label, brand: o.brand || '', model: o.model || '', spec: o.spec || '', boxes: 0, conf: 0, edited: false, refs: [] })
       const g = map.get(key)
-      g.ai += 1
+      g.boxes += 1
       g.conf += o.confidence
+      g.edited ||= !!o.edited
       g.refs.push({ pi, oi })
     }),
   )
-  const groups = [...map.values()].map((g) => ({ ...g, conf: g.ai ? g.conf / g.ai : 1 }))
-  for (const m of session.manual || []) groups.push({ key: `manual:${m.id}`, label: m.label, spec: m.spec, ai: 0, conf: 1, refs: [], manual: true })
-  return groups
-    .map((g, i) => {
-      const e = session.edits?.[g.key] || {}
-      return { ...g, color: COLORS[i % COLORS.length], name: e.name ?? g.label, specShown: e.spec ?? g.spec, count: e.count ?? (g.manual ? (session.manual.find((m) => `manual:${m.id}` === g.key)?.count ?? 1) : g.ai), deleted: !!e.deleted, edited: e.count !== undefined || e.name !== undefined || e.spec !== undefined }
-    })
-    .filter((g) => !g.deleted)
+  // 固定排序（品名 → 尺寸 → 品牌 → 型號），修改後編號和顏色不會亂跳
+  const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
+  const groups = [...map.values()].map((g) => ({ ...g, conf: g.boxes ? g.conf / g.boxes : 1 })).sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.brand, b.brand) || cmp(a.model, b.model))
+  for (const m of session.manual || []) groups.push({ key: `manual:${m.id}`, label: m.label, brand: m.brand || '', model: m.model || '', spec: m.spec || '', boxes: 0, conf: 1, refs: [], manual: m })
+  return groups.map((g, i) => ({ ...g, color: COLORS[i % COLORS.length], count: g.manual ? g.manual.count : (session.counts?.[g.key] ?? g.boxes) }))
+}
+
+/** 改數量（手動新增的存在品項上；AI 的存成覆寫值） */
+function setCount(session, g, n) {
+  const count = Math.max(0, n)
+  if (g.manual) g.manual.count = count
+  else (session.counts ??= {})[g.key] = count
+}
+
+/**
+ * 把一些框改成另一個品項（整組改或只改一個框）。
+ * 如果原本有手動改過的數量：搬過去；跟別的品項合併時，數量相加。
+ */
+function moveObjects(session, refs, fields) {
+  const counts = (session.counts ??= {})
+  const objs = refs.map((r) => session.photos[r.pi].objects[r.oi])
+  const oldKey = keyOf(objs[0])
+  const oldGroup = groupsOf(session).find((x) => x.key === oldKey)
+  objs.forEach((o) => Object.assign(o, fields, { edited: true }))
+  const newKey = keyOf(objs[0])
+  if (newKey === oldKey) return
+  const moved = objs.length
+  const whole = oldGroup && moved === oldGroup.boxes
+  if (counts[oldKey] !== undefined) {
+    const carry = whole ? counts[oldKey] : Math.min(moved, counts[oldKey])
+    if (whole) delete counts[oldKey]
+    else counts[oldKey] = Math.max(0, counts[oldKey] - moved)
+    const target = groupsOf(session).find((x) => x.key === newKey)
+    counts[newKey] = (counts[newKey] ?? (target ? target.boxes - moved : 0)) + carry
+  } else if (counts[newKey] !== undefined) counts[newKey] += moved
+}
+
+/** 刪掉一些框（照片同一張要從後面刪，索引才不會亂） */
+function removeObjects(session, refs) {
+  const counts = session.counts ?? {}
+  const key = keyOf(session.photos[refs[0].pi].objects[refs[0].oi])
+  ;[...refs].sort((a, b) => b.oi - a.oi).forEach((r) => session.photos[r.pi].objects.splice(r.oi, 1))
+  if (counts[key] !== undefined) {
+    const left = groupsOf(session).find((x) => x.key === key)
+    if (!left) delete counts[key]
+    else counts[key] = Math.max(0, counts[key] - refs.length)
+  }
 }
 const totalQty = (session) => groupsOf(session).reduce((n, g) => n + (Number(g.count) || 0), 0)
 
@@ -360,6 +469,7 @@ function viewAnalyzing() {
       <div class="spinner" aria-hidden="true"></div>
       <div><b style="color:var(--text)">AI 辨識中… ${p.done + 1 > p.total ? p.total : p.done + 1} / ${p.total}</b><br>每張大約 5～15 秒（看網路和照片內容）</div>
       <div class="muted" id="elapsed">已經 0 秒</div>
+      <div class="muted" id="ai-status" style="min-height:1.5em;font-size:15px"></div>
     </div>
   </main>
   <div class="toolbar"><div class="inner"><button class="btn plain" data-action="cancel">取消</button></div></div>`
@@ -378,11 +488,11 @@ function viewReview() {
           if (!ref) return ''
           const [y1, x1, y2, x2] = o.box
           const on = state.focus === ref.key
-          return `<div class="box ${on ? 'on' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}"><span class="tag">${ref.gi + 1}</span></div>`
+          return `<div class="box ${on ? 'on' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}" data-obj="${state.photoIndex}:${oi}"><span class="tag">${ref.gi + 1}</span></div>`
         })
         .join('')
     : ''
-  const errors = s.photos.map((p, i) => (p.status !== 'done' ? `<div class="error-card">第 ${i + 1} 張沒辨識成功：${esc(p.error || '還沒辨識（被取消）')} <button class="btn small secondary" data-retry="${i}" style="margin-left:6px">再試一次</button></div>` : '')).join('')
+  const errors = s.photos.map((p, i) => (p.status !== 'done' ? `<div class="error-card">第 ${i + 1} 張沒辨識成功：${esc(p.error || '還沒辨識（被取消）')} <button class="btn small secondary" data-retry="${i}" style="margin-left:6px">再試一次</button>${p.errorDetail ? `<div style="margin-top:8px;font-size:12px;color:var(--text-2);word-break:break-all">錯誤代碼：${esc(p.errorDetail)}</div>` : ''}</div>` : '')).join('')
   const notes = s.photos.map((p, i) => (p.note ? `<p class="footnote">第 ${i + 1} 張 AI 備註：${esc(p.note)}</p>` : '')).join('')
   return `
   <main class="app">
@@ -394,7 +504,7 @@ function viewReview() {
       photo
         ? `<div class="photo-wrap ${state.focus ? 'focus' : ''}" data-photo><img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">${boxes}</div>
            ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張"><img src="${urlOf(p)}" alt=""></button>`).join('')}</div>` : ''}
-           <p class="footnote">點框或點清單，對照是哪一個；數量不對就按 ＋／－。</p>`
+           <p class="footnote">${state.focus ? '再點一次框，可以單獨修改那一個（例如尺寸不一樣）。' : '點框或點清單，對照是哪一個；數量不對就按 ＋／－，名稱不對就點 ✎。'}</p>`
         : ''
     }
     ${notes}
@@ -405,12 +515,12 @@ function viewReview() {
             .map(
               (g, gi) => `
           <div class="item ${state.focus === g.key ? 'on' : ''}" data-item="${esc(g.key)}">
-            <button class="swatch" style="--c:${g.color}" data-focus="${esc(g.key)}" aria-label="在照片上標出 ${esc(g.name)}">${gi + 1}</button>
-            <button class="grow" data-edit="${esc(g.key)}" style="border:0;background:none;text-align:left;padding:0;min-width:0">
-              <span class="name">${esc(g.name)}</span>${g.manual ? '<span class="badge edit">手動</span>' : g.conf < 0.6 ? '<span class="badge low">請確認</span>' : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}
-              <br><span class="spec">${esc(g.specShown || '（沒有規格）')}${!g.manual && g.count !== g.ai ? `・AI 數 ${g.ai}` : ''}</span>
+            <button class="swatch" style="--c:${g.color}" data-focus="${esc(g.key)}" aria-label="在照片上標出 ${esc(g.label)}">${gi + 1}</button>
+            <button class="grow edit-btn" data-edit="${esc(g.key)}" aria-label="修改 ${esc(g.label)} 的名稱、品牌、型號、規格">
+              <span class="name">${esc(g.label)}</span><span class="pencil" aria-hidden="true">✎</span>${g.manual ? '<span class="badge edit">手動</span>' : g.conf < 0.6 && !g.edited ? '<span class="badge low">請確認</span>' : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}
+              <br><span class="spec">${esc(detailOf(g) || '點 ✎ 補品牌、型號、尺寸')}${!g.manual && g.count !== g.boxes ? `・照片裡 ${g.boxes} 個` : ''}</span>
             </button>
-            <span class="stepper"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">−</button><input inputmode="numeric" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.name)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">＋</button></span>
+            <span class="stepper"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">−</button><input inputmode="numeric" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.label)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">＋</button></span>
           </div>`,
             )
             .join('')}</div>`
@@ -472,60 +582,126 @@ function sheet(html, onMount) {
   return close
 }
 
-function editSheet(key) {
+/** 常見品牌（只是輸入時的建議，可以自己打） */
+const BRANDS = ['Danfoss', 'Emerson', 'Copeland', 'Sporlan', 'Castel', 'Carel', 'Dixell', 'Bitzer', 'Tecumseh', 'Embraco', 'Panasonic', 'Hitachi', 'Daikin', 'Chemours']
+
+/** 輸入建議：店內品項清單＋常見品牌＋以前盤點打過的字（越常用越前面） */
+async function suggestions() {
+  const tally = { label: new Map(), brand: new Map(), model: new Map(), spec: new Map() }
+  const add = (o) => FIELDS.forEach((f) => o[f] && tally[f].set(o[f], (tally[f].get(o[f]) || 0) + 1))
+  for (const s of await db.all()) {
+    s.photos.forEach((p) => p.objects.forEach(add))
+    ;(s.manual || []).forEach(add)
+  }
+  state.session?.photos.forEach((p) => p.objects.forEach(add))
+  const top = (m) => [...m.entries()].sort((a, b) => b[1] - a[1]).map(([v]) => v)
+  return {
+    label: [...new Set([...catalogNames(), ...top(tally.label)])],
+    brand: [...new Set([...top(tally.brand), ...BRANDS])],
+    model: top(tally.model).slice(0, 80),
+    spec: [...new Set([...top(tally.spec), '2分', '3分', '4分', '5分', '6分', '7分', '1吋1分', '1吋3分'])],
+  }
+}
+
+/** 四個欄位的表單（品名、品牌、型號、尺寸／規格） */
+function fieldsHtml(v, sug) {
+  const row = (f, label, ph) => `
+    <label class="field-label" for="f-${f}">${label}</label>
+    <input class="field" id="f-${f}" list="dl-${f}" value="${esc(v[f] || '')}" placeholder="${ph}" autocomplete="off">
+    <datalist id="dl-${f}">${sug[f].map((n) => `<option value="${esc(n)}">`).join('')}</datalist>`
+  return `<div class="form">
+    ${row('label', '品名', '例：乾燥過濾器、保溫管')}
+    ${row('brand', '品牌', '例：Danfoss（看不出來可以空白）')}
+    ${row('model', '型號', '例：DML 083、KP 15')}
+    ${row('spec', '尺寸／規格', '例：3分、10.9kg、4L')}
+  </div>`
+}
+const readFields = (el) => Object.fromEntries(FIELDS.map((f) => [f, el.querySelector(`#f-${f}`).value.trim()]))
+
+/** 修改整個品項（這一列的全部框一起改） */
+async function editSheet(key) {
   const s = state.session
   const g = groupsOf(s).find((x) => x.key === key)
   if (!g) return
-  const names = catalogNames()
+  const sug = await suggestions()
   sheet(
-    `<h2 style="margin:4px 0 14px;font-size:22px">修正品項</h2>
-     <div class="stack">
-       <label class="muted" style="font-size:14px">品名</label>
-       <input class="field" id="e-name" list="cat-names" value="${esc(g.name)}">
-       <datalist id="cat-names">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-       <label class="muted" style="font-size:14px">規格／型號</label>
-       <input class="field" id="e-spec" value="${esc(g.specShown)}" placeholder="例：DML 083、3分、R404A">
-       <div class="row-actions"><button class="btn" style="flex:1" id="e-save">儲存</button><button class="btn danger" id="e-del">刪掉這個品項</button></div>
-     </div>`,
+    `<h2 class="sheet-title">修改品項</h2>
+     <p class="sheet-sub">${g.manual ? '手動新增的品項' : `照片裡 ${g.boxes} 個框會一起改；只有其中幾個不一樣，請在照片上點那個框`}</p>
+     ${fieldsHtml(g, sug)}
+     <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="e-save">儲存</button><button class="btn danger" id="e-del">刪掉</button></div>`,
     (el, close) => {
       el.querySelector('#e-save').onclick = async () => {
-        s.edits ??= {}
-        s.edits[key] = { ...(s.edits[key] || {}), name: el.querySelector('#e-name').value.trim() || g.name, spec: el.querySelector('#e-spec').value.trim() }
+        const v = readFields(el)
+        if (!v.label) return toast('品名不能空白')
+        if (g.manual) Object.assign(g.manual, v)
+        else moveObjects(s, g.refs, v)
+        state.focus = null
         await save()
         close()
         render()
       }
       el.querySelector('#e-del').onclick = async () => {
-        s.edits ??= {}
-        s.edits[key] = { ...(s.edits[key] || {}), deleted: true }
+        if (!confirm(`刪掉「${g.label}」${g.manual ? '' : `（${g.boxes} 個框）`}？`)) return
+        if (g.manual) s.manual = s.manual.filter((m) => m !== g.manual)
+        else removeObjects(s, g.refs)
+        state.focus = null
         await save()
         close()
         render()
-        toast('已刪掉這個品項')
+        toast('已刪掉')
       }
     },
   )
 }
 
-function addSheet() {
-  const names = catalogNames()
+/** 只改照片上的某一個框（例如同一排保溫管，有一支尺寸不一樣） */
+async function objectSheet(pi, oi) {
+  const s = state.session
+  const o = s.photos[pi]?.objects[oi]
+  if (!o) return
+  const sug = await suggestions()
   sheet(
-    `<h2 style="margin:4px 0 14px;font-size:22px">手動新增品項</h2>
-     <div class="stack">
-       <input class="field" id="a-name" list="cat-names2" placeholder="品名（可以從清單選）">
-       <datalist id="cat-names2">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-       <input class="field" id="a-spec" placeholder="規格／型號（可空白）">
-       <input class="field" id="a-count" inputmode="numeric" value="1" aria-label="數量">
-       <button class="btn block" id="a-save">新增</button>
-     </div>`,
+    `<h2 class="sheet-title">修改這一個</h2>
+     <p class="sheet-sub">只改照片上這一個框；改完會自動歸到對的品項、數量也會跟著變。</p>
+     ${fieldsHtml(o, sug)}
+     <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="o-save">儲存</button><button class="btn danger" id="o-del">這不是商品，刪掉這個框</button></div>`,
     (el, close) => {
-      el.querySelector('#a-name').focus()
+      el.querySelector('#o-save').onclick = async () => {
+        const v = readFields(el)
+        if (!v.label) return toast('品名不能空白')
+        moveObjects(s, [{ pi, oi }], v)
+        state.focus = keyOf(o)
+        await save()
+        close()
+        render()
+      }
+      el.querySelector('#o-del').onclick = async () => {
+        removeObjects(s, [{ pi, oi }])
+        state.focus = null
+        await save()
+        close()
+        render()
+        toast('已刪掉這個框')
+      }
+    },
+  )
+}
+
+async function addSheet() {
+  const sug = await suggestions()
+  sheet(
+    `<h2 class="sheet-title">手動新增品項</h2>
+     ${fieldsHtml({}, sug)}
+     <label class="field-label" for="a-count">數量</label>
+     <input class="field" id="a-count" inputmode="numeric" value="1">
+     <button class="btn block" id="a-save" style="margin-top:16px">新增</button>`,
+    (el, close) => {
+      el.querySelector('#f-label').focus()
       el.querySelector('#a-save').onclick = async () => {
-        const label = el.querySelector('#a-name').value.trim()
-        if (!label) return toast('請先填品名')
+        const v = readFields(el)
+        if (!v.label) return toast('請先填品名')
         const s = state.session
-        s.manual ??= []
-        s.manual.push({ id: uid(), label, spec: el.querySelector('#a-spec').value.trim(), count: Math.max(0, parseInt(el.querySelector('#a-count').value, 10) || 0) })
+        ;(s.manual ??= []).push({ id: uid(), ...v, count: Math.max(0, parseInt(el.querySelector('#a-count').value, 10) || 0) })
         await save()
         close()
         render()
@@ -537,11 +713,11 @@ function addSheet() {
 // ───────────────────────── 匯出 ─────────────────────────
 function csvOf(session) {
   const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
-  const rows = [['盤點時間', '位置', '品名', '規格', '數量', 'AI 數量', 'AI 信心', '來源']]
-  for (const g of groupsOf(session)) rows.push([fmtTime(session.createdAt), session.place, g.name, g.specShown, g.count, g.manual ? '' : g.ai, g.manual ? '' : g.conf.toFixed(2), g.manual ? '手動' : 'AI'])
+  const rows = [['盤點時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', 'AI 信心', '來源']]
+  for (const g of groupsOf(session)) rows.push([fmtTime(session.createdAt), session.place, g.label, g.brand, g.model, g.spec, g.count, g.manual ? '' : g.boxes, g.manual ? '' : g.conf.toFixed(2), g.manual ? '手動' : g.edited ? 'AI（有修正）' : 'AI'])
   return '﻿' + rows.map((r) => r.map(cell).join(',')).join('\r\n') // 加 BOM，Excel 開才不會亂碼
 }
-const textOf = (session) => [`盤點：${session.place || '未命名位置'}（${fmtTime(session.createdAt)}）`, ...groupsOf(session).map((g) => `・${g.name}${g.specShown ? ` ${g.specShown}` : ''}：${g.count}`), `共 ${totalQty(session)} 件`].join('\n')
+const textOf = (session) => [`盤點：${session.place || '未命名位置'}（${fmtTime(session.createdAt)}）`, ...groupsOf(session).map((g) => `・${g.label}${detailOf(g) ? `（${detailOf(g)}）` : ''}：${g.count}`), `共 ${totalQty(session)} 件`].join('\n')
 
 function exportSheet() {
   const s = state.session
@@ -599,11 +775,14 @@ async function runAnalysis(indices) {
     if (state.cancel) break
     const photo = s.photos[i]
     try {
-      const r = await analyze(photo)
-      Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '' })
+      const r = await analyze(photo, (msg) => {
+        const el = document.getElementById('ai-status')
+        if (el) el.textContent = msg
+      })
+      Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '' })
       s.model = r.model
     } catch (e) {
-      Object.assign(photo, { status: 'error', error: e.message || String(e) })
+      Object.assign(photo, { status: 'error', error: e.message || String(e), errorDetail: e.detail || '' })
     }
     state.progress.done += 1
     await save()
@@ -639,6 +818,7 @@ $app.addEventListener('click', async (e) => {
   if (d.go) return go(d.go)
   if (d.open) {
     state.session = await db.get(d.open)
+    delete state.session.edits // 第一版的舊欄位，不再使用
     return go('review', { photoIndex: 0 })
   }
   if (d.removePhoto !== undefined) {
@@ -650,6 +830,11 @@ $app.addEventListener('click', async (e) => {
     return render()
   }
   if (d.focus !== undefined) {
+    // 已經標示的品項，再點照片上的框＝只改那一個框
+    if (d.obj && state.focus === d.focus) {
+      const [pi, oi] = d.obj.split(':').map(Number)
+      return objectSheet(pi, oi)
+    }
     const key = state.focus === d.focus ? null : d.focus
     // 點清單時，照片切到有這個品項的那張
     if (key) {
@@ -664,10 +849,8 @@ $app.addEventListener('click', async (e) => {
   if (d.step) {
     const s = state.session
     const g = groupsOf(s).find((x) => x.key === d.key)
-    s.edits ??= {}
-    const count = Math.max(0, (Number(g?.count) || 0) + Number(d.step))
-    if (g?.manual) s.manual.find((m) => `manual:${m.id}` === d.key).count = count
-    else s.edits[d.key] = { ...(s.edits[d.key] || {}), count }
+    if (!g) return
+    setCount(s, g, (Number(g.count) || 0) + Number(d.step))
     await save()
     return render()
   }
@@ -676,7 +859,7 @@ $app.addEventListener('click', async (e) => {
 
   switch (d.action) {
     case 'new':
-      state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], edits: {}, manual: [] }
+      state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], counts: {}, manual: [] }
       return go('capture')
     case 'analyze':
       state.session.place = document.getElementById('place')?.value.trim() || ''
@@ -749,13 +932,8 @@ function bindInputs() {
   document.querySelectorAll('[data-count]').forEach((input) =>
     input.addEventListener('change', async (e) => {
       const s = state.session
-      const key = e.target.dataset.count
-      const count = Math.max(0, parseInt(e.target.value, 10) || 0)
-      if (key.startsWith('manual:')) s.manual.find((m) => `manual:${m.id}` === key).count = count
-      else {
-        s.edits ??= {}
-        s.edits[key] = { ...(s.edits[key] || {}), count }
-      }
+      const g = groupsOf(s).find((x) => x.key === e.target.dataset.count)
+      if (g) setCount(s, g, parseInt(e.target.value, 10) || 0)
       await save()
       render()
     }),
