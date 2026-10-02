@@ -8,7 +8,7 @@ const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '1.5（10/2 夜・相似品再比對）'
+const VERSION = '1.6（10/2 夜・加快＋雙保險）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -204,13 +204,26 @@ function friendly(status, msg = '') {
   if (status >= 500) return 'Google 那邊暫時出問題，已經自動重試；等一下再按「再試一次」。'
   return msg || '連線失敗，請確認有網路。'
 }
-async function call(path, opts = {}) {
+/** timeoutMs：等太久就放棄（之後會自動重試或換模型），不要讓人一直乾等 */
+async function call(path, opts = {}, timeoutMs = 0) {
   const key = ls.get(LS.key)
   let res
+  const ctrl = new AbortController()
+  const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : 0
+  // opts.signal：另一個模型已經先回答了，這邊就取消
+  const outer = opts.signal
+  const onOuter = () => ctrl.abort()
+  outer?.addEventListener('abort', onOuter)
   try {
-    res = await fetch(`${API}/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`, opts)
+    if (outer?.aborted) throw new Error('aborted')
+    res = await fetch(`${API}/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`, { ...opts, signal: ctrl.signal })
   } catch {
-    throw new ApiError('沒有網路，或連不到 Google。', 0, 'network error')
+    if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
+    if (ctrl.signal.aborted) throw new ApiError(`等了 ${Math.round(timeoutMs / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${timeoutMs / 1000}s`)
+    throw new ApiError('沒有網路，或連不到 Google。辨識時請不要切到別的 App、不要讓螢幕暗掉。', 0, 'network error')
+  } finally {
+    clearTimeout(timer)
+    outer?.removeEventListener('abort', onOuter)
   }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
@@ -224,8 +237,21 @@ async function call(path, opts = {}) {
   return data
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-/** 這些狀況值得自動重試：太多人用、伺服器暫時錯誤、額度每分鐘上限 */
-const retryable = (e) => e instanceof ApiError && [429, 500, 502, 503, 504].includes(e.status)
+/** 這些狀況值得自動重試：太多人用、伺服器暫時錯誤、額度每分鐘上限、等太久、網路斷一下 */
+const retryable = (e) => e instanceof ApiError && [0, 408, 429, 500, 502, 503, 504].includes(e.status)
+
+/**
+ * 思考設定：新的 Gemini 預設會先「想」很久才回答（一張照片可以拖到一分鐘）。
+ * 找東西、畫框不用想太多 → 調到最少；第二輪比對相似品才讓它想一點點。
+ */
+function thinkingFor(model, purpose = 'detect') {
+  if (/2\.5-flash/.test(model)) return { thinkingBudget: purpose === 'detect' ? 0 : 512 }
+  if (/2\.5-pro/.test(model)) return { thinkingBudget: 128 }
+  if (/gemini-[3-9]/.test(model)) return { thinkingLevel: purpose === 'detect' && /flash/.test(model) ? 'minimal' : 'low' }
+  return null
+}
+/** 單次等待上限：第一輪找東西、第二輪比對 */
+const TIMEOUT = { detect: 40000, refine: 35000 }
 
 /** 自動挑模型：可用、會看圖、名字有 flash；穩定版優先、版本新的優先、lite 排後面 */
 function rankModels(models, kind = /flash/) {
@@ -312,7 +338,7 @@ const JSON_HINT = `
  * 用某個模型送一次辨識。
  * simple＝簡化請求（不帶 responseSchema、不帶思考設定）：有些時候完整設定會讓 Google 一直回 500，簡化後就過了。
  */
-async function generate(model, image, simple = false, refs = []) {
+async function generate(model, image, simple = false, refs = [], thinking = true, signal = undefined) {
   // 有樣品照：先放樣品（每張前面寫正確名稱），最後才放要盤點的照片，緊接著說明
   const sampleParts = refs.length
     ? [
@@ -329,11 +355,11 @@ async function generate(model, image, simple = false, refs = []) {
           temperature: 0,
           responseMimeType: 'application/json',
           responseSchema: SCHEMA,
-          // 2.5 Flash 預設會先「想」很久；關掉思考，速度快很多
-          ...(/2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+          // 思考調到最少：找東西、畫框不用想，速度快很多
+          ...(thinking && thinkingFor(model) ? { thinkingConfig: thinkingFor(model) } : {}),
         },
   }
-  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, TIMEOUT.detect)
   const cand = data?.candidates?.[0]
   const text = cand?.content?.parts?.map((p) => p.text || '').join('') || ''
   if (!text) throw new ApiError(cand?.finishReason === 'SAFETY' ? 'AI 拒絕分析這張照片，請換一張。' : 'AI 沒有回傳結果，請再試一次。', 0, `empty response ${cand?.finishReason || ''}`)
@@ -374,18 +400,56 @@ async function sampleRefs() {
   return Promise.all(list.map(async (s) => ({ label: s.label, brand: s.brand, model: s.model, spec: s.spec, data: await blobToBase64(s.blob) })))
 }
 
+/** 主模型等這麼久還沒回，就同時請備用模型做，誰先回就用誰 */
+const HEDGE_MS = 15000
+
 async function analyze(photo, onStatus = () => {}, refs = []) {
   const image = await blobToBase64(photo.blob)
   const first = await currentModel()
   const list = modelCache ?? (await fetchModels().catch(() => [first]))
   const models = [first, ...list.filter((m) => m !== first)].slice(0, 4)
+  // 備用：最快的 Lite（分組不夠細沒關係，背景的相似品比對會用強的模型再分一次）
+  const backup = list.find((m) => m !== first && /lite/.test(m)) ?? list.find((m) => m !== first)
+  const hedge = new AbortController()
+  const primary = attemptChain(models, image, refs, onStatus, hedge.signal)
+  if (!backup) return primary.finally(() => hedge.abort())
+  let timer = 0
+  let started = false
+  const second = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      started = true
+      onStatus(`${first} 比較慢，同時請 ${backup} 一起做，誰先好就用誰`)
+      generate(backup, image, false, refs, true, hedge.signal).then(resolve, reject)
+    }, HEDGE_MS)
+    // 主模型在備用開始前就失敗（已經換過所有模型）：不用再等備用
+    primary.catch((e) => {
+      if (!started) {
+        clearTimeout(timer)
+        reject(e)
+      }
+    })
+  })
+  try {
+    return await Promise.any([primary, second])
+  } catch (agg) {
+    throw agg?.errors?.find((e) => e?.status !== 499) ?? agg?.errors?.[0] ?? agg
+  } finally {
+    clearTimeout(timer)
+    hedge.abort() // 輸的那一個取消掉，不浪費額度
+  }
+}
+
+/** 依序試：同一個模型（有思考設定 → 拿掉 → 簡化），不行就換下一個模型 */
+async function attemptChain(models, image, refs, onStatus, signal) {
   let lastErr
   for (const [mi, model] of models.entries()) {
+    if (signal?.aborted) break
     onStatus(mi === 0 ? `用 ${model} 辨識中` : `改用 ${model} 再試`)
     const plan = [
-      { simple: false, wait: 0 },
-      { simple: true, wait: 0 },
-      { simple: true, wait: 2000 },
+      { simple: false, thinking: true, wait: 0 },
+      // 不接受思考設定（400）或網路斷一下：同一個模型、拿掉思考設定再試
+      { simple: false, thinking: false, wait: 0 },
+      { simple: true, thinking: false, wait: 1500 },
     ]
     for (const [pi, step] of plan.entries()) {
       if (step.wait) {
@@ -393,27 +457,38 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
         await sleep(lastErr?.retryAfter ? Math.min(lastErr.retryAfter * 1000, 15000) : step.wait)
       }
       try {
-        const r = await generate(model, image, step.simple, refs)
+        // 第二次：上一次是 400（不接受思考設定）才拿掉；網路斷一下就照原本的快速設定再送
+        const think = pi === 1 ? lastErr?.status !== 400 : step.thinking
+        const r = await generate(model, image, step.simple, refs, think, signal)
         // 這個模型比較順：之後先用它（但不要換成 Lite：Lite 分不出相似品，只當備用）
         if (mi > 0 && !/lite/.test(model)) ls.set(LS.model, model)
         return r
       } catch (e) {
         lastErr = e
-        if (state.cancel) throw e
+        if (state.cancel || signal?.aborted) throw e
         if (!(e instanceof ApiError)) throw e
         if (e.status === 404) {
           if (mi === 0) ls.set(LS.model, '')
           break
         }
-        // 第一次失敗（不管 5xx 還是 400）就換簡化請求；簡化後還是 400 就是別的問題（Key、照片），不用再試
-        if (pi === 0 && (retryable(e) || e.status === 400)) continue
+        // 等太久：同一個模型再等一次也是慢，直接換下一個（比較快的）模型
+        if (e.status === 408) {
+          onStatus(`${model} 太慢，換比較快的模型`)
+          break
+        }
+        // 400：先拿掉思考設定、再改簡化請求；都不行就是別的問題（Key、照片）
+        if (e.status === 400) {
+          if (pi < plan.length - 1) continue
+          throw e
+        }
         if (!retryable(e)) throw e
-        // 簡化後還是 500：換模型比較快；503／429：等一下再試一次
+        if (e.status === 0) onStatus('網路斷了一下，重新送出')
+        // 500 一直出現：換模型比較快；503／429／網路：再試一次
         if (e.status === 500 || pi === plan.length - 1) break
       }
     }
   }
-  throw lastErr
+  throw lastErr ?? new ApiError('已取消', 499, 'cancelled')
 }
 
 // ───────────────────────── 相似品再比對（第二輪） ─────────────────────────
@@ -474,7 +549,7 @@ function refineCandidates(photo, objects, refs = []) {
   return out.slice(0, MAX_REFINE)
 }
 
-/** 用同一個比例切小圖：最大的那個長邊 512px，其他照比例縮 */
+/** 用同一個比例切小圖：最大的那個長邊 384px，其他照比例縮（夠看清楚粗細，圖小送得快） */
 async function sameScaleCrops(photo, objects, indices) {
   const bmp = await createImageBitmap(photo.blob)
   const boxes = indices.map((i) => {
@@ -487,7 +562,7 @@ async function sameScaleCrops(photo, objects, indices) {
     const ey = Math.min(bmp.height, (y2 + padY) * bmp.height)
     return { sx, sy, sw: ex - sx, sh: ey - sy }
   })
-  const scale = Math.min(2, 512 / Math.max(...boxes.map((b) => Math.max(b.sw, b.sh))))
+  const scale = Math.min(2, 384 / Math.max(...boxes.map((b) => Math.max(b.sw, b.sh))))
   const crops = []
   for (const b of boxes) {
     const canvas = document.createElement('canvas')
@@ -534,11 +609,22 @@ async function refineObjects(photo, objects, indices, refs = [], onStatus = () =
 每組的 label 是品名（用店內品項清單的寫法，不要把括號裡的說明寫進去）；spec 寫出這組跟其他組的差別（例如「等徑・粗」「等徑・細」「異徑・側口細」，看得出分數就寫「4分」「4分×3分」）；brand、model 看不出來就空字串；why 用一句話說這組的特徵。
 ${refs.length ? '如果某一組跟某張樣品一樣，label、brand、model、spec 就照那張樣品填，一字不差。\n' : ''}店內品項清單：
 ${catalogLines().join('\n')}`
-  const body = {
-    contents: [{ role: 'user', parts: [...sampleParts, ...objectParts, { text }] }],
-    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: REFINE_SCHEMA },
+  const send = (withThinking) => {
+    const think = withThinking ? thinkingFor(model, 'refine') : null
+    const body = {
+      contents: [{ role: 'user', parts: [...sampleParts, ...objectParts, { text }] }],
+      generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: REFINE_SCHEMA, ...(think ? { thinkingConfig: think } : {}) },
+    }
+    return call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, TIMEOUT.refine)
   }
-  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  let data
+  try {
+    data = await send(true)
+  } catch (e) {
+    // 不接受思考設定（400）或網路斷一下：拿掉思考設定再送一次
+    if (!(e instanceof ApiError) || ![0, 400].includes(e.status)) throw e
+    data = await send(false)
+  }
   const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
   const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, ''))
   let changed = 0
@@ -745,6 +831,7 @@ function viewReview() {
            <p class="footnote">${state.focus ? '再點一次框，可以單獨修改那一個（例如尺寸不一樣）。' : '點框或點清單，對照是哪一個；數量不對就按 ＋／－，名稱不對就點 ✎。'}</p>`
         : ''
     }
+    ${state.refining && state.refining.session === s.id ? `<div class="hint-card" role="status" style="margin-top:12px"><b>正在比對相似品…</b>（${state.refining.done}/${state.refining.total} 張）好了會自動更新，可以先看結果。</div>` : ''}
     ${notes}
     <p class="section-title">品項（${groups.length}）</p>
     ${
@@ -1113,6 +1200,7 @@ async function runAnalysis(indices) {
   const s = state.session
   state.cancel = false
   state.progress = { done: 0, total: indices.length, started: Date.now() }
+  keepAwake()
   go('analyzing')
   const timer = setInterval(() => {
     const el = document.getElementById('elapsed')
@@ -1123,32 +1211,77 @@ async function runAnalysis(indices) {
     const el = document.getElementById('ai-status')
     if (el) el.textContent = msg + (refs.length ? `（附 ${refs.length} 張樣品照）` : '')
   }
-  for (const i of indices) {
-    if (state.cancel) break
-    const photo = s.photos[i]
-    try {
-      const r = await analyze(photo, status, refs)
-      Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '' })
-      s.model = r.model
-      // 第二輪：同一類、但大小不一樣的框，切小圖並排再比一次
-      const cand = refineCandidates(photo, photo.objects, refs)
-      if (cand.length && !state.cancel) {
-        try {
-          const rr = await refineObjects(photo, photo.objects, cand, refs, status)
-          if (rr.model) s.model = rr.model === r.model ? `${r.model}（含相似品比對）` : `${r.model} ＋ ${rr.model} 比對`
-        } catch {
-          photo.note = [photo.note, '相似品再比對沒有成功，先保留第一輪的結果；可以點品項的 ✎ →「再比對一次」。'].filter(Boolean).join(' ')
-        }
+  // 多張照片一次送兩張（總時間差不多減半；再多會撞到免費額度每分鐘上限）
+  const queue = [...indices]
+  const worker = async () => {
+    while (queue.length && !state.cancel) {
+      const photo = s.photos[queue.shift()]
+      try {
+        const r = await analyze(photo, status, refs)
+        Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '' })
+        s.model = r.model
+      } catch (e) {
+        Object.assign(photo, { status: 'error', error: e.message || String(e), errorDetail: e.detail || '' })
       }
-    } catch (e) {
-      Object.assign(photo, { status: 'error', error: e.message || String(e), errorDetail: e.detail || '' })
+      state.progress.done += 1
+      await save()
+      if (state.view === 'analyzing') render()
     }
-    state.progress.done += 1
-    await save()
-    if (state.view === 'analyzing') render()
   }
+  await Promise.all([worker(), worker()])
   clearInterval(timer)
+  releaseWakeLock()
   go('review', { photoIndex: 0 })
+  // 結果先給你看；相似品在背景再比一次，好了自動更新
+  if (!state.cancel) backgroundRefine(s, indices, refs)
+}
+
+/**
+ * 第二輪在背景跑：同一類、但大小不一樣的框，切小圖並排再比一次。
+ * 先記住要比的那幾個框（物件本身），等待時你刪了或改了框也不會對錯位置；你改過的框不會被蓋掉。
+ */
+async function backgroundRefine(s, indices, refs) {
+  const jobs = indices
+    .map((i) => s.photos[i])
+    .filter((p) => p?.status === 'done')
+    .map((p) => ({ photo: p, objs: refineCandidates(p, p.objects, refs).map((oi) => p.objects[oi]) }))
+    .filter((j) => j.objs.length >= 2)
+  if (!jobs.length) return
+  state.refining = { session: s.id, total: jobs.length, done: 0 }
+  if (state.session === s && state.view === 'review') render()
+  let groups = 0
+  for (const { photo, objs } of jobs) {
+    const free = objs.filter((o) => !o.edited && photo.objects.includes(o))
+    try {
+      const rr = await refineObjects(photo, free, free.map((_, k) => k), refs)
+      groups += rr.groups || 0
+      if (rr.model && !/比對/.test(s.model || '')) s.model = rr.model === s.model ? `${s.model}（含相似品比對）` : `${s.model} ＋ ${rr.model} 比對`
+    } catch {
+      photo.note = [photo.note, '相似品再比對沒有成功，先保留第一輪的結果；可以點品項的 ✎ →「再比對一次」。'].filter(Boolean).join(' ')
+    }
+    state.refining.done += 1
+    await db.put(s)
+    if (state.session === s && state.view === 'review') render()
+  }
+  state.refining = null
+  if (state.session === s && state.view === 'review') {
+    render()
+    toast(groups > 1 ? '相似品比對完成，已經分開不同尺寸' : '相似品比對完成')
+  }
+}
+
+// 辨識時讓螢幕保持亮著（螢幕暗掉或切到別的 App，手機會把連線斷掉）
+let wakeLock = null
+async function keepAwake() {
+  try {
+    wakeLock = await navigator.wakeLock?.request('screen')
+  } catch {
+    wakeLock = null
+  }
+}
+function releaseWakeLock() {
+  wakeLock?.release?.().catch(() => {})
+  wakeLock = null
 }
 
 async function addFiles(files) {

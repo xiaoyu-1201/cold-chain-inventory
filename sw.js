@@ -1,5 +1,5 @@
 // 讓 App 本身離線也能打開（AI 辨識還是要網路）；有新版時背景更新，下次打開就是新的
-const CACHE = 'inventory-v4'
+const CACHE = 'inventory-v5'
 const SHELL = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png']
 
 self.addEventListener('install', (e) => {
