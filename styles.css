@@ -154,6 +154,207 @@ button.row:active {
 button.row[aria-current='true'] {
   background: var(--tint-soft);
 }
+/* ── 結果頁總結卡：一眼看到共幾件、幾種、有幾個要確認 ── */
+.summary {
+  margin: 12px 0 16px;
+  padding: 16px;
+  border-radius: 20px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.sum-nums {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sum-big {
+  font-size: 52px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.sum-unit {
+  margin-left: 6px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.sum-side {
+  font-size: 17px;
+  color: var(--text-2);
+}
+.sum-side b {
+  color: var(--text);
+  font-size: 22px;
+}
+.sum-doubt {
+  margin-top: 14px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 14px;
+  background: color-mix(in srgb, #ff9f0a 16%, var(--card));
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.sum-doubt .meta {
+  color: var(--text-2);
+  font-size: 14px;
+}
+.sum-dot {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #ff9f0a;
+  color: #fff;
+  font-weight: 800;
+}
+.sum-ok {
+  margin-top: 12px;
+  color: #30a46c;
+  font-weight: 600;
+}
+/* 要確認的框：橘色虛線＋右上角「?」 */
+.box.doubt {
+  border-style: dashed;
+  border-color: #ff9f0a;
+  box-shadow: 0 0 0 2px rgba(255, 159, 10, 0.25);
+}
+.box .qmark {
+  position: absolute;
+  right: -9px;
+  top: -9px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ff9f0a;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+.doubt-reason {
+  margin: 0 0 6px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, #ff9f0a 14%, var(--card));
+  font-size: 15px;
+}
+/* 照片右下角的「放大」 */
+.photo-zoom {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 20px;
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  cursor: pointer;
+  z-index: 2;
+}
+.photo-wrap.adding {
+  cursor: crosshair;
+  outline: 3px solid var(--tint);
+  outline-offset: 2px;
+}
+.add-hint {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--tint-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+/* 放大看照片：全螢幕、可以上下左右捲、＋／－ 縮放；框照樣可以點 */
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+}
+.viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(var(--safe-t) + 8px) 12px 8px;
+  background: rgba(0, 0, 0, 0.7);
+}
+.viewer-scroll {
+  flex: 1;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.viewer .photo-wrap.viewer-photo {
+  border-radius: 0;
+  box-shadow: none;
+  max-width: none;
+}
+.viewer-bar .zoom-label {
+  flex: 1;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+}
+.viewer-bar .btn.secondary {
+  min-width: 44px;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-size: 20px;
+}
+body.no-scroll {
+  overflow: hidden;
+}
+/* 底部面板：從下面滑上來、背景淡入（Apple 的 sheet） */
+.sheet-backdrop {
+  animation: fade-in 0.2s ease;
+}
+.sheet {
+  animation: sheet-up 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+/* 按下去有回饋 */
+.btn:active:not(:disabled),
+.sum-doubt:active,
+.photo-zoom:active {
+  transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet,
+  .sheet-backdrop {
+    animation: none;
+  }
+}
+
 /* 結果頁「辨識過程」：小字，平常收起來，有問題時展開截圖 */
 .trace {
   margin: 8px 4px 0;

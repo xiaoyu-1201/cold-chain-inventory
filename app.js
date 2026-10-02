@@ -8,7 +8,7 @@ const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '1.9（10/3・手動分類不再被蓋掉）'
+const VERSION = '2.0（10/3・自動標出要確認的）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -301,6 +301,8 @@ const SCHEMA = {
           spec: { type: 'STRING', description: '尺寸／容量／規格（例如 3分、10.9kg、4L）；看不出來就空字串' },
           box_2d: { type: 'ARRAY', items: { type: 'INTEGER' }, description: '[ymin, xmin, ymax, xmax]，0～1000' },
           confidence: { type: 'NUMBER', description: '0～1，有多確定' },
+          odd: { type: 'BOOLEAN', description: '跟同一種的其他個比，大小、粗細、形狀、顏色或標籤明顯不一樣就 true' },
+          odd_reason: { type: 'STRING', description: 'odd 是 true 時，10 個字以內寫哪裡不同（例如「比較粗」「側口比較細」）' },
         },
         required: ['label', 'brand', 'model', 'spec', 'box_2d', 'confidence'],
       },
@@ -319,10 +321,12 @@ function prompt(sampleCount = 0) {
 4. 貨架、標價牌、手、紙箱外的雜物不算商品。
 5. box_2d 用 [ymin, xmin, ymax, xmax]，是相對整張照片的 0～1000。
 6. 外觀很像、只差尺寸或形狀的同類商品（例如銅管三通、彎頭、接頭），要逐個比較：管子粗細、三個接口是不是一樣粗（等徑）還是有一個比較細（異徑）、長短。不一樣的就分成不同品項，spec 寫出差別（例如「等徑・粗」「等徑・細」「異徑・側口細」）；看得出分數（2分、3分、4分…）就寫分數。不要把不同尺寸全部歸成同一種。
+7. 同一種有好幾個時，一個一個看：如果某一個的大小、粗細、接口、顏色或標籤跟其他個不一樣（你不確定是不是同一種），那一個的 odd 設 true，odd_reason 用 10 個字以內寫哪裡不同。一樣的就不用寫 odd。
+8. 同一個東西只給一個框，不要重複框。
 ${
   sampleCount
-    ? `7. 前面附了 ${sampleCount} 張「店內樣品」照片，每張只拍一個商品，名稱是正確的。【要盤點的照片】裡的商品如果跟某張樣品一樣（形狀、粗細比例、接口大小都一樣），label、brand、model、spec 就照那張樣品填，一字不差；跟每張樣品都不像，才照一般規則寫。
-8. box_2d 只標【要盤點的照片】裡的位置；樣品照不要框、不要算數量。
+    ? `9. 前面附了 ${sampleCount} 張「店內樣品」照片，每張只拍一個商品，名稱是正確的。【要盤點的照片】裡的商品如果跟某張樣品一樣（形狀、粗細比例、接口大小都一樣），label、brand、model、spec 就照那張樣品填，一字不差；跟每張樣品都不像，才照一般規則寫。
+10. box_2d 只標【要盤點的照片】裡的位置；樣品照不要框、不要算數量。
 `
     : ''
 }店內品項清單：
@@ -332,7 +336,7 @@ ${catalogLines().join('\n')}`
 /** 簡化模式不用 responseSchema，改在文字裡說明要的格式 */
 const JSON_HINT = `
 只回 JSON，不要其他文字，格式：
-{"objects":[{"label":"品名","brand":"品牌","model":"型號","spec":"尺寸／規格","box_2d":[ymin,xmin,ymax,xmax],"confidence":0.9}],"note":"需要人工確認的地方"}`
+{"objects":[{"label":"品名","brand":"品牌","model":"型號","spec":"尺寸／規格","box_2d":[ymin,xmin,ymax,xmax],"confidence":0.9,"odd":false,"odd_reason":""}],"note":"需要人工確認的地方"}`
 
 /**
  * 用某個模型送一次辨識。
@@ -370,20 +374,39 @@ async function generate(model, image, simple = false, refs = [], thinking = true
   } catch {
     throw new ApiError('AI 回傳的格式壞掉了，請再試一次。', 0, `bad json: ${text.slice(0, 120)}`)
   }
-  return {
-    objects: (parsed.objects || [])
-      .filter((o) => Array.isArray(o.box_2d) && o.box_2d.length === 4 && o.label)
-      .map((o) => ({
-        label: cleanLabel(o.label),
-        brand: String(o.brand || '').trim(),
-        model: String(o.model || '').trim(),
-        spec: String(o.spec || '').trim(),
-        box: o.box_2d.map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
-        confidence: Math.min(1, Math.max(0, Number(o.confidence) || 0)),
-      })),
-    note: String(parsed.note || ''),
-    model,
-  }
+  const objects = (parsed.objects || [])
+    .filter((o) => Array.isArray(o.box_2d) && o.box_2d.length === 4 && o.label)
+    .map((o) => ({
+      label: cleanLabel(o.label),
+      brand: String(o.brand || '').trim(),
+      model: String(o.model || '').trim(),
+      spec: String(o.spec || '').trim(),
+      box: o.box_2d.map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
+      confidence: Math.min(1, Math.max(0, Number(o.confidence) || 0)),
+      ...(o.odd ? { odd: true, oddReason: String(o.odd_reason || '').trim().slice(0, 20) } : {}),
+    }))
+  const { kept, merged } = dedupe(objects)
+  const note = [String(parsed.note || ''), merged ? `同一個東西被框了兩次的，已經合併 ${merged} 個。` : ''].filter(Boolean).join(' ')
+  return { objects: kept, note, model }
+}
+
+/** 兩個框重疊 7 成以上、而且是同一種：AI 把同一個東西框了兩次 → 留比較有把握的那個（數量才不會多算） */
+function iou(a, b) {
+  const [ay1, ax1, ay2, ax2] = a
+  const [by1, bx1, by2, bx2] = b
+  const iw = Math.max(0, Math.min(ax2, bx2) - Math.max(ax1, bx1))
+  const ih = Math.max(0, Math.min(ay2, by2) - Math.max(ay1, by1))
+  const inter = iw * ih
+  const union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+  return union > 0 ? inter / union : 0
+}
+function dedupe(objects) {
+  const sorted = [...objects].sort((a, b) => b.confidence - a.confidence)
+  const kept = []
+  for (const o of sorted) if (!kept.some((k) => norm(k.label) === norm(o.label) && iou(k.box, o.box) > 0.7)) kept.push(o)
+  // 保持原本的順序
+  const keep = new Set(kept)
+  return { kept: objects.filter((o) => keep.has(o)), merged: objects.length - kept.length }
 }
 
 /**
@@ -702,6 +725,43 @@ function groupsOf(session) {
   return groups.map((g) => ({ ...g, color: COLORS[colorOf[g.key]], count: g.manual ? g.manual.count : (session.counts?.[g.key] ?? g.boxes) }))
 }
 
+/**
+ * 「要確認」的框：自動挑出可能不一樣的，你只要看這幾個（不用一個一個看）。
+ * 理由（照順序判斷，一個框只列一個理由）：
+ * ① AI 自己說跟同一種的其他個不一樣（odd）
+ * ② 大小跟同一種的其他個差很多（同一張照片裡比；3 個以上差 30%、只有 2 個差 35%）
+ * ③ AI 沒把握（信心 < 0.6）
+ * 你確認過（按「一樣」或改過種類）就不再列出。
+ */
+function doubtsOf(session) {
+  const out = []
+  session.photos.forEach((photo, pi) => {
+    if (!photo.w || !photo.h) return
+    const byKey = new Map()
+    photo.objects.forEach((o) => {
+      const k = keyOf(o)
+      if (!byKey.has(k)) byKey.set(k, [])
+      byKey.get(k).push(o)
+    })
+    for (const objs of byKey.values()) {
+      const sizes = objs.map((o) => boxPx(photo, o).long)
+      const med = [...sizes].sort((a, b) => a - b)[Math.floor(sizes.length / 2)] || 1
+      const pairGap = objs.length === 2 ? Math.max(...sizes) / Math.max(1, Math.min(...sizes)) : 1
+      objs.forEach((o, i) => {
+        if (o.checked || o.edited) return
+        const diff = sizes[i] / med - 1
+        let reason = ''
+        if (o.odd) reason = o.oddReason ? `AI 說這一個${o.oddReason}` : 'AI 覺得跟同一種的其他個不太一樣'
+        else if (objs.length >= 3 && Math.abs(diff) > 0.3) reason = `比同一種的其他個${diff > 0 ? '大' : '小'}約 ${Math.round(Math.abs(diff) * 100)}%`
+        else if (pairGap > 1.35) reason = '這一種只有 2 個，但大小差很多'
+        else if (o.confidence < 0.6) reason = 'AI 不太確定這是什麼'
+        if (reason) out.push({ pi, o, reason })
+      })
+    }
+  })
+  return out
+}
+
 /** 改數量（手動新增的存在品項上；AI 的存成覆寫值） */
 function setCount(session, g, n) {
   const count = Math.max(0, n)
@@ -763,10 +823,10 @@ function summaryOf(session) {
 }
 
 // ───────────────────────── 畫面狀態 ─────────────────────────
-const state = { view: 'home', session: null, photoIndex: 0, focus: null, focusObj: null, busy: false, cancel: false, progress: null, refining: null }
+const state = { view: 'home', session: null, photoIndex: 0, focus: null, focusObj: null, busy: false, cancel: false, progress: null, refining: null, addMode: false, viewer: false, zoom: 2 }
 
 function go(view, extra = {}) {
-  Object.assign(state, { view, focus: null, focusObj: null }, extra)
+  Object.assign(state, { view, focus: null, focusObj: null, addMode: false, viewer: false }, extra)
   render()
   window.scrollTo({ top: 0 })
 }
@@ -855,30 +915,68 @@ function viewReview() {
   const photo = s.photos[state.photoIndex]
   const colorOfRef = new Map()
   groups.forEach((g, gi) => g.refs.forEach((r) => colorOfRef.set(`${r.pi}:${r.oi}`, { color: g.color, gi, key: g.key })))
-  const boxes = photo
-    ? photo.objects
-        .map((o, oi) => {
-          const ref = colorOfRef.get(`${state.photoIndex}:${oi}`)
-          if (!ref) return ''
-          const [y1, x1, y2, x2] = o.box
-          const on = state.focusObj ? state.focusObj === o : state.focus === ref.key
-          return `<div class="box ${on ? 'on' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}" data-obj="${state.photoIndex}:${oi}"><span class="tag">${ref.gi + 1}</span></div>`
-        })
-        .join('')
-    : ''
+  const doubts = doubtsOf(s)
+  const doubtSet = new Set(doubts.map((d) => d.o))
+  const boxesOf = (pi) =>
+    s.photos[pi].objects
+      .map((o, oi) => {
+        const ref = colorOfRef.get(`${pi}:${oi}`)
+        if (!ref) return ''
+        const [y1, x1, y2, x2] = o.box
+        const on = state.focusObj ? state.focusObj === o : state.focus === ref.key
+        const doubt = doubtSet.has(o)
+        return `<div class="box ${on ? 'on' : ''} ${doubt ? 'doubt' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}" data-obj="${pi}:${oi}"><span class="tag">${ref.gi + 1}</span>${doubt ? '<span class="qmark" aria-label="要確認">?</span>' : ''}</div>`
+      })
+      .join('')
+  const boxes = photo ? boxesOf(state.photoIndex) : ''
+  const total = totalQty(s)
+  const doubtsByKey = new Map()
+  doubts.forEach((d) => doubtsByKey.set(keyOf(d.o), (doubtsByKey.get(keyOf(d.o)) || 0) + 1))
   const errors = s.photos.map((p, i) => (p.status !== 'done' ? `<div class="error-card">第 ${i + 1} 張沒辨識成功：${esc(p.error || '還沒辨識（被取消）')} <button class="btn small secondary" data-retry="${i}" style="margin-left:6px">再試一次</button>${p.errorDetail ? `<div style="margin-top:8px;font-size:12px;color:var(--text-2);word-break:break-all">錯誤代碼：${esc(p.errorDetail)}</div>` : ''}</div>` : '')).join('')
   const notes = s.photos.map((p, i) => (p.note ? `<p class="footnote">第 ${i + 1} 張 AI 備註：${esc(p.note)}</p>` : '')).join('')
   return `
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}<button class="btn small secondary" data-action="add">＋ 手動新增</button></div>
     <h1 class="large-title">${esc(s.place || '盤點結果')}</h1>
-    <p class="subtitle">${fmtTime(s.createdAt)}・${groups.length} 種、共 ${totalQty(s)} 件${s.model ? `・${esc(s.model)}` : ''}</p>
+    <p class="subtitle">${fmtTime(s.createdAt)}${s.model ? `・${esc(s.model)}` : ''}</p>
     ${errors ? `<div class="stack">${errors}</div>` : ''}
     ${
+      groups.length
+        ? `<section class="summary" aria-label="盤點總結">
+            <div class="sum-nums">
+              <div><span class="sum-big">${total}</span><span class="sum-unit">件</span></div>
+              <div class="sum-side"><b>${groups.length}</b> 種${s.photos.length > 1 ? `・${s.photos.length} 張照片` : ''}</div>
+            </div>
+            ${
+              doubts.length
+                ? `<button class="sum-doubt" data-action="review-doubts"><span class="sum-dot" aria-hidden="true">?</span><span class="grow"><b>${doubts.length} 個要確認</b><br><span class="meta">可能尺寸不同或 AI 沒把握；只看這幾個就好</span></span>${chev}</button>`
+                : `<div class="sum-ok"><span aria-hidden="true">✓</span> 沒有需要確認的${state.refining && state.refining.session === s.id ? '（相似品還在比對）' : ''}</div>`
+            }
+          </section>`
+        : ''
+    }
+    ${
       photo
-        ? `<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''}" data-photo><img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">${boxes}</div>
+        ? `<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''}" data-photo><img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">${boxes}
+             <button class="photo-zoom" data-action="zoom" aria-label="放大看照片">⤢</button>
+           </div>
+           ${state.addMode ? '<div class="add-hint" role="status"><b>點照片上漏掉的那一個</b>，會在那裡加一個框 <button class="btn small plain" data-action="add-cancel">取消</button></div>' : ''}
            ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張"><img src="${urlOf(p)}" alt=""></button>`).join('')}</div>` : ''}
+           <div class="row-actions" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>＋ 漏掉的，點照片補一個</button></div>
            <p class="footnote">點照片上的框：直接改成別的種類，改完自動跳下一個。點下面的清單：看那一種在哪裡；數量不對按 ＋／－。</p>`
+        : ''
+    }
+    ${
+      state.viewer && photo
+        ? `<div class="viewer" role="dialog" aria-label="放大看照片">
+            <div class="viewer-bar">
+              <button class="btn small plain" data-action="zoom-close">完成</button>
+              <span class="zoom-label">放大 ${state.zoom} 倍・可以上下左右滑</span>
+              <button class="btn small secondary" data-action="zoom-out" ${state.zoom <= 1 ? 'disabled' : ''} aria-label="縮小">−</button>
+              <button class="btn small secondary" data-action="zoom-in" ${state.zoom >= 4 ? 'disabled' : ''} aria-label="放大">＋</button>
+            </div>
+            <div class="viewer-scroll"><div class="photo-wrap viewer-photo ${state.focusObj ? 'focus' : ''}" style="width:${state.zoom * 100}%" data-photo><img src="${urlOf(photo)}" alt="">${boxes}</div></div>
+          </div>`
         : ''
     }
     ${state.refining && state.refining.session === s.id ? `<div class="hint-card" role="status" style="margin-top:12px"><b>正在比對相似品…</b>（${state.refining.done}/${state.refining.total} 張）好了會自動更新，可以先看結果。</div>` : ''}
@@ -895,7 +993,7 @@ function viewReview() {
           <div class="item ${state.focus === g.key ? 'on' : ''}" data-item="${esc(g.key)}">
             <button class="swatch" style="--c:${g.color}" data-focus="${esc(g.key)}" aria-label="在照片上標出 ${esc(g.label)}">${gi + 1}</button>
             <button class="grow edit-btn" data-edit="${esc(g.key)}" aria-label="修改 ${esc(g.label)} 的名稱、品牌、型號、規格">
-              <span class="name">${esc(g.label)}</span><span class="pencil" aria-hidden="true">✎</span>${g.manual ? '<span class="badge edit">手動</span>' : g.conf < 0.6 && !g.edited ? '<span class="badge low">請確認</span>' : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}
+              <span class="name">${esc(g.label)}</span><span class="pencil" aria-hidden="true">✎</span>${g.manual ? '<span class="badge edit">手動</span>' : doubtsByKey.get(g.key) ? `<span class="badge low">${doubtsByKey.get(g.key)} 個要確認</span>` : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}
               <br><span class="spec">${esc(detailOf(g) || '點 ✎ 補品牌、型號、尺寸')}${!g.manual && g.count !== g.boxes ? `・照片裡 ${g.boxes} 個` : ''}</span>
             </button>
             <span class="stepper"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">−</button><input inputmode="numeric" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.label)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">＋</button></span>
@@ -959,7 +1057,16 @@ async function viewSettings() {
 
 async function render() {
   const html = state.view === 'home' ? await viewHome() : state.view === 'capture' ? viewCapture() : state.view === 'analyzing' ? viewAnalyzing() : state.view === 'review' ? viewReview() : await viewSettings()
+  // 放大看照片時，重畫畫面不要讓位置跳回左上角
+  const vs = document.querySelector('.viewer-scroll')
+  const keep = vs ? { x: vs.scrollLeft / Math.max(1, vs.scrollWidth), y: vs.scrollTop / Math.max(1, vs.scrollHeight) } : null
   $app.innerHTML = html
+  const nv = document.querySelector('.viewer-scroll')
+  if (keep && nv) {
+    nv.scrollLeft = keep.x * nv.scrollWidth
+    nv.scrollTop = keep.y * nv.scrollHeight
+  }
+  document.body.classList.toggle('no-scroll', !!document.querySelector('.viewer'))
   bindInputs()
 }
 
@@ -1102,14 +1209,48 @@ async function editSheet(key) {
  * 點照片上的框：「這一個是哪一種？」按一下就改，自動跳到下一個框；一路點下去就分完。
  * 順序是由上到下、由左到右；也可以按 ‹ › 自己跳。
  */
-function quickSheet(pi, startOi) {
+/** 補框：在點的位置加一個框（大小取這張照片其他框的中間值），標成手動補的，馬上問它是哪一種 */
+async function addBoxAt(wrap, e) {
   const s = state.session
+  const pi = state.photoIndex
   const photo = s.photos[pi]
-  if (!photo?.objects[startOi]) return
+  const rect = wrap.getBoundingClientRect()
+  const x = ((e.clientX - rect.left) / rect.width) * 1000
+  const y = ((e.clientY - rect.top) / rect.height) * 1000
+  const ws = photo.objects.map((o) => o.box[3] - o.box[1]).sort((a, b) => a - b)
+  const hs = photo.objects.map((o) => o.box[2] - o.box[0]).sort((a, b) => a - b)
+  const w = ws[Math.floor(ws.length / 2)] || 120
+  const h = hs[Math.floor(hs.length / 2)] || 120
+  const clamp = (v) => Math.min(1000, Math.max(0, Math.round(v)))
+  // 預設跟這張照片最多的那一種一樣，等一下可以改
+  const groups = groupsOf(s).filter((g) => !g.manual && g.refs.some((r) => r.pi === pi))
+  const base = [...groups].sort((a, b) => b.boxes - a.boxes)[0] || { label: '商品', brand: '', model: '', spec: '' }
+  const o = { label: base.label, brand: base.brand, model: base.model, spec: base.spec, box: [clamp(y - h / 2), clamp(x - w / 2), clamp(y + h / 2), clamp(x + w / 2)], confidence: 1, edited: true, added: true }
+  photo.objects.push(o)
+  state.addMode = false
+  await save()
+  render()
+  toast('補了一個；選它是哪一種')
+  quickSheet([{ pi, o, reason: '你剛剛補的' }], 0)
+}
+
+/** 一張照片的所有框，照閱讀順序（由上到下、由左到右） */
+function photoEntries(pi) {
+  const photo = state.session.photos[pi]
   const center = (o) => ({ y: (o.box[0] + o.box[2]) / 2, x: (o.box[1] + o.box[3]) / 2 })
+  return [...photo.objects].sort((a, b) => Math.round(center(a).y / 120) - Math.round(center(b).y / 120) || center(a).x - center(b).x).map((o) => ({ pi, o }))
+}
+
+/**
+ * entries：要一個一個看的框（{ pi, o, reason }）；doubt＝「只看要確認的」模式（多一個「一樣，沒問題」）。
+ * 跨照片時會自動切到那一張，後面的大圖跟著換。
+ */
+function quickSheet(entries, start = 0, { doubt = false } = {}) {
+  const s = state.session
+  if (!entries.length) return
   // 用物件本身記順序（刪掉框時索引會變）
-  const order = [...photo.objects].sort((a, b) => Math.round(center(a).y / 120) - Math.round(center(b).y / 120) || center(a).x - center(b).x)
-  let cur = order.indexOf(photo.objects[startOi])
+  const order = [...entries]
+  let cur = Math.max(0, Math.min(start, order.length - 1))
   let previewUrl = ''
   let formOpen = false
   sheet('<div id="q-body"></div>', (el, close) => {
@@ -1121,37 +1262,45 @@ function quickSheet(pi, startOi) {
       render()
     }
     const go = (i) => {
-      if (i < 0 || i >= order.length) return finish()
+      if (i < 0) return
+      if (i >= order.length) {
+        if (doubt) toast('要確認的都看完了')
+        return finish()
+      }
       cur = i
       formOpen = false
       draw()
     }
     const assign = async (fields) => {
-      const o = order[cur]
-      const oi = photo.objects.indexOf(o)
+      const { pi, o } = order[cur]
+      const oi = s.photos[pi].objects.indexOf(o)
       if (oi < 0) return go(cur + 1)
       moveObjects(s, [{ pi, oi }], fields)
       await save()
       render()
       if (cur + 1 >= order.length) {
-        toast('已經是最後一個了')
+        toast(doubt ? '要確認的都看完了' : '已經是最後一個了')
         return finish()
       }
       go(cur + 1)
     }
     const draw = async () => {
-      const o = order[cur]
+      const { pi, o, reason } = order[cur]
+      const photo = s.photos[pi]
       state.focusObj = o
+      if (state.photoIndex !== pi) state.photoIndex = pi
       render()
       const groups = groupsOf(s).filter((g) => !g.manual)
       const mine = groups.find((g) => g.key === keyOf(o))
       body.innerHTML = `
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-          <h2 class="sheet-title" style="margin:0">這一個是哪一種？</h2>
-          <span class="muted" style="font-size:15px">第 ${cur + 1} / ${order.length} 個</span>
+          <h2 class="sheet-title" style="margin:0">${doubt ? '這一個一樣嗎？' : '這一個是哪一種？'}</h2>
+          <span class="muted" style="font-size:15px">${doubt ? '要確認的' : ''}第 ${cur + 1} / ${order.length} 個${s.photos.length > 1 ? `・第 ${pi + 1} 張照片` : ''}</span>
         </div>
         <img id="q-img" alt="這一個框的放大圖" style="display:block;width:100%;height:120px;object-fit:contain;margin:10px 0 8px;border-radius:12px;background:var(--card-2)">
+        ${reason ? `<p class="doubt-reason">為什麼要看：${esc(reason)}</p>` : ''}
         <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${esc(detailOf(o))}` : ''}` : esc(o.label)}</p>
+        ${doubt ? `<button class="btn block" id="q-same" style="margin-bottom:12px">✓ 一樣，就是「${esc(mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label)}」</button><p class="sheet-sub" style="margin:0 0 8px">不一樣的話，選它是哪一種：</p>` : ''}
         <div class="group">
           ${groups
             .map(
@@ -1171,6 +1320,12 @@ function quickSheet(pi, startOi) {
         </div>
         <button class="btn plain block" id="q-more" style="margin-top:8px">改品牌、型號，或存成樣品照…</button>
         <button class="btn danger block" id="q-del" style="margin-top:8px">這不是商品，刪掉這個框</button>`
+      body.querySelector('#q-same')?.addEventListener('click', async () => {
+        o.checked = true
+        await save()
+        render()
+        go(cur + 1)
+      })
       cropBox(photo, o.box)
         .then((blob) => {
           if (previewUrl) URL.revokeObjectURL(previewUrl)
@@ -1180,9 +1335,14 @@ function quickSheet(pi, startOi) {
         })
         .catch(() => {})
       body.querySelectorAll('[data-q]').forEach((b) =>
-        b.addEventListener('click', () => {
+        b.addEventListener('click', async () => {
           const g = groups[Number(b.dataset.q)]
-          if (g === mine) return go(cur + 1)
+          if (g === mine) {
+            // 選了目前這一種＝確認一樣
+            o.checked = true
+            await save()
+            return go(cur + 1)
+          }
           assign({ label: g.label, brand: g.brand, model: g.model, spec: g.spec })
         }),
       )
@@ -1501,6 +1661,9 @@ async function addFiles(files) {
 }
 
 $app.addEventListener('click', async (e) => {
+  // 補框模式：點照片哪裡，就在那裡加一個框（大小跟這張照片的其他框差不多），再選它是哪一種
+  const wrap = e.target.closest('[data-photo]')
+  if (state.addMode && wrap && !e.target.closest('[data-action]')) return addBoxAt(wrap, e)
   const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry]')
   if (!t) {
     // 點空白處取消標示（不捲回頂端）
@@ -1526,10 +1689,15 @@ $app.addEventListener('click', async (e) => {
     return render()
   }
   if (d.focus !== undefined) {
-    // 點照片上的框＝「這一個是哪一種？」直接改
-    if (d.obj) {
+    // 點照片上的框＝「這一個是哪一種？」直接改（補框模式時，點到框也當成補在那裡）
+    if (d.obj && !state.addMode) {
       const [pi, oi] = d.obj.split(':').map(Number)
-      return quickSheet(pi, oi)
+      const entries = photoEntries(pi)
+      const doubts = doubtsOf(state.session)
+      const target = state.session.photos[pi].objects[oi]
+      // 帶上「為什麼要看」的理由
+      entries.forEach((en) => (en.reason = doubts.find((x) => x.o === en.o)?.reason || ''))
+      return quickSheet(entries, entries.findIndex((en) => en.o === target))
     }
     const key = state.focus === d.focus ? null : d.focus
     // 點清單時，照片切到有這個品項的那張
@@ -1640,6 +1808,29 @@ $app.addEventListener('click', async (e) => {
       return render()
     case 'force-update':
       return forceUpdate()
+    case 'review-doubts':
+      return quickSheet(doubtsOf(state.session), 0, { doubt: true })
+    case 'add-box':
+      state.addMode = true
+      state.focus = null
+      render()
+      return toast('點照片上漏掉的那一個')
+    case 'add-cancel':
+      state.addMode = false
+      return render()
+    case 'zoom':
+      state.viewer = true
+      state.zoom = 2
+      return render()
+    case 'zoom-in':
+      state.zoom = Math.min(4, state.zoom + 1)
+      return render()
+    case 'zoom-out':
+      state.zoom = Math.max(1, state.zoom - 1)
+      return render()
+    case 'zoom-close':
+      state.viewer = false
+      return render()
     case 'del-sample':
       if (!confirm('刪掉這張樣品照？')) return
       await idb.samples.del(d.id)

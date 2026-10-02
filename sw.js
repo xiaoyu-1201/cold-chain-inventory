@@ -1,6 +1,6 @@
 // 讓 App 本身離線也能打開（AI 辨識還是要網路）
 // 更新：每次都先問 GitHub 有沒有新版（跳過手機的 10 分鐘暫存）；新版裝好會自動重新整理一次
-const CACHE = 'inventory-v8'
+const CACHE = 'inventory-v9'
 const SHELL = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png']
 
 self.addEventListener('install', (e) => {
