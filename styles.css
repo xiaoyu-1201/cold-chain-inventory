@@ -154,6 +154,118 @@ button.row:active {
 button.row[aria-current='true'] {
   background: var(--tint-soft);
 }
+/* ── 首頁「總表與匯出」卡片 ── */
+.report-card {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 4px;
+  padding: 16px;
+  border: 0;
+  border-radius: 20px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--tint) 16%, var(--card)), var(--card));
+  box-shadow: var(--shadow);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.report-card .grow {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.report-card-kicker {
+  color: var(--tint);
+  font-size: 14px;
+  font-weight: 700;
+}
+.report-card-nums {
+  font-size: 18px;
+}
+.report-card-nums b {
+  font-size: 26px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.report-card .meta {
+  color: var(--text-2);
+  font-size: 14px;
+}
+/* ── 總表頁 ── */
+.seg {
+  display: flex;
+  padding: 3px;
+  margin: 4px 0 14px;
+  border-radius: 12px;
+  background: var(--card-2);
+}
+.seg button {
+  flex: 1;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.seg button[aria-selected='true'] {
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.stat {
+  padding: 12px 10px;
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+.stat-num {
+  display: block;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.stat-label {
+  color: var(--text-2);
+  font-size: 14px;
+}
+.report-row .report-count {
+  flex: none;
+  min-width: 48px;
+  text-align: right;
+  font-size: 24px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.steps {
+  margin: 10px 2px 0;
+  font-size: 15px;
+  color: var(--text-2);
+}
+.steps summary {
+  color: var(--tint);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.steps ol {
+  padding-left: 20px;
+  line-height: 1.7;
+}
+
 /* ── 結果頁總結卡：一眼看到共幾件、幾種、有幾個要確認 ── */
 .summary {
   margin: 12px 0 16px;

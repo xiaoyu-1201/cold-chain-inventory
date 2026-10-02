@@ -1,14 +1,16 @@
 /**
  * 拍照盤點（冷凍材料行）
- * 拍貨架 → Gemini 視覺模型找出每個商品並框起來 → 原圖對照、＋／－ 修正 → 存在手機、匯出 CSV。
+ * 拍貨架 → Gemini 視覺模型找出每個商品並框起來 → 原圖對照、＋／－ 修正 → 存在手機；總表一次匯出 Excel、同步 Google 試算表。
  * 沒有後端：API Key 只存在這支手機（localStorage），照片只送到 Google Gemini 分析。
  */
 
+import { makeXlsx } from './xlsx.js'
+
 const API = 'https://generativelanguage.googleapis.com/v1beta'
-const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned' }
+const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned', sheet: 'inventory:sheetUrl', autoSync: 'inventory:autoSync' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '2.0（10/3・自動標出要確認的）'
+const VERSION = '2.1（10/3・總表、Excel、Google 試算表）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -98,8 +100,12 @@ const idb = (() => {
       }
       req.onblocked = () => toast('App 更新了：請關掉其他開著盤點 App 的分頁，再重新整理')
       req.onsuccess = () => {
-        // 別的分頁要升級資料庫時，這邊先關掉，不要卡住它
-        req.result.onversionchange = () => req.result.close()
+        // 別的分頁要升級資料庫時，這邊先關掉，不要卡住它；連線斷了，下次用的時候重新打開
+        req.result.onversionchange = () => {
+          req.result.close()
+          p = undefined
+        }
+        req.result.onclose = () => (p = undefined)
         resolve(req.result)
       }
       req.onerror = () => reject(req.error)
@@ -851,13 +857,24 @@ async function viewHome() {
         ? ''
         : `<div class="hint-card stack"><div><b>第一次用：</b>先到「設定」貼上你的免費 Gemini API Key（只會存在這支手機）。</div><button class="btn small" data-go="settings">去設定</button></div>`
     }
+    ${(() => {
+      if (!sessions.length) return ''
+      const today = sessions.filter((s) => inRange(s, 'today'))
+      const r = reportOf(today.length ? today : sessions)
+      return `<button class="report-card" data-go="report">
+        <span class="grow">
+          <span class="report-card-kicker">總表與匯出・${today.length ? '今天' : '全部'}</span>
+          <span class="report-card-nums"><b>${r.total}</b> 件・<b>${r.list.length}</b> 種・${r.sessions} 次盤點</span>
+          <span class="meta">一次匯出 Excel、複製到 Google 試算表${ls.get(LS.sheet) ? '、同步' : ''}</span>
+        </span>${chev}</button>`
+    })()}
     <p class="section-title">盤點紀錄</p>
     ${
       sessions.length
         ? `<div class="group">${sessions
             .map((s) => {
               const failed = s.photos.length && s.photos.every((p) => p.status !== 'done')
-              const meta = [fmtTime(s.createdAt), s.place, s.photos.length > 1 ? `${s.photos.length} 張照片` : ''].filter(Boolean).join('・')
+              const meta = [fmtTime(s.createdAt), s.place, s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
               return `<button class="row" data-open="${s.id}"><img src="${s.photos[0] ? urlOf(s.photos[0]) : ''}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)"><span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>${chev}</button>`
             })
             .join('')}</div>`
@@ -1006,7 +1023,7 @@ function viewReview() {
       <button class="btn danger small" data-action="delete-session">刪除這次盤點</button>
     </div>
   </main>
-  <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn" data-go="home">完成</button></div></div>`
+  <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn" data-action="finish">完成</button></div></div>`
 }
 
 async function viewSettings() {
@@ -1043,6 +1060,23 @@ async function viewSettings() {
     }
     <div class="row-actions" style="margin-top:10px"><label class="btn small secondary">📷 拍一張樣品<input type="file" accept="image/*" capture="environment" id="sample-cam" class="sr-only"></label></div>
     <p class="footnote">長得很像、只差尺寸的商品（例如不同分數的三通），每一種存一張樣品照，名稱和尺寸寫清楚。辨識時會一起送給 AI 比對（最多 30 張，新的優先）。<br>最快的存法：盤點結果裡先點那個框、再點一次 →「儲存，並存成樣品照」。</p>
+    <p class="section-title">Google 試算表</p>
+    <div class="stack">
+      <input class="field" id="sheet-url" placeholder="貼上網頁應用程式網址（https://script.google.com/macros/s/…/exec）" value="${esc(ls.get(LS.sheet))}" autocomplete="off" spellcheck="false">
+      <div class="row-actions"><button class="btn small" data-action="sheet-save">儲存並測試</button><button class="btn small secondary" data-action="sheet-copy">複製試算表程式碼</button></div>
+      <label class="row" style="border-radius:12px;background:var(--card)"><span class="grow"><span class="title">按「完成」時自動同步</span><br><span class="meta">每次盤點完，自動寫進試算表</span></span><input type="checkbox" id="auto-sync" ${ls.get(LS.autoSync, '1') === '1' ? 'checked' : ''} style="width:22px;height:22px"></label>
+    </div>
+    <details class="steps"><summary>怎麼連結？（只要做一次，約 3 分鐘）</summary>
+      <ol>
+        <li>按上面「複製試算表程式碼」。</li>
+        <li>電腦開一個新的 Google 試算表 → 上方「擴充功能」→「Apps Script」。</li>
+        <li>把原本的內容全部刪掉，貼上剛剛複製的程式碼 → 存檔。</li>
+        <li>右上「部署」→「新增部署作業」→ 類型選「網頁應用程式」；執行身分選「我」，誰可以存取選「所有人」→ 部署。</li>
+        <li>第一次會要你授權：選自己的帳號 →「進階」→「前往」→ 允許。</li>
+        <li>複製「網頁應用程式網址」，貼到上面的格子 → 按「儲存並測試」。</li>
+      </ol>
+      <p>試算表會自動建立「盤點紀錄」（每次盤點每一種一列）、「總表」（每個品項在每次盤點各幾件）、「最新一次」（最近一次盤點的數量）。資料只會寫進你自己的試算表。</p>
+    </details>
     <p class="section-title">連線測試</p>
     <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
     <p class="footnote">辨識一直失敗時按這個，把結果截圖給我看。</p>
@@ -1056,7 +1090,18 @@ async function viewSettings() {
 }
 
 async function render() {
-  const html = state.view === 'home' ? await viewHome() : state.view === 'capture' ? viewCapture() : state.view === 'analyzing' ? viewAnalyzing() : state.view === 'review' ? viewReview() : await viewSettings()
+  const html =
+    state.view === 'home'
+      ? await viewHome()
+      : state.view === 'capture'
+        ? viewCapture()
+        : state.view === 'analyzing'
+          ? viewAnalyzing()
+          : state.view === 'review'
+            ? viewReview()
+            : state.view === 'report'
+              ? await viewReport()
+              : await viewSettings()
   // 放大看照片時，重畫畫面不要讓位置跳回左上角
   const vs = document.querySelector('.viewer-scroll')
   const keep = vs ? { x: vs.scrollLeft / Math.max(1, vs.scrollWidth), y: vs.scrollTop / Math.max(1, vs.scrollHeight) } : null
@@ -1496,6 +1541,151 @@ async function addSheet() {
   )
 }
 
+// ───────────────────────── 總表：很多次盤點合在一起 ─────────────────────────
+const pad2 = (n) => String(n).padStart(2, '0')
+const ymd = (t) => {
+  const d = new Date(t)
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+const hm = (t) => {
+  const d = new Date(t)
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+const RANGES = [
+  { id: 'today', label: '今天' },
+  { id: 'week', label: '最近 7 天' },
+  { id: 'all', label: '全部' },
+]
+function inRange(s, range) {
+  if (range === 'all') return true
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  if (range === 'week') start.setDate(start.getDate() - 6)
+  return s.createdAt >= start.getTime()
+}
+
+/**
+ * 把好幾次盤點合起來：同一種商品（品名＋品牌＋型號＋尺寸都一樣）的數量加總，記下在哪些位置各幾件。
+ * detail＝每次盤點、每一種一列（給 Excel 明細、Google 試算表用）。
+ */
+function reportOf(sessions) {
+  const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
+  const items = new Map()
+  const detail = []
+  for (const s of [...sessions].sort((a, b) => a.createdAt - b.createdAt)) {
+    const place = s.place || `未填位置（${fmtTime(s.createdAt)}）`
+    for (const g of groupsOf(s)) {
+      const count = Number(g.count) || 0
+      if (!count) continue
+      const k = FIELDS.map((f) => norm(g[f])).join('|')
+      if (!items.has(k)) items.set(k, { label: g.label, brand: g.brand, model: g.model, spec: g.spec, total: 0, places: new Map() })
+      const it = items.get(k)
+      it.total += count
+      it.places.set(place, (it.places.get(place) || 0) + count)
+      detail.push({ date: ymd(s.createdAt), time: hm(s.createdAt), place: s.place || '', label: g.label, brand: g.brand, model: g.model, spec: g.spec, count, boxes: g.manual ? '' : g.boxes, source: g.manual ? '手動' : g.edited ? 'AI（有修正）' : 'AI', id: s.id })
+    }
+  }
+  const list = [...items.values()].sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.brand, b.brand))
+  const places = new Set(sessions.map((s) => s.place || s.id))
+  return { list, detail, total: list.reduce((n, it) => n + it.total, 0), places: places.size, sessions: sessions.length }
+}
+const placesText = (it) => [...it.places].map(([p, n]) => `${p} ${n}`).join('、')
+
+/** Excel：總表＋明細＋盤點清單三個工作表 */
+function reportXlsx(sessions) {
+  const r = reportOf(sessions)
+  return makeXlsx([
+    { name: '總表', rows: [['品名', '尺寸／規格', '品牌', '型號', '總數量', '在哪裡（位置 數量）'], ...r.list.map((it) => [it.label, it.spec, it.brand, it.model, it.total, placesText(it)])] },
+    { name: '明細', rows: [['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源'], ...r.detail.map((d) => [d.date, d.time, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source])] },
+    {
+      name: '盤點清單',
+      rows: [['盤點時間', '位置', '照片張數', '種類', '件數', '辨識模型'], ...[...sessions].sort((a, b) => a.createdAt - b.createdAt).map((s) => [`${ymd(s.createdAt)} ${hm(s.createdAt)}`, s.place || '', s.photos.length, groupsOf(s).length, totalQty(s), s.model || ''])],
+    },
+  ])
+}
+/** 複製成表格（Tab 分隔）：在 Google 試算表或 Excel 點一格、貼上，就會自動分好欄 */
+const reportTsv = (sessions) => {
+  const r = reportOf(sessions)
+  const clean = (v) => String(v ?? '').replace(/[\t\n]/g, ' ')
+  return [['品名', '尺寸／規格', '品牌', '型號', '總數量', '在哪裡（位置 數量）'], ...r.list.map((it) => [it.label, it.spec, it.brand, it.model, it.total, placesText(it)])].map((row) => row.map(clean).join('\t')).join('\n')
+}
+
+/**
+ * 同步到 Google 試算表（使用者自己的 Apps Script 網頁應用程式）。
+ * 同一次盤點重送不會重複（試算表那邊會先刪掉同一個盤點 ID 的舊列）。
+ * 有些情況瀏覽器讀不到回覆（跨網域）：改成「只送出、不看回覆」，回傳 null＝已送出但無法確認。
+ */
+async function syncToSheet(sessions) {
+  const url = ls.get(LS.sheet)
+  if (!url) throw new Error('還沒設定 Google 試算表')
+  const rows = reportOf(sessions).detail.map((d) => [d.date, d.time, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source, d.id])
+  const body = JSON.stringify({ rows })
+  let confirmed = null
+  try {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })
+    const data = await res.json()
+    if (!data.ok) throw new Error(data.error || '試算表回傳錯誤')
+    confirmed = data.rows
+  } catch {
+    await fetch(url, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })
+  }
+  const now = Date.now()
+  for (const s of sessions) {
+    s.syncedAt = now
+    await db.put(s)
+  }
+  return confirmed
+}
+
+function downloadBlob(blob, name) {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+}
+
+async function viewReport() {
+  const all = await db.all()
+  const range = state.range || 'today'
+  const sessions = all.filter((s) => inRange(s, range))
+  const r = reportOf(sessions)
+  const hasSheet = !!ls.get(LS.sheet)
+  return `
+  <main class="app">
+    <div class="nav">${backBtn('home', '盤點')}</div>
+    <h1 class="large-title">總表</h1>
+    <p class="subtitle">很多次盤點合在一起：同一種商品自動加總，看得到在哪裡各幾件。</p>
+    <div class="seg" role="tablist" aria-label="時間範圍">${RANGES.map((x) => `<button role="tab" aria-selected="${x.id === range}" data-range="${x.id}">${x.label}</button>`).join('')}</div>
+    ${
+      sessions.length
+        ? `<div class="stats">
+            <div class="stat"><span class="stat-num">${r.total}</span><span class="stat-label">件</span></div>
+            <div class="stat"><span class="stat-num">${r.list.length}</span><span class="stat-label">種商品</span></div>
+            <div class="stat"><span class="stat-num">${r.places}</span><span class="stat-label">個位置</span></div>
+            <div class="stat"><span class="stat-num">${r.sessions}</span><span class="stat-label">次盤點</span></div>
+          </div>
+          <div class="row-actions" style="margin:14px 0 6px">
+            <button class="btn" style="flex:1" data-action="report-xlsx">下載 Excel</button>
+            <button class="btn secondary" style="flex:1" data-action="report-copy">複製表格</button>
+          </div>
+          ${
+            hasSheet
+              ? `<button class="btn secondary block" data-action="report-sync">同步到 Google 試算表（${r.sessions} 次盤點）</button>`
+              : `<button class="btn plain block" data-go="settings">連結 Google 試算表…</button><p class="footnote" style="margin-top:6px">連結後，每次盤點完會自動寫進你的試算表。</p>`
+          }
+          <p class="footnote">Excel 有三頁：總表、明細（每次盤點每一種一列）、盤點清單。「複製表格」後，在 Google 試算表點一格貼上，就會自動分好欄。</p>
+          <p class="section-title">品項（${r.list.length}）</p>
+          <div class="group">${r.list
+            .map(
+              (it) => `<div class="row report-row"><span class="grow"><span class="title">${esc(it.label)}</span><br><span class="meta">${esc([it.spec, it.brand, it.model].filter(Boolean).join('・') || '沒有寫尺寸')}</span><br><span class="meta">${esc(placesText(it))}</span></span><span class="report-count">${it.total}</span></div>`,
+            )
+            .join('')}</div>`
+        : `<div class="empty"><p>${range === 'today' ? '今天還沒有盤點。' : '這段時間沒有盤點紀錄。'}<br>換一個時間範圍看看。</p></div>`
+    }
+  </main>`
+}
+
 // ───────────────────────── 匯出 ─────────────────────────
 function csvOf(session) {
   const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
@@ -1664,7 +1854,7 @@ $app.addEventListener('click', async (e) => {
   // 補框模式：點照片哪裡，就在那裡加一個框（大小跟這張照片的其他框差不多），再選它是哪一種
   const wrap = e.target.closest('[data-photo]')
   if (state.addMode && wrap && !e.target.closest('[data-action]')) return addBoxAt(wrap, e)
-  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry]')
+  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range]')
   if (!t) {
     // 點空白處取消標示（不捲回頂端）
     if (state.focus && !e.target.closest('.photo-wrap,.item')) {
@@ -1675,6 +1865,10 @@ $app.addEventListener('click', async (e) => {
   }
   const d = t.dataset
   if (d.go) return go(d.go)
+  if (d.range) {
+    state.range = d.range
+    return render()
+  }
   if (d.open) {
     state.session = await db.get(d.open)
     delete state.session.edits // 第一版的舊欄位，不再使用
@@ -1808,6 +2002,68 @@ $app.addEventListener('click', async (e) => {
       return render()
     case 'force-update':
       return forceUpdate()
+    case 'finish': {
+      // 完成：有設定 Google 試算表又開著自動同步，就順便把這次盤點寫進去（在背景送，不用等）
+      const s = state.session
+      go('home')
+      if (s && ls.get(LS.sheet) && ls.get(LS.autoSync, '1') === '1') {
+        toast('同步到 Google 試算表中…')
+        syncToSheet([s])
+          .then((n) => {
+            toast(n === null ? '已送到 Google 試算表' : `已同步到 Google 試算表（${n} 列）`)
+            if (state.view === 'home') render()
+          })
+          .catch((err) => toast(`同步沒成功：${err.message}；可以到「總表」再按一次同步`))
+      }
+      return
+    }
+    case 'report-xlsx': {
+      const sessions = (await db.all()).filter((s) => inRange(s, state.range || 'today'))
+      downloadBlob(reportXlsx(sessions), `盤點總表_${ymd(Date.now())}.xlsx`)
+      return toast('已下載 Excel')
+    }
+    case 'report-copy': {
+      const sessions = (await db.all()).filter((s) => inRange(s, state.range || 'today'))
+      try {
+        await navigator.clipboard.writeText(reportTsv(sessions))
+        return toast('已複製：到 Google 試算表點一格，貼上就好')
+      } catch {
+        return toast('這個瀏覽器不讓複製，請改用「下載 Excel」')
+      }
+    }
+    case 'report-sync': {
+      const sessions = (await db.all()).filter((s) => inRange(s, state.range || 'today'))
+      t.disabled = true
+      t.textContent = '同步中…'
+      try {
+        const n = await syncToSheet(sessions)
+        toast(n === null ? `已送出 ${sessions.length} 次盤點，請打開試算表確認` : `已同步 ${sessions.length} 次盤點（${n} 列）`)
+      } catch (err) {
+        toast(`同步沒成功：${err.message}`)
+      }
+      return render()
+    }
+    case 'sheet-save': {
+      const url = document.getElementById('sheet-url').value.trim()
+      if (url && !/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(url)) return toast('網址不對：要是 https://script.google.com/macros/s/…/exec')
+      ls.set(LS.sheet, url)
+      if (!url) return toast('已取消連結 Google 試算表')
+      try {
+        const data = await (await fetch(url)).json()
+        toast(data.ok ? `連上了：${data.sheet || 'Google 試算表'}` : '連得到，但回覆不對；請確認貼的是這個 App 的程式碼')
+      } catch {
+        toast('已儲存；測試時瀏覽器讀不到回覆，同步一次後打開試算表確認')
+      }
+      return
+    }
+    case 'sheet-copy':
+      try {
+        const code = await (await fetch('google-sheets.gs', { cache: 'no-cache' })).text()
+        await navigator.clipboard.writeText(code)
+        return toast('已複製程式碼：到 Apps Script 貼上')
+      } catch {
+        return toast('複製失敗，請改用電腦打開這個 App 再按一次')
+      }
     case 'review-doubts':
       return quickSheet(doubtsOf(state.session), 0, { doubt: true })
     case 'add-box':
@@ -1847,6 +2103,7 @@ function bindInputs() {
   document.getElementById('cam')?.addEventListener('change', (e) => addFiles([...e.target.files]))
   document.getElementById('pick')?.addEventListener('change', (e) => addFiles([...e.target.files]))
   document.getElementById('sample-cam')?.addEventListener('change', (e) => e.target.files[0] && newSampleSheet(e.target.files[0]))
+  document.getElementById('auto-sync')?.addEventListener('change', (e) => ls.set(LS.autoSync, e.target.checked ? '1' : '0'))
   document.getElementById('place')?.addEventListener('input', (e) => (state.session.place = e.target.value))
   document.querySelectorAll('[data-count]').forEach((input) =>
     input.addEventListener('change', async (e) => {
