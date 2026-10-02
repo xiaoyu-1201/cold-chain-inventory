@@ -8,7 +8,7 @@ const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '1.6（10/2 夜・加快＋雙保險）'
+const VERSION = '1.7（10/2 夜・自動更新）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -899,6 +899,8 @@ async function viewSettings() {
     <div class="row-actions"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>
     <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。</p>
     <p class="footnote" style="margin-top:18px;text-align:center">拍照盤點 版本 ${VERSION}</p>
+    <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
+    <p class="footnote" style="text-align:center">有新版會自動更新；不放心就按這裡。盤點紀錄、樣品照、API Key 都不會被刪。</p>
   </main>`
 }
 
@@ -1434,6 +1436,8 @@ $app.addEventListener('click', async (e) => {
       ls.set(LS.catalog, '')
       toast('已恢復預設清單')
       return render()
+    case 'force-update':
+      return forceUpdate()
     case 'del-sample':
       if (!confirm('刪掉這張樣品照？')) return
       await idb.samples.del(d.id)
@@ -1463,6 +1467,32 @@ function bindInputs() {
 }
 
 // 離線也能打開（服務工作程式快取 App 本身；AI 辨識還是要網路）
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {})
+// updateViaCache: 'none'＝檢查新版時不用手機暫存；回到 App 時也檢查一次（新版裝好會自動重新整理）
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker
+    .register('sw.js', { updateViaCache: 'none' })
+    .then((reg) => {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && !state.busy && state.view !== 'analyzing') reg.update().catch(() => {})
+      })
+    })
+    .catch(() => {})
+}
+
+/** 設定 →「檢查更新」：問 GitHub 最新版本；不一樣就清掉 App 的暫存（不會動到盤點紀錄、樣品照、API Key）再重新整理 */
+async function forceUpdate() {
+  let latest = ''
+  try {
+    const text = await (await fetch(`app.js?check=${Date.now()}`, { cache: 'no-store' })).text()
+    latest = (text.match(/const VERSION = '([^']+)'/) || [])[1] || ''
+  } catch {
+    return toast('連不到 GitHub，請確認有網路')
+  }
+  if (latest && latest === VERSION) return toast(`已經是最新版：${VERSION}`)
+  toast(`更新到 ${latest || '最新版'}…`)
+  for (const r of (await navigator.serviceWorker?.getRegistrations?.()) || []) await r.unregister()
+  for (const k of await caches.keys()) await caches.delete(k)
+  location.replace(`./?v=${Date.now()}`)
+}
 
 render()
