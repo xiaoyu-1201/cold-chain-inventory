@@ -633,7 +633,7 @@ textarea.field {
   border-radius: 6px 6px 6px 0;
   background: var(--c, var(--tint));
   color: #fff;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   line-height: 1.5;
   text-align: center;
@@ -758,7 +758,7 @@ textarea.field {
   margin-left: 6px;
   padding: 1px 8px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   vertical-align: 2px;
 }
@@ -917,4 +917,340 @@ textarea.field {
   height: 1px;
   overflow: hidden;
   clip: rect(0 0 0 0);
+}
+[hidden] {
+  display: none !important;
+}
+
+/* ── 底部分頁列（iOS Tab Bar）── */
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 6px 8px calc(var(--safe-b) + 6px);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-top: 0.5px solid var(--line);
+  z-index: 20;
+}
+.tabbar .inner {
+  max-width: 720px;
+  margin: 0 auto;
+  display: flex;
+}
+.tabbar button {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  min-height: 50px;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: 13px;
+  font-weight: 600;
+}
+.tabbar button[aria-current='page'] {
+  color: var(--tint);
+}
+.tabbar button:active {
+  transform: scale(0.94);
+}
+
+/* 首頁「新盤點」、查型號「拍標籤」：大按鈕卡片 */
+.hero-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 4px 0 12px;
+  padding: 16px;
+  border: 0;
+  border-radius: 20px;
+  background: var(--tint);
+  color: #fff;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  box-shadow: 0 10px 24px -12px color-mix(in srgb, var(--tint) 70%, transparent);
+  transition: transform 0.12s ease;
+}
+.hero-btn:active {
+  transform: scale(0.98);
+}
+.hero-btn b {
+  font-size: 19px;
+}
+.hero-btn .meta {
+  font-size: 14px;
+  opacity: 0.85;
+}
+.hero-btn .grow {
+  flex: 1;
+  min-width: 0;
+}
+.hero-btn .chev {
+  color: rgba(255, 255, 255, 0.75);
+}
+.hero-btn.busy {
+  opacity: 0.8;
+  pointer-events: none;
+}
+.hero-icon {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.2);
+  font-size: 24px;
+}
+.spinner.small {
+  width: 24px;
+  height: 24px;
+  border-width: 3px;
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+}
+
+/* 選擇用的小膠囊（儲位、範例型號、快速數字） */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 2px;
+}
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 40px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 15px;
+}
+.chip small {
+  color: var(--text-2);
+  font-weight: 400;
+  font-size: 13px;
+}
+.chip[aria-pressed='true'] {
+  background: var(--tint);
+  color: #fff;
+}
+.chip[aria-pressed='true'] small {
+  color: rgba(255, 255, 255, 0.85);
+}
+.chip:active {
+  transform: scale(0.96);
+}
+
+/* 品項庫 */
+.nav-right {
+  display: flex;
+  gap: 8px;
+}
+.icon-btn {
+  font-size: 22px;
+  font-weight: 600;
+}
+.icon-btn.small {
+  width: 36px;
+  height: 36px;
+  font-size: 18px;
+  background: var(--card-2);
+  color: var(--text-2);
+  flex: none;
+}
+.field.search {
+  margin: 0 0 4px;
+  min-height: 44px;
+  background: var(--card-2);
+  -webkit-appearance: none;
+  appearance: none;
+}
+.thumb {
+  flex: none;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--card-2);
+}
+.thumb.ph {
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+  font-weight: 700;
+  font-size: 18px;
+}
+.qty {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 44px;
+}
+.qty b {
+  font-size: 22px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+.qty small {
+  color: var(--text-2);
+  font-size: 13px;
+}
+.badge.bad {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.item-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 4px;
+}
+.item-head .thumb {
+  border-radius: 14px;
+}
+.item-head .large-title {
+  font-size: 28px;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+.stock-nums {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  text-align: center;
+}
+.stock-nums > div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.stock-label {
+  color: var(--text-2);
+  font-size: 14px;
+  font-weight: 600;
+}
+.stock-big {
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.stock-big.neg {
+  color: var(--red);
+}
+.stock-big.pos {
+  color: var(--tint);
+}
+.stock-sub {
+  color: var(--text-2);
+  font-size: 13px;
+}
+.row.decode .meta {
+  line-height: 1.6;
+}
+.meta.in-stock {
+  color: var(--green);
+  font-weight: 600;
+}
+a.row {
+  color: var(--tint);
+  text-decoration: none;
+}
+.loc-code {
+  flex: none;
+  min-width: 64px;
+  padding: 4px 10px;
+  border-radius: 10px;
+  background: var(--card-2);
+  font-weight: 800;
+  font-size: 19px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.read-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.read-head img {
+  flex: none;
+  width: 84px;
+  height: 84px;
+  border-radius: 12px;
+  object-fit: cover;
+}
+.read-head b {
+  display: block;
+  font-size: 20px;
+}
+.read-head .meta {
+  color: var(--text-2);
+  font-size: 15px;
+}
+.field.big-num {
+  font-size: 34px;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 列印儲位標籤：A4 兩欄、每張大字代號（AI 拍到就認得） */
+#print-area {
+  display: none;
+}
+@media print {
+  @page {
+    size: A4;
+    margin: 10mm;
+  }
+  body > *:not(#print-area) {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+  #print-area {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6mm;
+  }
+  #print-area .label {
+    height: 50mm;
+    border: 0.6mm dashed #999;
+    border-radius: 3mm;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #000;
+    background: #fff;
+    break-inside: avoid;
+  }
+  .label-code {
+    font-size: 64pt;
+    font-weight: 900;
+    line-height: 1;
+    letter-spacing: 0.02em;
+  }
+  .label-name {
+    margin-top: 3mm;
+    font-size: 14pt;
+  }
+  .label-foot {
+    margin-top: 2mm;
+    font-size: 9pt;
+    color: #666;
+  }
 }

@@ -1,16 +1,18 @@
 /**
  * 拍照盤點（冷凍材料行）
  * 拍貨架 → Gemini 視覺模型找出每個商品並框起來 → 原圖對照、＋／－ 修正 → 存在手機；總表一次匯出 Excel、同步 Google 試算表。
+ * 品項庫：按「完成」時自動長出來（料號、各位置數量、帳面數、安全庫存）；查型號：拍標籤或打型號 → 解讀、店裡有沒有、替代品。
  * 沒有後端：API Key 只存在這支手機（localStorage），照片只送到 Google Gemini 分析。
  */
 
 import { makeXlsx } from './xlsx.js'
+import { decode, normalizeModel, looseKey, canon, modelKey, linksFor } from './rules.js'
 
 const API = 'https://generativelanguage.googleapis.com/v1beta'
-const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned', sheet: 'inventory:sheetUrl', autoSync: 'inventory:autoSync' }
+const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned', sheet: 'inventory:sheetUrl', autoSync: 'inventory:autoSync', locations: 'inventory:locations' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '2.1（10/3・總表、Excel、Google 試算表）'
+const VERSION = '3.0（10/5・品項庫、查型號、儲位、帳面對實盤）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -87,16 +89,17 @@ function toast(msg) {
 }
 
 // ───────────────────────── 存檔（IndexedDB，照片也存在手機） ─────────────────────────
-/** sessions＝盤點紀錄；samples＝樣品照（第 2 版新增） */
+/** sessions＝盤點紀錄；samples＝樣品照（第 2 版新增）；items＝品項庫（第 3 版新增） */
 const idb = (() => {
   let p
   const open = () =>
     (p ??= new Promise((resolve, reject) => {
-      const req = indexedDB.open('inventory', 2)
+      const req = indexedDB.open('inventory', 3)
       req.onupgradeneeded = () => {
         const d = req.result
         if (!d.objectStoreNames.contains('sessions')) d.createObjectStore('sessions', { keyPath: 'id' })
         if (!d.objectStoreNames.contains('samples')) d.createObjectStore('samples', { keyPath: 'id' })
+        if (!d.objectStoreNames.contains('items')) d.createObjectStore('items', { keyPath: 'id' })
       }
       req.onblocked = () => toast('App 更新了：請關掉其他開著盤點 App 的分頁，再重新整理')
       req.onsuccess = () => {
@@ -126,7 +129,7 @@ const idb = (() => {
     del: (id) => tx(store, 'readwrite', (s) => s.delete(id)),
     clear: () => tx(store, 'readwrite', (s) => s.clear()),
   })
-  return { sessions: storeOf('sessions'), samples: storeOf('samples') }
+  return { sessions: storeOf('sessions'), samples: storeOf('samples'), items: storeOf('items') }
 })()
 const db = idb.sessions
 
@@ -309,13 +312,28 @@ const SCHEMA = {
           confidence: { type: 'NUMBER', description: '0～1，有多確定' },
           odd: { type: 'BOOLEAN', description: '跟同一種的其他個比，大小、粗細、形狀、顏色或標籤明顯不一樣就 true' },
           odd_reason: { type: 'STRING', description: 'odd 是 true 時，10 個字以內寫哪裡不同（例如「比較粗」「側口比較細」）' },
+          item_no: { type: 'STRING', description: '就是「品項庫」裡的某一項時填料號（例如 P0012）；不確定就空字串' },
         },
         required: ['label', 'brand', 'model', 'spec', 'box_2d', 'confidence'],
       },
     },
     note: { type: 'STRING', description: '看不清楚、被擋住、需要人工確認的地方；沒有就空字串' },
+    location: { type: 'STRING', description: '照片裡看得到儲位標籤（例如 A-01）就填標籤上的代號；沒有就空字串' },
   },
   required: ['objects', 'note'],
+}
+
+/** 品項庫裡確認過的（最近用到的優先，最多 150 個）：給 AI 照抄名稱、填料號 */
+const promptItems = () =>
+  (itemsCache || [])
+    .filter((it) => it.status === 'ok')
+    .sort((a, b) => (lastCounted(b) || b.updatedAt) - (lastCounted(a) || a.updatedAt))
+    .slice(0, 150)
+const itemsPrompt = () => {
+  const list = promptItems()
+  return list.length
+    ? `\n品項庫（料號｜品名｜品牌｜型號｜尺寸／規格；照片裡的東西就是其中一項時，item_no 填料號，其他欄位照抄；不確定就 item_no 空字串，照一般規則寫）：\n${list.map((it) => [it.no, it.label, it.brand || '—', it.model || '—', it.spec || '—'].join('｜')).join('\n')}`
+    : ''
 }
 
 function prompt(sampleCount = 0) {
@@ -335,14 +353,15 @@ ${
 10. box_2d 只標【要盤點的照片】裡的位置；樣品照不要框、不要算數量。
 `
     : ''
-}店內品項清單：
-${catalogLines().join('\n')}`
+}・照片裡看得到儲位標籤（白底黑字的代號，例如 A-01、B-12）時，location 填標籤上的代號；標籤本身不是商品，不要框。
+店內品項清單：
+${catalogLines().join('\n')}${itemsPrompt()}`
 }
 
 /** 簡化模式不用 responseSchema，改在文字裡說明要的格式 */
 const JSON_HINT = `
 只回 JSON，不要其他文字，格式：
-{"objects":[{"label":"品名","brand":"品牌","model":"型號","spec":"尺寸／規格","box_2d":[ymin,xmin,ymax,xmax],"confidence":0.9,"odd":false,"odd_reason":""}],"note":"需要人工確認的地方"}`
+{"objects":[{"label":"品名","brand":"品牌","model":"型號","spec":"尺寸／規格","box_2d":[ymin,xmin,ymax,xmax],"confidence":0.9,"odd":false,"odd_reason":"","item_no":""}],"note":"需要人工確認的地方","location":""}`
 
 /**
  * 用某個模型送一次辨識。
@@ -380,20 +399,27 @@ async function generate(model, image, simple = false, refs = [], thinking = true
   } catch {
     throw new ApiError('AI 回傳的格式壞掉了，請再試一次。', 0, `bad json: ${text.slice(0, 120)}`)
   }
+  // 名稱統一：AI 說是品項庫的某一項，或寫法跟品項庫的某一項一樣（例如「3分 三通」＝「三通 3分」）→ 照品項庫寫；
+  // 同一張照片裡寫法不同但其實一樣的，照第一個寫。同一種東西每次寫法都一樣，清單和總表才不會分成兩種。
+  const byNo = new Map(promptItems().map((it) => [it.no.toLowerCase(), it]))
+  const firstOf = new Map()
   const objects = (parsed.objects || [])
     .filter((o) => Array.isArray(o.box_2d) && o.box_2d.length === 4 && o.label)
-    .map((o) => ({
-      label: cleanLabel(o.label),
-      brand: String(o.brand || '').trim(),
-      model: String(o.model || '').trim(),
-      spec: String(o.spec || '').trim(),
-      box: o.box_2d.map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
-      confidence: Math.min(1, Math.max(0, Number(o.confidence) || 0)),
-      ...(o.odd ? { odd: true, oddReason: String(o.odd_reason || '').trim().slice(0, 20) } : {}),
-    }))
+    .map((o) => {
+      const raw = { label: cleanLabel(o.label), brand: String(o.brand || '').trim(), model: normalizeModel(o.model), spec: String(o.spec || '').trim() }
+      const it = byNo.get(String(o.item_no || '').trim().toLowerCase()) || (itemsCache && findItem(itemsCache, raw))
+      const k = looseKey(raw)
+      if (!firstOf.has(k)) firstOf.set(k, raw)
+      return {
+        ...(it ? { label: it.label, brand: it.brand, model: it.model, spec: it.spec } : firstOf.get(k)),
+        box: o.box_2d.map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
+        confidence: Math.min(1, Math.max(0, Number(o.confidence) || 0)),
+        ...(o.odd ? { odd: true, oddReason: String(o.odd_reason || '').trim().slice(0, 20) } : {}),
+      }
+    })
   const { kept, merged } = dedupe(objects)
   const note = [String(parsed.note || ''), merged ? `同一個東西被框了兩次的，已經合併 ${merged} 個。` : ''].filter(Boolean).join(' ')
-  return { objects: kept, note, model }
+  return { objects: kept, note, model, location: String(parsed.location || '').trim() }
 }
 
 /** 兩個框重疊 7 成以上、而且是同一種：AI 把同一個東西框了兩次 → 留比較有把握的那個（數量才不會多算） */
@@ -828,8 +854,177 @@ function summaryOf(session) {
   return `${labels.slice(0, 2).join('、')}${labels.length > 2 ? ' 等' : ''} ${groups.length} 種，共 ${total} 件`
 }
 
+// ───────────────────────── 儲位：貨架每一格一個代號（A-01） ─────────────────────────
+const locations = () => {
+  try {
+    return JSON.parse(ls.get(LS.locations, '[]')) || []
+  } catch {
+    return []
+  }
+}
+const saveLocations = (list) => ls.set(LS.locations, JSON.stringify(list))
+const findLocation = (code) => locations().find((l) => canon(l.code) === canon(code))
+/** 顯示用：「A-01（冷凍油那排第 1 層）」 */
+const placeLabel = (place) => {
+  const loc = findLocation(place)
+  return loc ? (loc.name ? `${loc.code}（${loc.name}）` : loc.code) : place
+}
+/** 下一個代號：A-03 → A-04 */
+const nextCode = (list) => {
+  const last = list.at(-1)?.code || ''
+  const m = /^(.*?)(\d+)$/.exec(last)
+  return m ? `${m[1]}${String(Number(m[2]) + 1).padStart(m[2].length, '0')}` : 'A-01'
+}
+
+// ───────────────────────── 品項庫：盤點時自動長出來 ─────────────────────────
+/**
+ * 每一種商品一筆，料號 P0001 起。按「完成」時，這次盤點的每一種都會對到品項庫：
+ * 對得到 → 記下這個位置的數量；對不到 → 自動建立「新的」品項（之後在「品項」確認名稱、合併重複的）。
+ * 實盤＝每個位置「最近一次」數到的數量加起來；帳面數＝應該要有幾個（進貨加、賣出減，或拿實盤當起點）。
+ */
+let itemsCache = null
+async function itemsAll(force = false) {
+  if (!itemsCache || force) itemsCache = await idb.items.all().catch(() => [])
+  return itemsCache
+}
+async function putItem(it) {
+  it.updatedAt = Date.now()
+  await idb.items.put(it)
+  if (itemsCache && !itemsCache.includes(it)) itemsCache.unshift(it)
+}
+async function delItem(it) {
+  await idb.items.del(it.id)
+  if (itemsCache) itemsCache = itemsCache.filter((x) => x !== it)
+}
+const nextNo = (items) => `P${String(items.reduce((m, it) => Math.max(m, parseInt(String(it.no).slice(1), 10) || 0), 0) + 1).padStart(4, '0')}`
+function newItem(items, f, extra = {}) {
+  const now = Date.now()
+  // 型號看得懂（例如 DML 083S）：沒寫的品牌、規格自動補上（原本的寫法也記成別名）
+  const d = decode(f.model).find((x) => x.model)
+  const v = { label: f.label, brand: f.brand || d?.brand || '', model: f.model || '', spec: f.spec || d?.spec || '' }
+  return { id: uid(), no: nextNo(items), createdAt: now, updatedAt: now, ...v, aliases: [...new Set([looseKey(f), looseKey(v)])], status: 'new', stock: {}, book: null, safety: null, moves: [], equiv: [], ...extra }
+}
+/** 找品項：先比寬鬆的名稱（含以前的寫法），再比型號＋品名 */
+function findItem(items, f) {
+  const k = looseKey(f)
+  const hit = items.find((it) => it.aliases?.includes(k))
+  if (hit) return hit
+  const mk = modelKey(f.model)
+  return (mk.length >= 3 && items.find((it) => modelKey(it.model) === mk && canon(it.label) === canon(f.label))) || null
+}
+const onHand = (it) => Object.values(it.stock || {}).reduce((n, st) => n + (Number(st.count) || 0), 0)
+const lastCounted = (it) => Math.max(0, ...Object.values(it.stock || {}).map((st) => st.at || 0))
+/** 差異＝實盤－帳面（沒有帳面數或還沒盤過就不算） */
+const diffOf = (it) => (it.book == null || !Object.keys(it.stock || {}).length ? null : onHand(it) - it.book)
+/** 現在大概有幾個：有帳面數用帳面數（進貨／賣出會改它），沒有就用實盤 */
+const expected = (it) => (it.book != null ? it.book : onHand(it))
+const needsOrder = (it) => it.safety != null && expected(it) <= it.safety
+const placeKeyOf = (s) => (s.place ? `p:${canon(s.place)}` : `s:${s.id}`)
+const stockPlace = (st) => (st.place ? placeLabel(st.place) : `沒填位置・${fmtTime(st.at)}`)
+const itemTitle = (it) => `${it.label}${it.spec ? `・${it.spec}` : ''}`
+const itemUrls = new Map()
+const itemUrl = (it) => {
+  if (!it.photo) return ''
+  const hit = itemUrls.get(it.id)
+  if (hit?.blob === it.photo) return hit.url
+  if (hit) URL.revokeObjectURL(hit.url)
+  const url = URL.createObjectURL(it.photo)
+  itemUrls.set(it.id, { blob: it.photo, url })
+  return url
+}
+const itemThumb = (it, size = 44) =>
+  it.photo ? `<img class="thumb" src="${itemUrl(it)}" alt="" style="width:${size}px;height:${size}px">` : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc(it.label.slice(0, 1))}</span>`
+
+/**
+ * 按「完成」：這次盤點記進品項庫。可以重複按（改完再按一次會更新，不會重複算）。
+ * 同一個位置，以「比較新的那次盤點」為準。
+ */
+async function linkSession(s) {
+  const items = await itemsAll()
+  const pk = placeKeyOf(s)
+  const sums = new Map()
+  let created = 0
+  s.itemOf = {}
+  for (const g of groupsOf(s)) {
+    const count = Number(g.count) || 0
+    let it = findItem(items, g)
+    if (!it) {
+      if (!count) continue
+      it = newItem(items, g)
+      const r = g.refs[0]
+      if (r) it.photo = await cropBox(s.photos[r.pi], s.photos[r.pi].objects[r.oi].box).catch(() => undefined)
+      items.unshift(it)
+      created++
+    } else {
+      const k = looseKey(g)
+      if (!it.aliases.includes(k)) it.aliases.push(k)
+    }
+    s.itemOf[g.key] = it.id
+    sums.set(it, (sums.get(it) || 0) + count)
+  }
+  // 同一格以這次為準：這次沒數到的（以前記在這一格、或這次盤點改成別的）→ 從這一格拿掉
+  for (const it of items) {
+    const st = it.stock?.[pk]
+    if (st && !sums.has(it) && (st.sid === s.id || st.at <= s.createdAt)) {
+      delete it.stock[pk]
+      await putItem(it)
+    }
+  }
+  for (const [it, count] of sums) {
+    const st = it.stock[pk]
+    if (!st || st.sid === s.id || st.at <= s.createdAt) it.stock[pk] = { count, at: s.createdAt, sid: s.id, place: s.place || '' }
+    await putItem(it)
+  }
+  s.linkedAt = Date.now()
+  await db.put(s)
+  return { created, linked: sums.size }
+}
+/** 刪掉一次盤點：它記在品項庫的數量也拿掉 */
+async function unlinkSession(id) {
+  for (const it of await itemsAll()) {
+    const keys = Object.keys(it.stock || {}).filter((k) => it.stock[k].sid === id)
+    if (!keys.length) continue
+    keys.forEach((k) => delete it.stock[k])
+    await putItem(it)
+  }
+}
+/** 合併重複的品項：from 併進 to（以前的寫法、各位置數量、進出紀錄都帶過去） */
+async function mergeItems(from, to) {
+  to.aliases = [...new Set([...(to.aliases || []), ...(from.aliases || [])])]
+  for (const [k, st] of Object.entries(from.stock || {})) {
+    const cur = to.stock[k]
+    if (!cur || cur.at < st.at) to.stock[k] = st
+    else if (cur.sid === st.sid) cur.count += st.count
+  }
+  if (from.book != null) to.book = (to.book ?? 0) + from.book
+  if (to.safety == null) to.safety = from.safety
+  to.moves = [...(to.moves || []), ...(from.moves || [])].sort((a, b) => a.at - b.at)
+  to.equiv = [...new Set([...(to.equiv || []), ...(from.equiv || [])])].filter((id) => id !== to.id && id !== from.id)
+  if (!to.photo && from.photo) to.photo = from.photo
+  to.status = 'ok'
+  for (const it of await itemsAll()) {
+    if (it.equiv?.includes(from.id)) {
+      it.equiv = [...new Set(it.equiv.map((id) => (id === from.id ? to.id : id)))].filter((id) => id !== it.id)
+      if (it !== to) await putItem(it)
+    }
+  }
+  await putItem(to)
+  await delItem(from)
+}
+/** 型號解讀：乾燥過濾器、膨脹閥看得懂時，就不再列「分數」那一條（重複） */
+function decodedFor(f) {
+  const list = decode(f.model, f.code, f.spec, f.label, f.text)
+  return list.some((d) => ['drier', 'txv', 'coil'].includes(d.kind)) ? list.filter((d) => d.kind !== 'pipe') : list
+}
+/** 替代品：型號規則算出來的＋自己設定「可以互換」的；店裡有的標出來 */
+function equivalentsFor(it, decoded, items) {
+  const rule = decoded.flatMap((d) => d.equivalents.map((e) => ({ ...e, item: items.find((x) => x !== it && x.model && modelKey(x.model) === modelKey(e.model)) })))
+  const linked = it ? items.filter((x) => x !== it && (it.equiv?.includes(x.id) || x.equiv?.includes(it.id))) : []
+  return { rule, linked: linked.filter((x) => !rule.some((r) => r.item === x)) }
+}
+
 // ───────────────────────── 畫面狀態 ─────────────────────────
-const state = { view: 'home', session: null, photoIndex: 0, focus: null, focusObj: null, busy: false, cancel: false, progress: null, refining: null, addMode: false, viewer: false, zoom: 2 }
+const state = { view: 'home', session: null, photoIndex: 0, focus: null, focusObj: null, busy: false, cancel: false, progress: null, refining: null, addMode: false, viewer: false, zoom: 2, itemFilter: 'all', itemId: null, lookup: { q: '', read: null, busy: false } }
 
 function go(view, extra = {}) {
   Object.assign(state, { view, focus: null, focusObj: null, addMode: false, viewer: false }, extra)
@@ -843,6 +1038,19 @@ async function save() {
 // ───────────────────────── 畫面 ─────────────────────────
 const chev = '<svg class="chev" width="10" height="17" viewBox="0 0 10 17" aria-hidden="true"><path d="M1.5 1.5 8 8.5l-6.5 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 const backBtn = (to = 'home', label = '盤點') => `<button class="back" data-go="${to}"><svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><path d="M10 2 2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>${esc(label)}</button>`
+/** 底部分頁列（像 iOS 的 Tab Bar）：盤點／品項／查型號 */
+const ICON = {
+  home: '<path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 8.5 12 13l8-4.5M12 13v7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+  items: '<rect x="4" y="4" width="16" height="16" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 9h8M8 12.5h8M8 16h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  lookup: '<circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15 15 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+}
+const TABS = [
+  { id: 'home', label: '盤點' },
+  { id: 'items', label: '品項' },
+  { id: 'lookup', label: '查型號' },
+]
+const tabBar = (active) =>
+  `<nav class="tabbar" aria-label="主選單"><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
 
 async function viewHome() {
   const sessions = await db.all()
@@ -854,7 +1062,7 @@ async function viewHome() {
     <p class="subtitle">拍貨架，AI 數品項；跟原圖對照，再用 ＋／－ 修正。</p>
     ${
       hasKey
-        ? ''
+        ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">📷</span><span class="grow"><b>新盤點</b><br><span class="meta">拍一格貨架；有貼儲位標籤會自動填位置</span></span>${chev}</button>`
         : `<div class="hint-card stack"><div><b>第一次用：</b>先到「設定」貼上你的免費 Gemini API Key（只會存在這支手機）。</div><button class="btn small" data-go="settings">去設定</button></div>`
     }
     ${(() => {
@@ -874,14 +1082,14 @@ async function viewHome() {
         ? `<div class="group">${sessions
             .map((s) => {
               const failed = s.photos.length && s.photos.every((p) => p.status !== 'done')
-              const meta = [fmtTime(s.createdAt), s.place, s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
+              const meta = [fmtTime(s.createdAt), s.place && placeLabel(s.place), s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.linkedAt ? '' : '還沒按完成', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
               return `<button class="row" data-open="${s.id}"><img src="${s.photos[0] ? urlOf(s.photos[0]) : ''}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)"><span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>${chev}</button>`
             })
             .join('')}</div>`
-        : `<div class="empty"><div class="big">📦</div><p>還沒有盤點紀錄。<br>按下面「新盤點」，拍一層貨架試試看。</p></div>`
+        : `<div class="empty"><div class="big">📦</div><p>還沒有盤點紀錄。<br>按上面「新盤點」，拍一層貨架試試看。</p></div>`
     }
   </main>
-  <div class="toolbar"><div class="inner"><button class="btn" data-action="new" ${hasKey ? '' : 'disabled'}>＋ 新盤點</button></div></div>`
+  ${tabBar('home')}`
 }
 
 function viewCapture() {
@@ -890,7 +1098,14 @@ function viewCapture() {
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}</div>
     <h1 class="large-title">新盤點</h1>
-    <div class="group"><label class="row"><span style="width:96px" class="muted">位置（選填）</span><input class="inline" id="place" placeholder="例：A 貨架第 2 層" value="${esc(s.place)}" autocomplete="off"></label></div>
+    <div class="group"><label class="row"><span style="width:96px" class="muted">位置</span><input class="inline" id="place" placeholder="${locations().length ? '點下面的儲位；拍到標籤也會自動填' : '例：A-01（拍到儲位標籤會自動填）'}" value="${esc(s.place)}" autocomplete="off"></label></div>
+    ${
+      locations().length
+        ? `<div class="chips" role="group" aria-label="選儲位">${locations()
+            .map((l) => `<button class="chip" data-place="${esc(l.code)}" aria-pressed="${canon(l.code) === canon(s.place)}">${esc(l.code)}${l.name ? `<small>${esc(l.name)}</small>` : ''}</button>`)
+            .join('')}</div>`
+        : `<p class="footnote">到「品項 → 儲位」建立代號、印標籤貼在貨架上：之後拍照會自動填位置，重盤同一格也會自動更新數量。</p>`
+    }
     <p class="section-title">照片（${s.photos.length}）</p>
     ${
       s.photos.length
@@ -954,7 +1169,7 @@ function viewReview() {
   return `
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}<button class="btn small secondary" data-action="add">＋ 手動新增</button></div>
-    <h1 class="large-title">${esc(s.place || '盤點結果')}</h1>
+    <h1 class="large-title">${esc(s.place ? placeLabel(s.place) : '盤點結果')}</h1>
     <p class="subtitle">${fmtTime(s.createdAt)}${s.model ? `・${esc(s.model)}` : ''}</p>
     ${errors ? `<div class="stack">${errors}</div>` : ''}
     ${
@@ -1010,7 +1225,7 @@ function viewReview() {
           <div class="item ${state.focus === g.key ? 'on' : ''}" data-item="${esc(g.key)}">
             <button class="swatch" style="--c:${g.color}" data-focus="${esc(g.key)}" aria-label="在照片上標出 ${esc(g.label)}">${gi + 1}</button>
             <button class="grow edit-btn" data-edit="${esc(g.key)}" aria-label="修改 ${esc(g.label)} 的名稱、品牌、型號、規格">
-              <span class="name">${esc(g.label)}</span><span class="pencil" aria-hidden="true">✎</span>${g.manual ? '<span class="badge edit">手動</span>' : doubtsByKey.get(g.key) ? `<span class="badge low">${doubtsByKey.get(g.key)} 個要確認</span>` : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}
+              <span class="name">${esc(g.label)}</span><span class="pencil" aria-hidden="true">✎</span>${g.manual ? '<span class="badge edit">手動</span>' : doubtsByKey.get(g.key) ? `<span class="badge low">${doubtsByKey.get(g.key)} 個要確認</span>` : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}${itemsCache && !findItem(itemsCache, g) ? '<span class="badge ok">新品項</span>' : ''}
               <br><span class="spec">${esc(detailOf(g) || '點 ✎ 補品牌、型號、尺寸')}${!g.manual && g.count !== g.boxes ? `・照片裡 ${g.boxes} 個` : ''}</span>
             </button>
             <span class="stepper"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">−</button><input inputmode="numeric" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.label)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">＋</button></span>
@@ -1023,7 +1238,7 @@ function viewReview() {
       <button class="btn danger small" data-action="delete-session">刪除這次盤點</button>
     </div>
   </main>
-  <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn" data-action="finish">完成</button></div></div>`
+  <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn" data-action="finish">完成・記進品項庫</button></div></div>`
 }
 
 async function viewSettings() {
@@ -1075,17 +1290,233 @@ async function viewSettings() {
         <li>第一次會要你授權：選自己的帳號 →「進階」→「前往」→ 允許。</li>
         <li>複製「網頁應用程式網址」，貼到上面的格子 → 按「儲存並測試」。</li>
       </ol>
-      <p>試算表會自動建立「盤點紀錄」（每次盤點每一種一列）、「總表」（每個品項在每次盤點各幾件）、「最新一次」（最近一次盤點的數量）。資料只會寫進你自己的試算表。</p>
+      <p>試算表會自動建立「盤點紀錄」（每次盤點每一種一列）、「總表」（每個品項在每次盤點各幾件）、「最新一次」（最近一次盤點的數量）、「品項庫」（料號、實盤、帳面、差異、該叫貨）。資料只會寫進你自己的試算表。</p>
+      <p><b>以前連結過的：</b>要有「品項庫」工作表，請重新複製程式碼貼上 → 存檔 →「部署」→「管理部署作業」→ ✎ 編輯 → 版本選「新版本」→ 部署（網址不變）。</p>
     </details>
     <p class="section-title">連線測試</p>
     <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
     <p class="footnote">辨識一直失敗時按這個，把結果截圖給我看。</p>
     <p class="section-title">資料</p>
     <div class="row-actions"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>
-    <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。</p>
+    <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
     <p class="footnote" style="margin-top:18px;text-align:center">拍照盤點 版本 ${VERSION}</p>
     <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
     <p class="footnote" style="text-align:center">有新版會自動更新；不放心就按這裡。盤點紀錄、樣品照、API Key 都不會被刪。</p>
+  </main>`
+}
+
+// ───────────────────────── 品項庫畫面 ─────────────────────────
+const ITEM_FILTERS = [
+  { id: 'all', label: '全部', test: () => true },
+  { id: 'order', label: '叫貨', test: needsOrder },
+  { id: 'diff', label: '差異', test: (it) => (diffOf(it) ?? 0) !== 0 },
+  { id: 'new', label: '新的', test: (it) => it.status === 'new' },
+]
+const itemBadges = (it) => {
+  const d = diffOf(it)
+  return `${it.status === 'new' ? '<span class="badge ok">新的</span>' : ''}${needsOrder(it) ? '<span class="badge low">該叫貨</span>' : ''}${d ? `<span class="badge ${d < 0 ? 'bad' : 'edit'}">${d > 0 ? '+' : ''}${d}</span>` : ''}`
+}
+const itemRow = (it) => {
+  const places = Object.values(it.stock || {})
+    .sort((a, b) => b.count - a.count)
+    .map((st) => `${st.place || '沒填位置'} ${st.count}`)
+    .join('、')
+  const search = canon([it.no, it.label, it.brand, it.model, it.spec, ...Object.values(it.stock || {}).map((st) => st.place)].join(' '))
+  return `<button class="row item-row" data-item-open="${it.id}" data-search="${esc(search)}">
+    ${itemThumb(it)}
+    <span class="grow"><span class="title">${esc(itemTitle(it))}</span>${itemBadges(it)}<br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}${places ? `<br>${esc(places)}` : ''}</span></span>
+    <span class="qty"><b>${onHand(it)}</b>${it.book != null ? `<small>帳面 ${it.book}</small>` : ''}</span>${chev}</button>`
+}
+
+async function viewItems() {
+  const items = await itemsAll(true)
+  const f = ITEM_FILTERS.find((x) => x.id === state.itemFilter) || ITEM_FILTERS[0]
+  const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
+  const list = items.filter(f.test).sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.model, b.model))
+  const byLabel = new Map()
+  for (const it of list) byLabel.set(it.label, [...(byLabel.get(it.label) || []), it])
+  return `
+  <main class="app">
+    <div class="nav"><button class="btn small plain" data-go="locations">儲位</button><span class="nav-right"><button class="icon-btn" data-action="items-more" aria-label="匯入、匯出、備份">⋯</button><button class="icon-btn" data-action="item-add" aria-label="新增品項">＋</button></span></div>
+    <h1 class="large-title">品項庫</h1>
+    <p class="subtitle">${items.length ? `${items.length} 種商品・${locations().length} 個儲位。盤點按「完成」就會自動更新。` : '盤點按「完成」，數到的東西就會自動記進來。'}</p>
+    ${
+      items.length
+        ? `<div class="seg" role="tablist" aria-label="篩選">${ITEM_FILTERS.map((x) => `<button role="tab" aria-selected="${x.id === f.id}" data-item-filter="${x.id}">${x.label} ${items.filter(x.test).length}</button>`).join('')}</div>
+           <input class="field search" id="item-search" type="search" placeholder="搜尋品名、型號、料號、儲位" autocomplete="off" enterkeyhint="search">
+           ${
+             list.length
+               ? [...byLabel]
+                   .map(([label, its]) => `<section class="item-sec"><p class="section-title">${esc(label)}（${its.length}）</p><div class="group">${its.map(itemRow).join('')}</div></section>`)
+                   .join('')
+               : `<div class="empty"><p>${f.id === 'order' ? '沒有該叫貨的。<br>在品項裡設「安全庫存」，低於就會列在這裡。' : f.id === 'diff' ? '實盤跟帳面都一樣。<br>（要先設定帳面數才會比對）' : '沒有新的品項。'}</p></div>`
+           }
+           <p class="empty" id="search-empty" hidden>找不到。可以到「查型號」用型號找替代品。</p>`
+        : `<div class="hint-card stack">
+             <div><b>品項庫會自己長出來</b>：不用先建好。每次盤點按「完成・記進品項庫」，數到的每一種都會變成一筆（有料號、在哪裡、幾個）。</div>
+             <div>也可以：</div>
+             <div class="row-actions"><button class="btn small" data-go="lookup">📷 拍型號加進來</button><button class="btn small secondary" data-action="import">貼上 Excel 清單</button><button class="btn small secondary" data-go="locations">建立儲位</button></div>
+           </div>`
+    }
+  </main>
+  ${tabBar('items')}`
+}
+
+async function viewItem() {
+  const items = await itemsAll()
+  const it = items.find((x) => x.id === state.itemId)
+  if (!it) return viewItems()
+  const total = onHand(it)
+  const last = lastCounted(it)
+  const d = diffOf(it)
+  const decoded = decodedFor(it)
+  const eq = equivalentsFor(it, decoded, items)
+  const stock = Object.entries(it.stock || {}).sort((a, b) => b[1].at - a[1].at)
+  const links = linksFor(it, decoded)
+  return `
+  <main class="app">
+    <div class="nav">${backBtn('items', '品項')}<button class="btn small secondary" data-action="item-edit">編輯</button></div>
+    <div class="item-head">${itemThumb(it, 64)}<div class="grow"><h1 class="large-title">${esc(itemTitle(it))}</h1><p class="subtitle">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</p></div></div>
+    ${
+      it.status === 'new'
+        ? `<div class="hint-card stack"><div><b>盤點時自動建立的。</b>名稱、尺寸對嗎？跟別的品項重複就合併。</div><div class="row-actions"><button class="btn small" data-action="item-confirm">✓ 對，確認</button><button class="btn small secondary" data-action="item-edit">修改</button><button class="btn small secondary" data-action="item-merge">合併到…</button></div></div>`
+        : ''
+    }
+    <section class="summary">
+      <div class="stock-nums">
+        <div><span class="stock-label">實盤</span><span class="stock-big">${total}</span><span class="stock-sub">${last ? `最近 ${fmtTime(last)}` : '還沒盤過'}</span></div>
+        <div><span class="stock-label">帳面</span><span class="stock-big">${it.book ?? '—'}</span><span class="stock-sub">${it.book == null ? '還沒設定' : '進貨加、賣出減'}</span></div>
+        <div><span class="stock-label">差異</span><span class="stock-big ${d < 0 ? 'neg' : d > 0 ? 'pos' : ''}">${d == null ? '—' : `${d > 0 ? '+' : ''}${d}`}</span><span class="stock-sub">${d == null ? '設定帳面數才比' : d > 0 ? '盤盈（多了）' : d < 0 ? '盤虧（少了）' : '一樣'}</span></div>
+      </div>
+      <div class="row-actions" style="margin-top:14px"><button class="btn small secondary" data-action="move-in">＋ 進貨</button><button class="btn small secondary" data-action="move-out">－ 賣出</button><button class="btn small secondary" data-action="book-set">設定帳面數</button></div>
+    </section>
+    <p class="section-title">叫貨提醒</p>
+    <div class="group"><div class="row"><span class="grow"><span class="title">安全庫存</span><br><span class="meta">${needsOrder(it) ? '⚠️ 已經到了，該叫貨' : '剩這麼多（或更少）就列進叫貨清單'}</span></span><span class="stepper"><button data-safety="-1" aria-label="減一">−</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="安全庫存"><button data-safety="1" aria-label="加一">＋</button></span></div></div>
+    <p class="section-title">在哪裡（${stock.length} 個位置）</p>
+    ${
+      stock.length
+        ? `<div class="group">${stock.map(([k, st]) => `<div class="row"><span class="grow"><span class="title">${esc(stockPlace(st))}</span><br><span class="meta">${fmtTime(st.at)} 盤點</span></span><span class="qty"><b>${st.count}</b></span><button class="icon-btn small" data-stock-del="${esc(k)}" aria-label="拿掉這個位置的數量">×</button></div>`).join('')}</div>`
+        : '<div class="group"><div class="row muted">還沒盤點過。盤點時按「完成」就會記在這裡。</div></div>'
+    }
+    ${
+      decoded.length
+        ? `<p class="section-title">型號解讀</p><div class="group">${decoded.map((x) => `<div class="row decode"><span class="grow"><span class="title">${esc(x.title)}</span>${x.facts.map((t) => `<br><span class="meta">・${esc(t)}</span>`).join('')}</span></div>`).join('')}</div>`
+        : ''
+    }
+    <p class="section-title">替代品（可以互換）</p>
+    <div class="group">
+      ${eq.rule.map((e) => equivRow(e)).join('')}
+      ${eq.linked.map((x) => equivRow({ brand: x.brand, model: x.model || itemTitle(x), item: x, linked: true })).join('')}
+      <button class="row" data-action="equiv-add"><span class="swatch" style="--c:var(--tint);pointer-events:none">＋</span><span class="grow"><span class="title" style="color:var(--tint)">加一個可以互換的品項</span><br><span class="meta">例如客人常問的別牌同規格</span></span></button>
+    </div>
+    ${decoded.find((x) => x.note)?.note ? `<p class="footnote">${esc(decoded.find((x) => x.note).note)}</p>` : ''}
+    ${links.length ? `<p class="section-title">查原廠資料</p><div class="group">${links.map((l) => `<a class="row" href="${esc(l.url)}" target="_blank" rel="noreferrer"><span class="grow">${esc(l.title)}</span>${chev}</a>`).join('')}</div>` : ''}
+    ${
+      it.moves?.length
+        ? `<p class="section-title">進出紀錄</p><div class="group">${[...it.moves]
+            .reverse()
+            .slice(0, 20)
+            .map((m) => `<div class="row"><span class="grow">${m.kind === 'in' ? '進貨' : m.kind === 'out' ? '賣出' : '設定帳面數'}<br><span class="meta">${fmtTime(m.at)}</span></span><span class="qty"><b>${m.kind === 'in' ? '+' : m.kind === 'out' ? '−' : '＝'}${m.qty}</b></span></div>`)
+            .join('')}</div>`
+        : ''
+    }
+    <div class="row-actions" style="margin-top:22px"><button class="btn small secondary" data-action="item-merge">合併到另一個品項</button><button class="btn small danger" data-action="item-delete">刪除品項</button></div>
+    <p class="footnote">以前的寫法（AI 認過的名稱）：${esc((it.aliases || []).length)} 種，以後辨識到都會算進這一項。</p>
+  </main>`
+}
+function equivRow(e) {
+  const x = e.item
+  return x
+    ? `<button class="row" data-item-open="${x.id}"><span class="grow"><span class="title">${esc([e.brand, e.model].filter(Boolean).join(' '))}</span><br><span class="meta in-stock">店裡有 ${onHand(x)}・${esc(x.no)}${e.linked ? '・自己設定的' : ''}</span></span>${chev}</button>`
+    : `<div class="row"><span class="grow"><span class="title">${esc([e.brand, e.model].filter(Boolean).join(' '))}</span><br><span class="meta">店裡還沒有這一項</span></span></div>`
+}
+
+// ───────────────────────── 查型號：客人拿零件來問 ─────────────────────────
+const EXAMPLES = ['DML 083S', 'ADK-163', 'TES 2', 'KP 15', 'EVR 6', '4×11×330', '1吋1分', 'R404A']
+function lookupResults() {
+  const { q, read } = state.lookup
+  const items = itemsCache || []
+  const fields = read || { model: q, label: q }
+  const decoded = decodedFor(read ? read : { model: q })
+  const main = decoded.find((x) => x.model)
+  const cq = canon(q)
+  const matches =
+    cq.length >= 2
+      ? items
+          .filter((it) => {
+            const hay = canon([it.no, it.label, it.brand, it.model, it.spec].join(' '))
+            return hay.includes(cq) || (main && it.model && modelKey(it.model) === modelKey(main.model)) || (read && findItem([it], read))
+          })
+          .slice(0, 20)
+      : []
+  const eq = equivalentsFor(matches[0] || null, decoded, items)
+  const links = linksFor({ brand: read?.brand || main?.brand || '', model: read?.model || main?.model || q, label: read?.label || '' }, decoded)
+  if (!q && !read)
+    return `<p class="section-title">可以查</p>
+      <div class="chips">${EXAMPLES.map((x) => `<button class="chip" data-example="${esc(x)}">${esc(x)}</button>`).join('')}</div>
+      <p class="footnote">看得懂：各牌乾燥過濾器（DML、DCL、ADK、EK、FD、C-）、Danfoss 膨脹閥（TEX、TES、TEN）、KP 壓力開關、EVR 電磁閥、散熱器排×支×鏡面、銅管分數、冷媒、Danfoss 訂購碼。看不懂的型號也會找店裡有沒有，並附原廠搜尋連結。</p>`
+  const exact = read ? items.find((it) => findItem([it], read)) : null
+  return `
+    ${
+      read
+        ? `<section class="summary read-card">
+            <div class="read-head">${read.url ? `<img src="${read.url}" alt="拍到的標籤">` : ''}<div class="grow"><span class="stock-label">AI 讀到</span><b>${esc(read.label || '（看不出品名）')}</b><br><span class="meta">${esc([read.brand, read.model, read.spec].filter(Boolean).join('・') || '看不出型號')}</span>${read.code ? `<br><span class="meta">訂購碼 ${esc(read.code)}</span>` : ''}</div></div>
+            ${read.text ? `<details class="trace"><summary>標籤上的字</summary>${esc(read.text)}</details>` : ''}
+            <div class="row-actions" style="margin-top:12px">${exact ? `<button class="btn small" data-item-open="${exact.id}">打開 ${esc(exact.no)}（店裡有 ${onHand(exact)}）</button>` : '<button class="btn small" data-action="read-add">加入品項庫</button>'}<button class="btn small secondary" data-action="read-clear">清除</button></div>
+          </section>`
+        : ''
+    }
+    ${decoded.length ? `<p class="section-title">這是什麼</p><div class="group">${decoded.map((x) => `<div class="row decode"><span class="grow"><span class="title">${esc(x.title)}</span>${x.facts.map((t) => `<br><span class="meta">・${esc(t)}</span>`).join('')}</span></div>`).join('')}</div>` : ''}
+    <p class="section-title">店裡有的（${matches.length}）</p>
+    ${matches.length ? `<div class="group">${matches.map(itemRow).join('')}</div>` : `<div class="group"><div class="row muted">品項庫裡沒有${fields.model || fields.label ? `「${esc(read ? read.model || read.label : q)}」` : ''}。</div></div>`}
+    ${
+      eq.rule.length || eq.linked.length
+        ? `<p class="section-title">替代品（同規格，可以互換）</p><div class="group">${eq.rule.map(equivRow).join('')}${eq.linked.map((x) => equivRow({ brand: x.brand, model: x.model || itemTitle(x), item: x, linked: true })).join('')}</div>${decoded.find((x) => x.note)?.note ? `<p class="footnote">${esc(decoded.find((x) => x.note).note)}</p>` : ''}`
+        : ''
+    }
+    ${links.length ? `<p class="section-title">查原廠資料</p><div class="group">${links.map((l) => `<a class="row" href="${esc(l.url)}" target="_blank" rel="noreferrer"><span class="grow">${esc(l.title)}</span>${chev}</a>`).join('')}</div>` : ''}`
+}
+async function viewLookup() {
+  await itemsAll()
+  const { q, busy } = state.lookup
+  return `
+  <main class="app">
+    <div class="nav"><span></span></div>
+    <h1 class="large-title">查型號</h1>
+    <p class="subtitle">客人拿零件或型號來問：拍標籤或打型號，馬上看是什麼、店裡有沒有、可以用什麼替代。</p>
+    <label class="hero-btn ${busy ? 'busy' : ''}" ${busy ? 'aria-disabled="true"' : ''}><span class="hero-icon" aria-hidden="true">${busy ? '<span class="spinner small"></span>' : '📷'}</span><span class="grow"><b>${busy ? 'AI 讀標籤中…' : '拍標籤／銘牌'}</b><br><span class="meta">${busy ? '大約 5～15 秒' : '外盒、銘牌、零件上的刻字都可以'}</span></span><input type="file" accept="image/*" capture="environment" id="label-cam" class="sr-only" ${busy || !ls.get(LS.key) ? 'disabled' : ''}></label>
+    ${ls.get(LS.key) ? '' : '<p class="footnote">拍標籤要先到「設定」貼上 API Key；打型號查詢不用。</p>'}
+    <input class="field search" id="lookup-q" type="search" placeholder="或打型號：DML 083S、TES 2、4×11×330" value="${esc(q)}" autocomplete="off" enterkeyhint="search" spellcheck="false">
+    <div id="lookup-results">${lookupResults()}</div>
+  </main>
+  ${tabBar('lookup')}`
+}
+
+// ───────────────────────── 儲位畫面 ─────────────────────────
+async function viewLocations() {
+  const items = await itemsAll()
+  const locs = locations()
+  const here = (code) => items.filter((it) => Object.values(it.stock || {}).some((st) => canon(st.place) === canon(code)))
+  return `
+  <main class="app">
+    <div class="nav">${backBtn('items', '品項')}</div>
+    <h1 class="large-title">儲位</h1>
+    <p class="subtitle">每一格貨架一個代號（例如 A-01）。印成標籤貼在貨架上：拍照時 AI 看到標籤，就會自動填位置；重盤同一格，數量自動更新。</p>
+    ${
+      locs.length
+        ? `<div class="group">${locs
+            .map((l, i) => {
+              const its = here(l.code)
+              const qty = its.reduce((n, it) => n + Object.values(it.stock).filter((st) => canon(st.place) === canon(l.code)).reduce((m, st) => m + st.count, 0), 0)
+              return `<button class="row" data-loc-edit="${i}"><span class="loc-code">${esc(l.code)}</span><span class="grow"><span class="title">${esc(l.name || '（沒有說明）')}</span><br><span class="meta">${its.length ? `${its.length} 種・${qty} 件` : '還沒盤點'}</span></span>${chev}</button>`
+            })
+            .join('')}</div>`
+        : '<div class="group"><div class="row muted">還沒有儲位。按下面「新增儲位」，可以一次建立一整排。</div></div>'
+    }
+    <div class="row-actions" style="margin-top:14px"><button class="btn" style="flex:1" data-action="loc-add">＋ 新增儲位</button><button class="btn secondary" style="flex:1" data-action="loc-print" ${locs.length ? '' : 'disabled'}>列印標籤</button></div>
+    <details class="steps"><summary>怎麼編號比較好？</summary>
+      <ol><li>字母＝第幾排貨架（A、B、C…），數字＝第幾層（由上往下 01、02…）。例：B-03＝B 排第 3 層。</li><li>標籤印出來剪下，貼在每一層的正中間、正面朝外；拍照時把標籤一起拍進去。</li><li>同一格要一次拍完（可以拍好幾張）。重盤同一格，會以新的那次為準（這次沒拍到的，就從這一格拿掉）；不同格的數量會加起來變成「實盤」。</li></ol>
+    </details>
   </main>`
 }
 
@@ -1101,7 +1532,15 @@ async function render() {
             ? viewReview()
             : state.view === 'report'
               ? await viewReport()
-              : await viewSettings()
+              : state.view === 'items'
+                ? await viewItems()
+                : state.view === 'item'
+                  ? await viewItem()
+                  : state.view === 'lookup'
+                    ? await viewLookup()
+                    : state.view === 'locations'
+                      ? await viewLocations()
+                      : await viewSettings()
   // 放大看照片時，重畫畫面不要讓位置跳回左上角
   const vs = document.querySelector('.viewer-scroll')
   const keep = vs ? { x: vs.scrollLeft / Math.max(1, vs.scrollWidth), y: vs.scrollTop / Math.max(1, vs.scrollHeight) } : null
@@ -1541,6 +1980,440 @@ async function addSheet() {
   )
 }
 
+// ───────────────────────── 品項庫的面板 ─────────────────────────
+/** 搜尋框：只把不符合的列藏起來（不重畫畫面，打字、選字不會被打斷） */
+function filterRows(root, q) {
+  const cq = canon(q)
+  let shown = 0
+  root.querySelectorAll('[data-search]').forEach((r) => {
+    const ok = !cq || r.dataset.search.includes(cq)
+    r.hidden = !ok
+    if (ok) shown++
+  })
+  root.querySelectorAll('.item-sec').forEach((sec) => (sec.hidden = ![...sec.querySelectorAll('[data-search]')].some((r) => !r.hidden)))
+  const empty = root.querySelector('#search-empty')
+  if (empty) empty.hidden = shown > 0 || !cq
+}
+
+/** 選一個品項（合併、設定可以互換） */
+function pickItem(title, sub, exclude, onPick) {
+  const items = (itemsCache || []).filter((x) => !exclude.includes(x))
+  sheet(
+    `<h2 class="sheet-title">${esc(title)}</h2><p class="sheet-sub">${esc(sub)}</p>
+     <input class="field search" id="pick-q" type="search" placeholder="搜尋品名、型號、料號" autocomplete="off">
+     <div class="group" style="margin-top:10px">${
+       items.map((it) => `<button class="row" data-pick="${it.id}" data-search="${esc(canon([it.no, it.label, it.brand, it.model, it.spec].join(' ')))}">${itemThumb(it, 36)}<span class="grow"><span class="title">${esc(itemTitle(it))}</span><br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</span></span></button>`).join('') ||
+       '<div class="row muted">品項庫裡沒有其他品項</div>'
+     }</div>`,
+    (el, close) => {
+      el.querySelector('#pick-q').addEventListener('input', (e) => filterRows(el, e.target.value))
+      el.querySelectorAll('[data-pick]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          close()
+          await onPick(items.find((x) => x.id === b.dataset.pick))
+        }),
+      )
+    },
+  )
+}
+
+/** 輸入一個數字（進貨、賣出、帳面數）；quick＝一鍵帶入的數字 */
+function numberSheet({ title, sub, value = '', action = '儲存', quick = [] }, onSave) {
+  sheet(
+    `<h2 class="sheet-title">${esc(title)}</h2><p class="sheet-sub">${sub}</p>
+     <input class="field big-num" id="n-val" inputmode="numeric" value="${esc(value)}" aria-label="${esc(title)}">
+     ${quick.length ? `<div class="chips" style="margin-top:10px">${quick.map((q) => `<button class="chip" data-n="${q.n}">${esc(q.label)}</button>`).join('')}</div>` : ''}
+     <button class="btn block" id="n-save" style="margin-top:14px">${esc(action)}</button>`,
+    (el, close) => {
+      const input = el.querySelector('#n-val')
+      input.focus()
+      input.select()
+      const done = async (v) => {
+        const n = parseInt(v, 10)
+        if (!Number.isFinite(n) || n < 0) return toast('請輸入 0 以上的數字')
+        close()
+        await onSave(n)
+        render()
+      }
+      el.querySelector('#n-save').onclick = () => done(input.value)
+      input.addEventListener('keydown', (e) => e.key === 'Enter' && done(input.value))
+      el.querySelectorAll('[data-n]').forEach((b) => (b.onclick = () => done(b.dataset.n)))
+    },
+  )
+}
+const currentItem = async () => (await itemsAll()).find((x) => x.id === state.itemId)
+
+/** 新增／編輯品項：品名、品牌、型號、規格 */
+async function itemEditSheet(it) {
+  const sug = await suggestions()
+  sheet(
+    `<h2 class="sheet-title">${it ? '編輯品項' : '新增品項'}</h2>
+     <p class="sheet-sub">${it ? `${esc(it.no)}：改了名稱，以前的寫法還是會對到這一項。` : '型號打對，就會自動解讀、找替代品。'}</p>
+     ${fieldsHtml(it || {}, sug)}
+     <button class="btn block" id="i-save" style="margin-top:16px">${it ? '儲存' : '新增'}</button>`,
+    (el, close) => {
+      if (!it) el.querySelector('#f-label').focus()
+      el.querySelector('#i-save').onclick = async () => {
+        const v = readFields(el)
+        if (!v.label) return toast('品名不能空白')
+        v.model = normalizeModel(v.model)
+        const items = await itemsAll()
+        const dup = findItem(items, v)
+        if (dup && dup !== it) {
+          if (!confirm(`品項庫已經有「${itemTitle(dup)}」（${dup.no}）。${it ? '要把這一項合併過去嗎？' : '要打開它嗎？'}`)) return
+          close()
+          if (it) {
+            await mergeItems(it, dup)
+            toast(`已合併到 ${dup.no}`)
+          }
+          state.itemId = dup.id
+          return go('item')
+        }
+        let target = it
+        if (it) {
+          Object.assign(it, v, { status: 'ok' })
+          if (!it.aliases.includes(looseKey(v))) it.aliases.push(looseKey(v))
+        } else target = newItem(items, v, { status: 'ok' })
+        await putItem(target)
+        close()
+        state.itemId = target.id
+        go('item')
+        toast(it ? '已儲存' : `已新增 ${target.no}`)
+      }
+    },
+  )
+}
+
+/** 品項庫右上「⋯」：匯入、匯出、叫貨清單、備份 */
+function itemsMoreSheet() {
+  sheet(
+    `<h2 class="sheet-title">品項庫</h2>
+     <div class="group">
+       <button class="row" id="m-import"><span class="grow"><span class="title">貼上 Excel 清單</span><br><span class="meta">一次匯入品名、型號、帳面數、安全庫存</span></span>${chev}</button>
+       <button class="row" id="m-xlsx"><span class="grow"><span class="title">下載品項庫 Excel</span><br><span class="meta">實盤、帳面、差異、叫貨清單</span></span>${chev}</button>
+       <button class="row" id="m-order"><span class="grow"><span class="title">複製叫貨清單</span><br><span class="meta">貼到 LINE 給廠商或老闆</span></span>${chev}</button>
+     </div>
+     <p class="section-title">備份（換手機、手機壞掉時用）</p>
+     <div class="group">
+       <button class="row" id="m-backup"><span class="grow"><span class="title">備份品項庫</span><br><span class="meta">下載一個檔案：品項、儲位、樣品照（不含盤點照片）</span></span>${chev}</button>
+       <label class="row"><span class="grow"><span class="title">從備份還原</span><br><span class="meta">選之前下載的備份檔，跟現有的合併</span></span>${chev}<input type="file" accept="application/json,.json" id="m-restore" class="sr-only"></label>
+     </div>
+     <p class="footnote">品項庫只存在這支手機；建議每週備份一次，或連結 Google 試算表自動同步。</p>`,
+    (el, close) => {
+      el.querySelector('#m-import').onclick = () => {
+        close()
+        importSheet()
+      }
+      el.querySelector('#m-xlsx').onclick = async () => {
+        close()
+        downloadBlob(itemsXlsx(await itemsAll(true)), `品項庫_${ymd(Date.now())}.xlsx`)
+        toast('已下載 Excel')
+      }
+      el.querySelector('#m-order').onclick = async () => {
+        close()
+        const list = (await itemsAll()).filter(needsOrder)
+        if (!list.length) return toast('沒有該叫貨的（要先在品項裡設安全庫存）')
+        try {
+          await navigator.clipboard.writeText(orderText(list))
+          toast(`已複製 ${list.length} 項叫貨清單`)
+        } catch {
+          toast('這個瀏覽器不讓複製，請改用下載 Excel')
+        }
+      }
+      el.querySelector('#m-backup').onclick = async () => {
+        close()
+        downloadBlob(await backupBlob(), `拍照盤點備份_${ymd(Date.now())}.json`)
+        toast('已下載備份檔：存到雲端硬碟或傳給自己')
+      }
+      el.querySelector('#m-restore').addEventListener('change', async (e) => {
+        const f = e.target.files[0]
+        if (!f) return
+        close()
+        await restoreBackup(f)
+      })
+    },
+  )
+}
+const orderText = (list) =>
+  [`叫貨清單 ${ymd(Date.now())}`, ...list.map((it) => `・${itemTitle(it)}${it.brand || it.model ? `（${[it.brand, it.model].filter(Boolean).join(' ')}）` : ''}：剩 ${expected(it)}，安全庫存 ${it.safety}`)].join('\n')
+
+/** 品項庫的表格（Excel、Google 試算表共用） */
+const ITEM_HEAD = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '安全庫存', '狀態', '在哪裡（位置 數量）', '最近盤點']
+function itemRows(items) {
+  const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
+  return [...items]
+    .sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.no, b.no))
+    .map((it) => {
+      const d = diffOf(it)
+      const last = lastCounted(it)
+      return [
+        it.no,
+        it.label,
+        it.brand,
+        it.model,
+        it.spec,
+        onHand(it),
+        it.book ?? '',
+        d ?? '',
+        it.safety ?? '',
+        [it.status === 'new' ? '新的（待確認）' : '', needsOrder(it) ? '該叫貨' : '', d > 0 ? '盤盈' : d < 0 ? '盤虧' : ''].filter(Boolean).join('、'),
+        Object.values(it.stock || {})
+          .map((st) => `${st.place || '沒填位置'} ${st.count}`)
+          .join('、'),
+        last ? `${ymd(last)} ${hm(last)}` : '',
+      ]
+    })
+}
+const itemSheets = (items) => [
+  { name: '品項庫', rows: [ITEM_HEAD, ...itemRows(items)] },
+  { name: '叫貨清單', rows: [['料號', '品名', '品牌', '型號', '尺寸／規格', '現在大概有', '安全庫存'], ...items.filter(needsOrder).map((it) => [it.no, it.label, it.brand, it.model, it.spec, expected(it), it.safety])] },
+]
+const itemsXlsx = (items) => makeXlsx(itemSheets(items))
+
+/** 貼上 Excel 清單：第一列是標題，看標題認欄位 */
+function parseTable(text) {
+  const lines = String(text).split(/\r?\n/).filter((l) => l.trim())
+  if (lines.length < 2) throw new Error('至少要有標題列和一列資料')
+  const sep = lines[0].includes('\t') ? '\t' : ','
+  const rows = lines.map((l) => l.split(sep).map((c) => c.trim().replace(/^"(.*)"$/, '$1')))
+  const head = rows[0].map((h) => h.replace(/\s/g, ''))
+  const col = (...ws) => head.findIndex((h) => ws.some((w) => h.includes(w)))
+  const safety = col('安全', '最低')
+  const bookWords = ['帳面', '庫存', '數量', '存量']
+  const c = { no: col('料號', '編號'), label: col('品名', '名稱', '品項'), brand: col('品牌', '廠牌'), model: col('型號'), spec: col('規格', '尺寸'), book: head.findIndex((h, i) => i !== safety && bookWords.some((w) => h.includes(w))), safety }
+  if (c.label < 0) throw new Error('第一列要有標題，而且要有「品名」')
+  const num = (v) => {
+    const n = parseInt(String(v ?? '').replace(/[^\d-]/g, ''), 10)
+    return Number.isFinite(n) ? n : null
+  }
+  const at = (r, i) => (i >= 0 ? r[i] || '' : '')
+  return rows.slice(1).map((r) => ({ no: at(r, c.no), label: at(r, c.label), brand: at(r, c.brand), model: normalizeModel(at(r, c.model)), spec: at(r, c.spec), book: c.book >= 0 ? num(r[c.book]) : null, safety: c.safety >= 0 ? num(r[c.safety]) : null }))
+}
+async function importTable(text) {
+  const rows = parseTable(text)
+  const items = await itemsAll()
+  let created = 0
+  let updated = 0
+  let skipped = 0
+  for (const r of rows) {
+    if (!r.label) {
+      skipped++
+      continue
+    }
+    let it = (r.no && items.find((x) => canon(x.no) === canon(r.no))) || findItem(items, r)
+    if (!it) {
+      it = newItem(items, r, { status: 'ok', ...(r.no ? { no: r.no } : {}) })
+      items.unshift(it)
+      created++
+    } else {
+      updated++
+      it.status = 'ok'
+      if (!it.aliases.includes(looseKey(r))) it.aliases.push(looseKey(r))
+    }
+    if (r.book != null && r.book !== it.book) {
+      it.book = r.book
+      it.moves.push({ at: Date.now(), kind: 'set', qty: r.book })
+    }
+    if (r.safety != null) it.safety = r.safety
+    await putItem(it)
+  }
+  return { created, updated, skipped }
+}
+function importSheet() {
+  sheet(
+    `<h2 class="sheet-title">貼上 Excel 清單</h2>
+     <p class="sheet-sub">在 Excel 或 Google 試算表選取整個表格（含第一列標題）→ 複製 → 貼在下面。標題要有「品名」；有這些欄位也會讀：料號、品牌、型號、規格（或尺寸）、帳面（或庫存、數量）、安全庫存。</p>
+     <textarea class="field" id="imp-text" placeholder="品名&#9;型號&#9;規格&#9;帳面數&#9;安全庫存&#10;乾燥過濾器&#9;DML 083S&#9;3分&#9;12&#9;5"></textarea>
+     <button class="btn block" id="imp-go" style="margin-top:12px">匯入</button>
+     <p class="footnote">同名稱、同型號的會更新，不會重複；料號欄有寫就用你的料號。</p>`,
+    (el, close) => {
+      el.querySelector('#imp-go').onclick = async () => {
+        try {
+          const r = await importTable(el.querySelector('#imp-text').value)
+          close()
+          toast(`匯入完成：新增 ${r.created}、更新 ${r.updated}${r.skipped ? `、略過 ${r.skipped} 列（沒有品名）` : ''}`)
+          go('items')
+        } catch (e) {
+          toast(e.message)
+        }
+      }
+    },
+  )
+}
+
+/** 備份：品項（含小圖）、儲位、品項清單、樣品照，存成一個 JSON 檔 */
+const b64ToBlob = (b64, type = 'image/jpeg') => {
+  const bin = atob(b64)
+  const arr = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+  return new Blob([arr], { type })
+}
+async function backupBlob() {
+  const items = await itemsAll(true)
+  const samples = await idb.samples.all().catch(() => [])
+  const enc = async (b) => (b ? await blobToBase64(b) : undefined)
+  const data = {
+    app: '拍照盤點',
+    kind: 'backup',
+    version: VERSION,
+    at: Date.now(),
+    locations: locations(),
+    catalog: ls.get(LS.catalog),
+    items: await Promise.all(items.map(async (it) => ({ ...it, photo: await enc(it.photo) }))),
+    samples: await Promise.all(samples.map(async (s) => ({ ...s, blob: await enc(s.blob) }))),
+  }
+  return new Blob([JSON.stringify(data)], { type: 'application/json' })
+}
+async function restoreBackup(file) {
+  let data
+  try {
+    data = JSON.parse(await file.text())
+  } catch {
+    return toast('這個檔案打不開')
+  }
+  if (data?.app !== '拍照盤點' || data.kind !== 'backup') return toast('這不是拍照盤點的備份檔')
+  if (!confirm(`還原 ${fmtTime(data.at)} 的備份：${data.items?.length || 0} 個品項、${data.locations?.length || 0} 個儲位、${data.samples?.length || 0} 張樣品照。\n同一個品項以備份為準，其他的保留。`)) return
+  for (const it of data.items || []) await idb.items.put({ ...it, photo: it.photo ? b64ToBlob(it.photo) : undefined })
+  for (const s of data.samples || []) if (s.blob) await idb.samples.put({ ...s, blob: b64ToBlob(s.blob) })
+  const locs = locations()
+  for (const l of data.locations || []) if (!locs.some((x) => canon(x.code) === canon(l.code))) locs.push(l)
+  saveLocations(locs)
+  if (data.catalog && !ls.get(LS.catalog)) ls.set(LS.catalog, data.catalog)
+  itemsCache = null
+  toast('已還原')
+  go('items')
+}
+
+/** 儲位：新增（可以一次建立一整排）／修改 */
+function locationSheet(index = -1) {
+  const list = locations()
+  const loc = list[index]
+  sheet(
+    `<h2 class="sheet-title">${loc ? '修改儲位' : '新增儲位'}</h2>
+     <div class="form">
+       <label class="field-label" for="l-code">代號（印在標籤上，越短越好）</label>
+       <input class="field" id="l-code" value="${esc(loc ? loc.code : nextCode(list))}" autocomplete="off" autocapitalize="characters">
+       <label class="field-label" for="l-name">說明（選填）</label>
+       <input class="field" id="l-name" value="${esc(loc?.name || '')}" placeholder="例：冷凍油、冷媒那一排第 1 層" autocomplete="off">
+     </div>
+     <button class="btn block" id="l-save" style="margin-top:14px">${loc ? '儲存' : '新增'}</button>
+     ${
+       loc
+         ? '<button class="btn danger block" id="l-del" style="margin-top:10px">刪除這個儲位</button><p class="footnote">刪除儲位不會刪掉品項的數量。</p>'
+         : `<p class="section-title">或一次建立一整排</p>
+            <div class="row-actions"><input class="field" id="l-row" value="${esc((/^[A-Za-z]+/.exec(nextCode(list)) || ['A'])[0])}" style="flex:1" aria-label="排的字母" autocapitalize="characters"><input class="field" id="l-n" inputmode="numeric" value="5" style="flex:1" aria-label="幾層"></div>
+            <p class="footnote">左邊填排的字母、右邊填幾層：例如 A、5 → A-01～A-05。</p>
+            <button class="btn secondary block" id="l-batch" style="margin-top:8px">建立整排</button>`
+     }`,
+    (el, close) => {
+      el.querySelector('#l-save').onclick = () => {
+        const code = el.querySelector('#l-code').value.trim().toUpperCase()
+        const name = el.querySelector('#l-name').value.trim()
+        if (!code) return toast('代號不能空白')
+        if (list.some((l, i) => i !== index && canon(l.code) === canon(code))) return toast(`已經有 ${code} 了`)
+        if (loc) Object.assign(loc, { code, name })
+        else list.push({ code, name })
+        saveLocations(list)
+        close()
+        render()
+      }
+      el.querySelector('#l-del')?.addEventListener('click', () => {
+        if (!confirm(`刪除儲位 ${loc.code}？`)) return
+        list.splice(index, 1)
+        saveLocations(list)
+        close()
+        render()
+      })
+      el.querySelector('#l-batch')?.addEventListener('click', () => {
+        const row = el.querySelector('#l-row').value.trim().toUpperCase()
+        const n = Math.min(30, parseInt(el.querySelector('#l-n').value, 10) || 0)
+        if (!row || !n) return toast('請填排的字母和層數')
+        let added = 0
+        for (let i = 1; i <= n; i++) {
+          const code = `${row}-${String(i).padStart(2, '0')}`
+          if (list.some((l) => canon(l.code) === canon(code))) continue
+          list.push({ code, name: `${row} 排第 ${i} 層` })
+          added++
+        }
+        saveLocations(list)
+        close()
+        render()
+        toast(added ? `建立了 ${added} 個儲位` : '這一排已經都有了')
+      })
+    },
+  )
+}
+/** 列印標籤：大字代號（AI 拍到就認得），A4 一頁 10 張 */
+function printLabels() {
+  document.getElementById('print-area')?.remove()
+  const area = document.createElement('div')
+  area.id = 'print-area'
+  area.innerHTML = locations()
+    .map((l) => `<div class="label"><div class="label-code">${esc(l.code)}</div>${l.name ? `<div class="label-name">${esc(l.name)}</div>` : ''}<div class="label-foot">拍照盤點・儲位</div></div>`)
+    .join('')
+  document.body.appendChild(area)
+  window.print()
+  setTimeout(() => area.remove(), 1000)
+}
+
+// ───────────────────────── 查型號：拍標籤給 AI 讀 ─────────────────────────
+const LABEL_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    label: { type: 'STRING', description: '中文品名，優先用店內品項清單的寫法；看不出來就空字串' },
+    brand: { type: 'STRING', description: '品牌；看不出來就空字串' },
+    model: { type: 'STRING', description: '型號，照標籤原樣（例如 DML 083S、TES 2、KP 15）；看不出來就空字串' },
+    spec: { type: 'STRING', description: '尺寸／規格（例如 3分、R404A、220V）；看不出來就空字串' },
+    code: { type: 'STRING', description: '訂購碼／料號（例如 Danfoss 023Z5040）；沒有就空字串' },
+    text: { type: 'STRING', description: '照片上看得到的字，照原樣抄（最多 300 字）' },
+    item_no: { type: 'STRING', description: '就是「品項庫」裡的某一項時填料號；不確定就空字串' },
+  },
+  required: ['label', 'brand', 'model', 'spec', 'code', 'text'],
+}
+/** 問 AI 一次、回 JSON：同一個模型先有思考設定、再拿掉；不行就換下一個模型 */
+async function askJson(parts, schema, timeoutMs = 30000) {
+  const first = await currentModel()
+  const list = modelCache ?? (await fetchModels().catch(() => [first]))
+  const models = [first, ...list.filter((m) => m !== first)].slice(0, 3)
+  let lastErr
+  for (const model of models) {
+    for (const think of [true, false]) {
+      try {
+        const generationConfig = { temperature: 0, responseMimeType: 'application/json', responseSchema: schema, ...(think && thinkingFor(model) ? { thinkingConfig: thinkingFor(model) } : {}) }
+        const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig }) }, timeoutMs)
+        const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
+        // aiModel：用哪個 AI 模型（不能叫 model，會蓋掉零件的型號欄位）
+        return { ...JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, '')), aiModel: model }
+      } catch (e) {
+        lastErr = e
+        if (e instanceof SyntaxError) break
+        if (!(e instanceof ApiError)) throw e
+        if (e.status === 400 && think) continue
+        if (e.status === 400 || !(retryable(e) || e.status === 404)) throw e
+        break
+      }
+    }
+  }
+  throw lastErr instanceof SyntaxError ? new ApiError('AI 回傳的格式壞掉了，請再拍一次。', 0) : lastErr
+}
+async function readLabel(file) {
+  const photo = await prepareImage(file)
+  const thumb = await sampleFromFile(file)
+  const prompt = `你是冷凍空調材料行的店員。照片是一個零件的標籤、銘牌、外盒，或零件本體上的刻字（可能是客人帶來的舊零件）。
+請讀出：label＝中文品名、brand＝品牌、model＝型號（照標籤原樣）、spec＝尺寸／規格、code＝訂購碼、text＝看得到的字全部照抄。看不清楚就空字串，不要猜。
+店內品項清單：
+${catalogLines().join('\n')}${itemsPrompt()}`
+  const r = await askJson([{ inline_data: { mime_type: 'image/jpeg', data: await blobToBase64(photo.blob) } }, { text: prompt }], LABEL_SCHEMA)
+  const it = promptItems().find((x) => x.no.toLowerCase() === String(r.item_no || '').trim().toLowerCase())
+  const read = it
+    ? { label: it.label, brand: it.brand, model: it.model, spec: it.spec }
+    : { label: cleanLabel(r.label || ''), brand: String(r.brand || '').trim(), model: normalizeModel(r.model), spec: String(r.spec || '').trim() }
+  // AI 沒寫品名、但型號看得懂（例如 DML 083S）→ 用解讀出來的品名、品牌、規格補上
+  const d = decodedFor({ ...read, code: r.code, text: r.text }).find((x) => x.label)
+  if (d) for (const f of ['label', 'brand', 'model', 'spec']) if (!read[f] && d[f]) read[f] = d[f]
+  return { ...read, code: String(r.code || '').trim(), text: String(r.text || '').trim().slice(0, 300), thumb, url: URL.createObjectURL(thumb) }
+}
+
 // ───────────────────────── 總表：很多次盤點合在一起 ─────────────────────────
 const pad2 = (n) => String(n).padStart(2, '0')
 const ymd = (t) => {
@@ -1591,8 +2464,8 @@ function reportOf(sessions) {
 }
 const placesText = (it) => [...it.places].map(([p, n]) => `${p} ${n}`).join('、')
 
-/** Excel：總表＋明細＋盤點清單三個工作表 */
-function reportXlsx(sessions) {
+/** Excel：總表＋明細＋盤點清單（＋品項庫、叫貨清單） */
+function reportXlsx(sessions, items = []) {
   const r = reportOf(sessions)
   return makeXlsx([
     { name: '總表', rows: [['品名', '尺寸／規格', '品牌', '型號', '總數量', '在哪裡（位置 數量）'], ...r.list.map((it) => [it.label, it.spec, it.brand, it.model, it.total, placesText(it)])] },
@@ -1601,6 +2474,7 @@ function reportXlsx(sessions) {
       name: '盤點清單',
       rows: [['盤點時間', '位置', '照片張數', '種類', '件數', '辨識模型'], ...[...sessions].sort((a, b) => a.createdAt - b.createdAt).map((s) => [`${ymd(s.createdAt)} ${hm(s.createdAt)}`, s.place || '', s.photos.length, groupsOf(s).length, totalQty(s), s.model || ''])],
     },
+    ...(items.length ? itemSheets(items) : []),
   ])
 }
 /** 複製成表格（Tab 分隔）：在 Google 試算表或 Excel 點一格、貼上，就會自動分好欄 */
@@ -1619,7 +2493,9 @@ async function syncToSheet(sessions) {
   const url = ls.get(LS.sheet)
   if (!url) throw new Error('還沒設定 Google 試算表')
   const rows = reportOf(sessions).detail.map((d) => [d.date, d.time, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source, d.id])
-  const body = JSON.stringify({ rows })
+  // 品項庫整張一起送（試算表那邊整張覆蓋「品項庫」工作表；舊版試算表程式碼會忽略）
+  const items = [ITEM_HEAD, ...itemRows(await itemsAll())]
+  const body = JSON.stringify({ rows, items })
   let confirmed = null
   try {
     const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })
@@ -1674,7 +2550,7 @@ async function viewReport() {
               ? `<button class="btn secondary block" data-action="report-sync">同步到 Google 試算表（${r.sessions} 次盤點）</button>`
               : `<button class="btn plain block" data-go="settings">連結 Google 試算表…</button><p class="footnote" style="margin-top:6px">連結後，每次盤點完會自動寫進你的試算表。</p>`
           }
-          <p class="footnote">Excel 有三頁：總表、明細（每次盤點每一種一列）、盤點清單。「複製表格」後，在 Google 試算表點一格貼上，就會自動分好欄。</p>
+          <p class="footnote">Excel 有：總表、明細（每次盤點每一種一列）、盤點清單，還有品項庫（實盤、帳面、差異）和叫貨清單。「複製表格」後，在 Google 試算表點一格貼上，就會自動分好欄。</p>
           <p class="section-title">品項（${r.list.length}）</p>
           <div class="group">${r.list
             .map(
@@ -1749,6 +2625,7 @@ async function runAnalysis(indices) {
     if (el) el.textContent = `已經 ${Math.round((Date.now() - state.progress.started) / 1000)} 秒`
   }, 500)
   const refs = await sampleRefs()
+  await itemsAll() // 品項庫：給 AI 照抄名稱、填料號
   const status = (msg) => {
     const el = document.getElementById('ai-status')
     if (el) el.textContent = msg + (refs.length ? `（附 ${refs.length} 張樣品照）` : '')
@@ -1769,6 +2646,12 @@ async function runAnalysis(indices) {
         const r = await analyze(photo, log, refs)
         Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '' })
         s.model = r.model
+        // 拍到儲位標籤：沒填位置就自動填（有建立過的儲位用那個寫法）
+        if (r.location && !s.place) {
+          s.place = findLocation(r.location)?.code || r.location.toUpperCase()
+          s.placeAuto = true
+          log(`看到儲位標籤 ${s.place}，自動填位置`)
+        }
       } catch (e) {
         Object.assign(photo, { status: 'error', error: e.message || String(e), errorDetail: e.detail || '' })
       }
@@ -1781,6 +2664,10 @@ async function runAnalysis(indices) {
   clearInterval(timer)
   releaseWakeLock()
   go('review', { photoIndex: 0 })
+  if (s.placeAuto) {
+    delete s.placeAuto
+    toast(`看到儲位標籤，位置自動填「${placeLabel(s.place)}」`)
+  }
   // 結果先給你看；相似品在背景再比一次，好了自動更新
   if (!state.cancel) backgroundRefine(s, indices, refs)
 }
@@ -1854,7 +2741,7 @@ $app.addEventListener('click', async (e) => {
   // 補框模式：點照片哪裡，就在那裡加一個框（大小跟這張照片的其他框差不多），再選它是哪一種
   const wrap = e.target.closest('[data-photo]')
   if (state.addMode && wrap && !e.target.closest('[data-action]')) return addBoxAt(wrap, e)
-  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range]')
+  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example]')
   if (!t) {
     // 點空白處取消標示（不捲回頂端）
     if (state.focus && !e.target.closest('.photo-wrap,.item')) {
@@ -1872,7 +2759,39 @@ $app.addEventListener('click', async (e) => {
   if (d.open) {
     state.session = await db.get(d.open)
     delete state.session.edits // 第一版的舊欄位，不再使用
+    await itemsAll()
     return go('review', { photoIndex: 0 })
+  }
+  if (d.itemOpen) {
+    state.itemId = d.itemOpen
+    return go('item')
+  }
+  if (d.itemFilter) {
+    state.itemFilter = d.itemFilter
+    return render()
+  }
+  if (d.place !== undefined) {
+    state.session.place = canon(state.session.place) === canon(d.place) ? '' : d.place
+    return render()
+  }
+  if (d.locEdit !== undefined) return locationSheet(Number(d.locEdit))
+  if (d.example) {
+    state.lookup = { q: d.example, read: null, busy: false }
+    return render()
+  }
+  if (d.stockDel) {
+    const it = await currentItem()
+    if (!it?.stock[d.stockDel] || !confirm(`拿掉「${stockPlace(it.stock[d.stockDel])}」的 ${it.stock[d.stockDel].count} 個？（盤錯位置、重複算時用）`)) return
+    delete it.stock[d.stockDel]
+    await putItem(it)
+    return render()
+  }
+  if (d.safety) {
+    const it = await currentItem()
+    if (!it) return
+    it.safety = Math.max(0, (it.safety ?? 0) + Number(d.safety))
+    await putItem(it)
+    return render()
   }
   if (d.removePhoto !== undefined) {
     state.session.photos.splice(Number(d.removePhoto), 1)
@@ -1930,8 +2849,9 @@ $app.addEventListener('click', async (e) => {
     case 'export':
       return exportSheet()
     case 'delete-session':
-      if (!confirm('確定刪除這次盤點？照片和結果都會刪掉。')) return
+      if (!confirm('確定刪除這次盤點？照片和結果都會刪掉，記在品項庫的數量也會拿掉。')) return
       await db.del(state.session.id)
+      await unlinkSession(state.session.id)
       toast('已刪除')
       return go('home')
     case 'save-key': {
@@ -2003,11 +2923,15 @@ $app.addEventListener('click', async (e) => {
     case 'force-update':
       return forceUpdate()
     case 'finish': {
-      // 完成：有設定 Google 試算表又開著自動同步，就順便把這次盤點寫進去（在背景送，不用等）
+      // 完成：記進品項庫；有設定 Google 試算表又開著自動同步，就順便寫進去（在背景送，不用等）
       const s = state.session
+      if (s) {
+        t.disabled = true
+        const r = await linkSession(s).catch(() => null)
+        toast(r ? (r.created ? `已記進品項庫：${r.linked} 種（新的 ${r.created} 種，到「品項」確認名稱）` : `已記進品項庫：${r.linked} 種`) : '記進品項庫失敗：請打開這次盤點，再按一次完成')
+      }
       go('home')
       if (s && ls.get(LS.sheet) && ls.get(LS.autoSync, '1') === '1') {
-        toast('同步到 Google 試算表中…')
         syncToSheet([s])
           .then((n) => {
             toast(n === null ? '已送到 Google 試算表' : `已同步到 Google 試算表（${n} 列）`)
@@ -2019,7 +2943,7 @@ $app.addEventListener('click', async (e) => {
     }
     case 'report-xlsx': {
       const sessions = (await db.all()).filter((s) => inRange(s, state.range || 'today'))
-      downloadBlob(reportXlsx(sessions), `盤點總表_${ymd(Date.now())}.xlsx`)
+      downloadBlob(reportXlsx(sessions, await itemsAll(true)), `盤點總表_${ymd(Date.now())}.xlsx`)
       return toast('已下載 Excel')
     }
     case 'report-copy': {
@@ -2093,9 +3017,103 @@ $app.addEventListener('click', async (e) => {
       toast('已刪掉樣品照')
       return render()
     case 'clear-all':
-      if (!confirm('確定刪除全部盤點紀錄？刪了救不回來。')) return
+      if (!confirm('確定刪除全部盤點紀錄（含照片）？刪了救不回來。\n品項庫、各位置的數量、儲位會保留。')) return
       await db.clear()
-      return toast('已全部刪除')
+      return toast('已全部刪除；品項庫保留')
+    // ── 品項庫 ──
+    case 'item-add':
+      return itemEditSheet(null)
+    case 'items-more':
+      return itemsMoreSheet()
+    case 'import':
+      return importSheet()
+    case 'item-edit':
+      return itemEditSheet(await currentItem())
+    case 'item-confirm': {
+      const it = await currentItem()
+      if (!it) return
+      it.status = 'ok'
+      await putItem(it)
+      toast('已確認：以後辨識會照這個名稱寫')
+      return render()
+    }
+    case 'item-merge': {
+      const it = await currentItem()
+      if (!it) return
+      return pickItem('合併到哪一項？', `「${itemTitle(it)}」的數量、以前的寫法會併過去，這一項會刪掉。`, [it], async (to) => {
+        if (!to || !confirm(`把「${itemTitle(it)}」合併到「${itemTitle(to)}」（${to.no}）？`)) return
+        await mergeItems(it, to)
+        state.itemId = to.id
+        go('item')
+        toast(`已合併到 ${to.no}`)
+      })
+    }
+    case 'item-delete': {
+      const it = await currentItem()
+      if (!it || !confirm(`刪除「${itemTitle(it)}」（${it.no}）？各位置的數量、進出紀錄都會刪掉。`)) return
+      await delItem(it)
+      toast('已刪除')
+      return go('items')
+    }
+    case 'move-in':
+    case 'move-out': {
+      const it = await currentItem()
+      if (!it) return
+      const inbound = d.action === 'move-in'
+      return numberSheet({ title: inbound ? '進貨幾個？' : '賣出幾個？', sub: `${esc(itemTitle(it))}：帳面數${inbound ? '加' : '減'}這麼多。${it.book == null ? `還沒有帳面數，會從實盤 ${onHand(it)} 開始算。` : `目前帳面 ${it.book}。`}`, value: '1', action: inbound ? '記進貨' : '記賣出' }, async (n) => {
+        it.book = Math.max(0, (it.book ?? onHand(it)) + (inbound ? n : -n))
+        it.moves.push({ at: Date.now(), kind: inbound ? 'in' : 'out', qty: n })
+        await putItem(it)
+        toast(`帳面數變成 ${it.book}`)
+      })
+    }
+    case 'book-set': {
+      const it = await currentItem()
+      if (!it) return
+      return numberSheet({ title: '帳面數', sub: '應該要有幾個。第一次盤點完，直接用實盤數當起點最快；之後進貨、賣出再加減。', value: it.book ?? onHand(it), quick: Object.keys(it.stock || {}).length ? [{ n: onHand(it), label: `用實盤數 ${onHand(it)}` }] : [] }, async (n) => {
+        it.book = n
+        it.moves.push({ at: Date.now(), kind: 'set', qty: n })
+        await putItem(it)
+      })
+    }
+    case 'equiv-add': {
+      const it = await currentItem()
+      if (!it) return
+      return pickItem('哪一項可以互換？', '設定後兩邊都會顯示，客人問的時候一查就知道。', [it], async (x) => {
+        if (!x) return
+        it.equiv = [...new Set([...(it.equiv || []), x.id])]
+        x.equiv = [...new Set([...(x.equiv || []), it.id])]
+        await putItem(it)
+        await putItem(x)
+        render()
+      })
+    }
+    case 'read-add': {
+      const r = state.lookup.read
+      if (!r) return
+      if (!r.label) return toast('AI 看不出品名：請按清除後打型號，或到品項庫按 ＋ 自己填')
+      const items = await itemsAll()
+      const dup = findItem(items, r)
+      if (dup) {
+        state.itemId = dup.id
+        return go('item')
+      }
+      const it = newItem(items, r, { status: 'ok', photo: r.thumb })
+      await putItem(it)
+      // 也存成樣品照：以後盤點時 AI 會拿來比對
+      await idb.samples.put({ id: uid(), label: r.label, brand: r.brand, model: r.model, spec: r.spec, blob: r.thumb, createdAt: Date.now() })
+      toast(`已加入品項庫 ${it.no}，也存成樣品照`)
+      state.itemId = it.id
+      return go('item')
+    }
+    case 'read-clear':
+      if (state.lookup.read?.url) URL.revokeObjectURL(state.lookup.read.url)
+      state.lookup = { q: '', read: null, busy: false }
+      return render()
+    case 'loc-add':
+      return locationSheet(-1)
+    case 'loc-print':
+      return printLabels()
   }
 })
 
@@ -2105,6 +3123,35 @@ function bindInputs() {
   document.getElementById('sample-cam')?.addEventListener('change', (e) => e.target.files[0] && newSampleSheet(e.target.files[0]))
   document.getElementById('auto-sync')?.addEventListener('change', (e) => ls.set(LS.autoSync, e.target.checked ? '1' : '0'))
   document.getElementById('place')?.addEventListener('input', (e) => (state.session.place = e.target.value))
+  document.getElementById('item-search')?.addEventListener('input', (e) => filterRows($app, e.target.value))
+  document.getElementById('lookup-q')?.addEventListener('input', (e) => {
+    // 只更新結果區，輸入框不重畫（打字、選字不會被打斷）
+    if (state.lookup.read?.url) URL.revokeObjectURL(state.lookup.read.url)
+    state.lookup = { q: e.target.value.trim(), read: null, busy: false }
+    document.getElementById('lookup-results').innerHTML = lookupResults()
+  })
+  document.getElementById('label-cam')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    state.lookup = { q: '', read: null, busy: true }
+    render()
+    try {
+      const read = await readLabel(file)
+      state.lookup = { q: read.model || read.label, read, busy: false }
+    } catch (err) {
+      state.lookup = { q: '', read: null, busy: false }
+      toast(err.message || 'AI 沒讀到，請再拍一次（靠近一點、不要反光）')
+    }
+    if (state.view === 'lookup') render()
+  })
+  document.getElementById('safety')?.addEventListener('change', async (e) => {
+    const it = await currentItem()
+    if (!it) return
+    const n = parseInt(e.target.value, 10)
+    it.safety = Number.isFinite(n) && n >= 0 ? n : null
+    await putItem(it)
+    render()
+  })
   document.querySelectorAll('[data-count]').forEach((input) =>
     input.addEventListener('change', async (e) => {
       const s = state.session

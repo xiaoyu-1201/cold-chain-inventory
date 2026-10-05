@@ -8,10 +8,11 @@
  * 4. 複製「網頁應用程式網址」（https://script.google.com/macros/s/…/exec），貼到拍照盤點 App 的「設定 → Google 試算表」
  * 之後每次在 App 按「完成」，這次的盤點就會寫進來；同一次盤點重複送，會先刪掉舊的再寫，不會重複。
  *
- * 會自動建立三個工作表：
+ * 會自動建立四個工作表：
  * - 盤點紀錄：每一次、每一種商品一列（原始資料，不要手動改欄位順序）
  * - 總表：每個品項在每個盤點日期各幾件（自動計算）
  * - 最新一次：最近一次盤點的品項與數量，數量多的排前面（自動計算）
+ * - 品項庫：料號、實盤、帳面、差異、安全庫存、該叫貨（每次同步整張更新，不要手動改）
  */
 const RAW = '盤點紀錄'
 const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID']
@@ -39,7 +40,8 @@ function doPost(e) {
     if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEAD.length).setValues(rows)
     sh.getRange(2, 1, Math.max(1, sh.getLastRow() - 1), 1).setNumberFormat('yyyy/mm/dd')
     ensureSummary(ss)
-    return json({ ok: true, rows: rows.length })
+    if (data.items && data.items.length) writeItems(ss, data.items)
+    return json({ ok: true, rows: rows.length, items: data.items ? data.items.length - 1 : 0 })
   } finally {
     lock.releaseLock()
   }
@@ -62,6 +64,30 @@ function ensureRaw(ss) {
     sh.getRange(1, 1, 1, HEAD.length).setFontWeight('bold').setBackground('#e8f0fe')
   }
   return sh
+}
+
+/** 品項庫：整張覆蓋（第一列是標題）；盤虧標紅、該叫貨標橘 */
+function writeItems(ss, table) {
+  const sh = ss.getSheetByName('品項庫') || ss.insertSheet('品項庫', 1)
+  sh.clear()
+  const width = table[0].length
+  const rows = table.map((r) => {
+    const row = r.slice(0, width)
+    while (row.length < width) row.push('')
+    return row
+  })
+  sh.getRange(1, 1, rows.length, width).setValues(rows)
+  sh.setFrozenRows(1)
+  sh.getRange(1, 1, 1, width).setFontWeight('bold').setBackground('#e8f0fe')
+  const status = table[0].indexOf('狀態')
+  if (rows.length < 2 || status < 0) return
+  // 一次設定整張的底色（一列一列設會很慢）
+  const colors = rows.slice(1).map((r) => {
+    const s = String(r[status] || '')
+    const c = s.indexOf('盤虧') >= 0 ? '#fde8e8' : s.indexOf('該叫貨') >= 0 ? '#fff4e0' : null
+    return r.map(() => c)
+  })
+  sh.getRange(2, 1, colors.length, width).setBackgrounds(colors)
 }
 
 function ensureSummary(ss) {

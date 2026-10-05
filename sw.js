@@ -1,7 +1,7 @@
 // 讓 App 本身離線也能打開（AI 辨識還是要網路）
 // 更新：每次都先問 GitHub 有沒有新版（跳過手機的 10 分鐘暫存）；新版裝好會自動重新整理一次
-const CACHE = 'inventory-v10'
-const SHELL = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'xlsx.js', 'google-sheets.gs']
+const CACHE = 'inventory-v11'
+const SHELL = ['./', 'index.html', 'app.js', 'rules.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'xlsx.js', 'google-sheets.gs']
 
 self.addEventListener('install', (e) => {
   // cache: 'reload'＝直接跟 GitHub 拿最新的，不用手機暫存
