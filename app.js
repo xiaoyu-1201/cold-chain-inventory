@@ -9,10 +9,26 @@ import { makeXlsx } from './xlsx.js'
 import { decode, normalizeModel, looseKey, canon, modelKey, linksFor } from './rules.js'
 
 const API = 'https://generativelanguage.googleapis.com/v1beta'
-const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned', sheet: 'inventory:sheetUrl', autoSync: 'inventory:autoSync', locations: 'inventory:locations' }
+const LS = {
+  key: 'inventory:apiKey',
+  model: 'inventory:model',
+  catalog: 'inventory:catalog',
+  pinned: 'inventory:modelPinned',
+  sheet: 'inventory:sheetUrl',
+  autoSync: 'inventory:autoSync',
+  locations: 'inventory:locations',
+  // 多台裝置同步
+  syncKey: 'inventory:syncKey',
+  device: 'inventory:deviceId',
+  deleted: 'inventory:deleted',
+  settingsAt: 'inventory:settingsAt',
+  settingsSyncT: 'inventory:settingsSyncT',
+  pulled: 'inventory:syncPulled',
+  lastSync: 'inventory:lastSync',
+}
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.1（10/5・叫貨設定看得懂、新品項提醒）'
+const VERSION = '3.2（10/5・多人多台同步、同步密碼）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -125,7 +141,24 @@ const idb = (() => {
   const storeOf = (store) => ({
     all: async () => ((await tx(store, 'readonly', (s) => s.getAll())) ?? []).sort((a, b) => b.createdAt - a.createdAt),
     get: (id) => tx(store, 'readonly', (s) => s.get(id)),
-    put: (item) => tx(store, 'readwrite', (s) => s.put(item)),
+    /** 一般存檔：記下修改時間（多台同步靠它判斷哪一份比較新），稍後自動同步 */
+    put: (item) => {
+      item.updatedAt = Date.now()
+      scheduleSync()
+      return tx(store, 'readwrite', (s) => s.put(item))
+    },
+    /** 原樣存（同步下載的、只改本機狀態的）：不改修改時間、不觸發同步 */
+    putRaw: (item) => tx(store, 'readwrite', (s) => s.put(item)),
+    /** 上傳成功：如果這段時間沒再改過，標記「已同步」（同一個交易裡讀和寫，不會蓋掉剛改的） */
+    markSynced: (id, t) =>
+      tx(store, 'readwrite', (s) => {
+        const req = s.get(id)
+        req.onsuccess = () => {
+          const v = req.result
+          if (v && (v.updatedAt || v.createdAt) === t) s.put({ ...v, _syncT: t })
+        }
+        return req
+      }),
     del: (id) => tx(store, 'readwrite', (s) => s.delete(id)),
     clear: () => tx(store, 'readwrite', (s) => s.clear()),
   })
@@ -862,7 +895,15 @@ const locations = () => {
     return []
   }
 }
-const saveLocations = (list) => ls.set(LS.locations, JSON.stringify(list))
+/** 儲位、品項清單改了：記下時間，稍後同步到別台 */
+const touchSettings = () => {
+  ls.set(LS.settingsAt, String(Date.now()))
+  scheduleSync()
+}
+const saveLocations = (list) => {
+  ls.set(LS.locations, JSON.stringify(list))
+  touchSettings()
+}
 const findLocation = (code) => locations().find((l) => canon(l.code) === canon(code))
 /** 顯示用：「A-01（冷凍油那排第 1 層）」 */
 const placeLabel = (place) => {
@@ -894,6 +935,7 @@ async function putItem(it) {
 }
 async function delItem(it) {
   await idb.items.del(it.id)
+  tombstone(`item:${it.id}`)
   if (itemsCache) itemsCache = itemsCache.filter((x) => x !== it)
 }
 const nextNo = (items) => `P${String(items.reduce((m, it) => Math.max(m, parseInt(String(it.no).slice(1), 10) || 0), 0) + 1).padStart(4, '0')}`
@@ -912,10 +954,32 @@ function findItem(items, f) {
   const mk = modelKey(f.model)
   return (mk.length >= 3 && items.find((it) => modelKey(it.model) === mk && canon(it.label) === canon(f.label))) || null
 }
-const onHand = (it) => Object.values(it.stock || {}).reduce((n, st) => n + (Number(st.count) || 0), 0)
-const lastCounted = (it) => Math.max(0, ...Object.values(it.stock || {}).map((st) => st.at || 0))
+/**
+ * 各位置的數量：{ count, at（盤點時間）, sid（哪次盤點）, place, v（寫入時間）, removed（這一格已經沒有了） }
+ * 拿掉一格不直接刪，而是標 removed：多人同步時，別台舊的資料才不會讓它又冒出來。
+ */
+const liveStock = (it) => Object.entries(it.stock || {}).filter(([, st]) => !st.removed)
+/** 同一格兩個版本：盤點時間比較新的贏；一樣就看寫入時間 */
+function newerEntry(a, b) {
+  if (!a) return b
+  if (!b) return a
+  return ((a.at || 0) - (b.at || 0) || (a.v || 0) - (b.v || 0)) >= 0 ? a : b
+}
+const removedEntry = (st, at = st.at) => ({ ...st, count: 0, removed: true, at: Math.max(st.at || 0, at), v: Date.now() })
+const onHand = (it) => liveStock(it).reduce((n, [, st]) => n + (Number(st.count) || 0), 0)
+const lastCounted = (it) => Math.max(0, ...liveStock(it).map(([, st]) => st.at || 0))
 /** 差異＝實盤－帳面（沒有帳面數或還沒盤過就不算） */
-const diffOf = (it) => (it.book == null || !Object.keys(it.stock || {}).length ? null : onHand(it) - it.book)
+const diffOf = (it) => (it.book == null || !liveStock(it).length ? null : onHand(it) - it.book)
+/** 帳面數從進出紀錄算：最後一次「設定」＋之後的進貨－賣出（多人同時記進貨也不會少算） */
+function bookFromMoves(moves) {
+  const sorted = [...(moves || [])].sort((a, b) => a.at - b.at)
+  let book = null
+  for (const m of sorted) {
+    if (m.kind === 'set') book = m.qty
+    else if (book != null) book = Math.max(0, book + (m.kind === 'in' ? m.qty : -m.qty))
+  }
+  return book
+}
 /** 現在大概有幾個：有帳面數用帳面數（進貨／賣出會改它），沒有就用實盤 */
 const expected = (it) => (it.book != null ? it.book : onHand(it))
 const needsOrder = (it) => it.safety != null && expected(it) <= it.safety
@@ -965,14 +1029,14 @@ async function linkSession(s) {
   // 同一格以這次為準：這次沒數到的（以前記在這一格、或這次盤點改成別的）→ 從這一格拿掉
   for (const it of items) {
     const st = it.stock?.[pk]
-    if (st && !sums.has(it) && (st.sid === s.id || st.at <= s.createdAt)) {
-      delete it.stock[pk]
+    if (st && !st.removed && !sums.has(it) && (st.sid === s.id || st.at <= s.createdAt)) {
+      it.stock[pk] = removedEntry(st, s.createdAt)
       await putItem(it)
     }
   }
   for (const [it, count] of sums) {
     const st = it.stock[pk]
-    if (!st || st.sid === s.id || st.at <= s.createdAt) it.stock[pk] = { count, at: s.createdAt, sid: s.id, place: s.place || '' }
+    if (!st || st.sid === s.id || st.at <= s.createdAt) it.stock[pk] = { count, at: s.createdAt, sid: s.id, place: s.place || '', v: Date.now() }
     await putItem(it)
   }
   s.linkedAt = Date.now()
@@ -982,9 +1046,11 @@ async function linkSession(s) {
 /** 刪掉一次盤點：它記在品項庫的數量也拿掉 */
 async function unlinkSession(id) {
   for (const it of await itemsAll()) {
-    const keys = Object.keys(it.stock || {}).filter((k) => it.stock[k].sid === id)
+    const keys = liveStock(it)
+      .filter(([, st]) => st.sid === id)
+      .map(([k]) => k)
     if (!keys.length) continue
-    keys.forEach((k) => delete it.stock[k])
+    keys.forEach((k) => (it.stock[k] = removedEntry(it.stock[k])))
     await putItem(it)
   }
 }
@@ -993,10 +1059,13 @@ async function mergeItems(from, to) {
   to.aliases = [...new Set([...(to.aliases || []), ...(from.aliases || [])])]
   for (const [k, st] of Object.entries(from.stock || {})) {
     const cur = to.stock[k]
-    if (!cur || cur.at < st.at) to.stock[k] = st
-    else if (cur.sid === st.sid) cur.count += st.count
+    if (cur && !cur.removed && !st.removed && cur.sid === st.sid) to.stock[k] = { ...cur, count: cur.count + st.count, v: Date.now() }
+    else to.stock[k] = newerEntry(cur, st)
   }
-  if (from.book != null) to.book = (to.book ?? 0) + from.book
+  if (from.book != null) {
+    to.book = (to.book ?? 0) + from.book
+    to.moves = [...(to.moves || []), { at: Date.now(), kind: 'set', qty: to.book }] // 合併後的帳面數當新起點
+  }
   if (to.safety == null) to.safety = from.safety
   to.moves = [...(to.moves || []), ...(from.moves || [])].sort((a, b) => a.at - b.at)
   to.equiv = [...new Set([...(to.equiv || []), ...(from.equiv || [])])].filter((id) => id !== to.id && id !== from.id)
@@ -1057,13 +1126,13 @@ async function viewHome() {
   const hasKey = !!ls.get(LS.key)
   return `
   <main class="app">
-    <div class="nav"><span></span><button class="icon-btn" data-go="settings" aria-label="設定"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.6 7.6 0 0 0-1.68-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.61-.25 1.17-.58 1.68-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.1-1.65Z"/></svg></button></div>
+    <div class="nav">${syncReady() ? `<button class="btn small plain sync-pill ${state.syncState || ''}" data-action="sync-now">☁︎ ${esc(syncLabel())}</button>` : '<span></span>'}<button class="icon-btn" data-go="settings" aria-label="設定"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.6 7.6 0 0 0-1.68-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.61-.25 1.17-.58 1.68-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.1-1.65Z"/></svg></button></div>
     <h1 class="large-title">拍照盤點</h1>
     <p class="subtitle">拍貨架，AI 數品項；跟原圖對照，再用 ＋／－ 修正。</p>
     ${
       hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">📷</span><span class="grow"><b>新盤點</b><br><span class="meta">拍一格貨架；有貼儲位標籤會自動填位置</span></span>${chev}</button>`
-        : `<div class="hint-card stack"><div><b>第一次用：</b>先到「設定」貼上你的免費 Gemini API Key（只會存在這支手機）。</div><button class="btn small" data-go="settings">去設定</button></div>`
+        : `<div class="hint-card stack"><div><b>要拍照辨識：</b>先到「設定」貼上你的免費 Gemini API Key（只會存在這台裝置）。<br>只想看手機盤點的結果（例如在電腦上）：到「設定 → 多人、多台同步」貼上連結碼就好，不用 Key。</div><button class="btn small" data-go="settings">去設定</button></div>`
     }
     ${(() => {
       if (!sessions.length) return ''
@@ -1291,7 +1360,35 @@ async function viewSettings() {
         <li>複製「網頁應用程式網址」，貼到上面的格子 → 按「儲存並測試」。</li>
       </ol>
       <p>試算表會自動建立「盤點紀錄」（每次盤點每一種一列）、「總表」（每個品項在每次盤點各幾件）、「最新一次」（最近一次盤點的數量）、「品項庫」（料號、實盤、帳面、差異、該叫貨）。資料只會寫進你自己的試算表。</p>
-      <p><b>以前連結過的：</b>要有「品項庫」工作表，請重新複製程式碼貼上 → 存檔 →「部署」→「管理部署作業」→ ✎ 編輯 → 版本選「新版本」→ 部署（網址不變）。</p>
+      <p><b>以前連結過的：</b>要有「品項庫」工作表和多台同步，請重新複製程式碼貼上 → 存檔 →「部署」→「管理部署作業」→ ✎ 編輯 → 版本選「新版本」→ 部署（網址不變；會再問一次授權，因為要存到你的雲端硬碟）。</p>
+    </details>
+    <p class="section-title">多人、多台同步（大家看到同一份）</p>
+    ${
+      syncReady()
+        ? `<div class="group">
+            <div class="row"><span class="grow"><span class="title">已開啟・${esc(syncLabel())}</span><br><span class="meta">${state.syncState === 'error' && state.syncError ? esc(state.syncError) : '誰盤完都會自動傳上去；App 開著時每 40 秒自動更新'}</span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
+            <button class="row" data-action="sync-copy"><span class="grow"><span class="title">複製連結碼</span><br><span class="meta">只傳給要一起盤點的同事、或自己的電腦（私訊，不要貼在群組）</span></span>${chev}</button>
+            <button class="row" data-action="sync-rekey"><span class="grow"><span class="title">換新的同步密碼</span><br><span class="meta">有人離職、手機遺失、連結碼外流時用：舊的連結碼馬上失效</span></span>${chev}</button>
+            <button class="row" data-action="sync-leave"><span class="grow"><span class="title" style="color:var(--red)">這台退出同步並清除資料</span><br><span class="meta">交還手機、換手機時用；雲端的資料不會刪</span></span>${chev}</button>
+          </div>`
+        : ls.get(LS.sheet)
+          ? '<button class="btn block" data-action="sync-start">開啟多台同步（第一台先按這個）</button><p class="footnote">開啟後按「複製連結碼」，貼到另一台，就會看到同一份盤點紀錄和品項庫。</p>'
+          : '<div class="group"><div class="row muted">第一台：先完成上面的 Google 試算表連結，再回來開啟同步。<br>第二台以後：直接在下面貼上連結碼。</div></div>'
+    }
+    <details class="steps" ${syncReady() ? '' : 'open'}><summary>${syncReady() ? '換成另一個連結碼' : '這台是第二台以後：貼上連結碼'}</summary>
+      <div class="stack" style="margin-top:8px">
+        <input class="field" id="link-code" placeholder="貼上連結碼（https://script.google.com/…#k=…）" autocomplete="off" spellcheck="false">
+        <button class="btn small" data-action="sync-link">用連結碼連結這台</button>
+      </div>
+    </details>
+    <details class="steps"><summary>資料安全嗎？（公司資產）</summary>
+      <ol>
+        <li><b>資料放在哪：</b>只在你的 Google 雲端硬碟「拍照盤點同步資料」資料夾和你的試算表；建議用公司的 Google 帳號建立，資料就屬於公司。GitHub 上只有程式，沒有任何盤點資料。</li>
+        <li><b>誰讀得到：</b>要有「網址＋同步密碼」（都在連結碼裡）才讀得到。密碼是 24 碼亂數，猜不到；傳輸全程加密（HTTPS）。部署時選的「所有人」只代表可以呼叫網址，沒有密碼一律拒絕。</li>
+        <li><b>連結碼＝鑰匙：</b>只私訊給要一起盤點的人；有人離職或外流，按「換新的同步密碼」，舊的馬上失效，再把新的連結碼給還在的人。</li>
+        <li><b>手機上也有一份：</b>每台裝置會存一份方便離線看；手機請設螢幕鎖。退出時按「這台退出同步並清除資料」。</li>
+        <li><b>拍照辨識：</b>照片會送到 Google Gemini 分析。免費版的條款寫明：Google 可以用送去的內容改善產品，也可能有人工審閱。擔心的話，到 Google AI Studio 開啟付費（照用量計費），付費版不會拿去改善產品。照片裡不要拍到價格單、客戶資料。</li>
+      </ol>
     </details>
     <p class="section-title">連線測試</p>
     <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
@@ -1317,11 +1414,12 @@ const itemBadges = (it) => {
   return `${it.status === 'new' ? '<span class="badge ok">新的</span>' : ''}${needsOrder(it) ? '<span class="badge low">該叫貨</span>' : ''}${d ? `<span class="badge ${d < 0 ? 'bad' : 'edit'}">${d > 0 ? '+' : ''}${d}</span>` : ''}`
 }
 const itemRow = (it) => {
-  const places = Object.values(it.stock || {})
+  const live = liveStock(it).map(([, st]) => st)
+  const places = live
     .sort((a, b) => b.count - a.count)
     .map((st) => `${st.place || '沒填位置'} ${st.count}`)
     .join('、')
-  const search = canon([it.no, it.label, it.brand, it.model, it.spec, ...Object.values(it.stock || {}).map((st) => st.place)].join(' '))
+  const search = canon([it.no, it.label, it.brand, it.model, it.spec, ...live.map((st) => st.place)].join(' '))
   return `<button class="row item-row" data-item-open="${it.id}" data-search="${esc(search)}">
     ${itemThumb(it)}
     <span class="grow"><span class="title">${esc(itemTitle(it))}</span>${itemBadges(it)}<br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}${places ? `<br>${esc(places)}` : ''}</span></span>
@@ -1387,7 +1485,7 @@ async function viewItem() {
   const d = diffOf(it)
   const decoded = decodedFor(it)
   const eq = equivalentsFor(it, decoded, items)
-  const stock = Object.entries(it.stock || {}).sort((a, b) => b[1].at - a[1].at)
+  const stock = liveStock(it).sort((a, b) => b[1].at - a[1].at)
   const links = linksFor(it, decoded)
   return `
   <main class="app">
@@ -1512,7 +1610,8 @@ async function viewLookup() {
 async function viewLocations() {
   const items = await itemsAll()
   const locs = locations()
-  const here = (code) => items.filter((it) => Object.values(it.stock || {}).some((st) => canon(st.place) === canon(code)))
+  const inLoc = (it, code) => liveStock(it).filter(([, st]) => canon(st.place) === canon(code))
+  const here = (code) => items.filter((it) => inLoc(it, code).length)
   return `
   <main class="app">
     <div class="nav">${backBtn('items', '品項')}</div>
@@ -1523,7 +1622,7 @@ async function viewLocations() {
         ? `<div class="group">${locs
             .map((l, i) => {
               const its = here(l.code)
-              const qty = its.reduce((n, it) => n + Object.values(it.stock).filter((st) => canon(st.place) === canon(l.code)).reduce((m, st) => m + st.count, 0), 0)
+              const qty = its.reduce((n, it) => n + inLoc(it, l.code).reduce((m, [, st]) => m + st.count, 0), 0)
               return `<button class="row" data-loc-edit="${i}"><span class="loc-code">${esc(l.code)}</span><span class="grow"><span class="title">${esc(l.name || '（沒有說明）')}</span><br><span class="meta">${its.length ? `${its.length} 種・${qty} 件` : '還沒盤點'}</span></span>${chev}</button>`
             })
             .join('')}</div>`
@@ -2173,8 +2272,8 @@ function itemRows(items) {
         d ?? '',
         it.safety ?? '',
         [it.status === 'new' ? '新的（待確認）' : '', needsOrder(it) ? '該叫貨' : '', d > 0 ? '盤盈' : d < 0 ? '盤虧' : ''].filter(Boolean).join('、'),
-        Object.values(it.stock || {})
-          .map((st) => `${st.place || '沒填位置'} ${st.count}`)
+        liveStock(it)
+          .map(([, st]) => `${st.place || '沒填位置'} ${st.count}`)
           .join('、'),
         last ? `${ymd(last)} ${hm(last)}` : '',
       ]
@@ -2430,6 +2529,282 @@ ${catalogLines().join('\n')}${itemsPrompt()}`
   return { ...read, code: String(r.code || '').trim(), text: String(r.text || '').trim().slice(0, 300), thumb, url: URL.createObjectURL(thumb) }
 }
 
+// ───────────────────────── 多台裝置同步（存在使用者自己的 Google 雲端硬碟） ─────────────────────────
+/**
+ * 手機拍完、電腦打開也看得到：每一筆（一次盤點含照片、品項、樣品照、儲位設定）各自同步。
+ * - 上傳：本機改過、還沒同步的（updatedAt ≠ _syncT）
+ * - 下載：別台送上去、比上次新的；兩邊都改過就以「比較晚改的」為準
+ * - 刪除也會同步（墓碑：記下刪了哪一筆、什麼時候）
+ * 要有 Apps Script 網址＋同步密碼才讀得到，資料不會公開。
+ */
+const deviceId = () => {
+  let id = ls.get(LS.device)
+  if (!id) {
+    id = uid()
+    ls.set(LS.device, id)
+  }
+  return id
+}
+const readJson = (k, d) => {
+  try {
+    return JSON.parse(ls.get(k, '')) ?? d
+  } catch {
+    return d
+  }
+}
+function tombstone(k) {
+  const list = readJson(LS.deleted, [])
+  list.push({ k, t: Date.now() })
+  ls.set(LS.deleted, JSON.stringify(list.slice(-2000)))
+  scheduleSync()
+}
+const syncReady = () => !!(ls.get(LS.sheet) && ls.get(LS.syncKey))
+let syncTimer = 0
+let syncing = null
+/** 改了東西：等一下（合併連續的修改）再同步；辨識中先不要 */
+function scheduleSync(ms = 6000) {
+  if (!syncReady()) return
+  clearTimeout(syncTimer)
+  syncTimer = setTimeout(() => {
+    if (state.view === 'analyzing' || syncing) return scheduleSync(ms)
+    syncNow().catch(() => {})
+  }, ms)
+}
+/** 大家自動同步：App 開著時每 40 秒看一次有沒有別人的新資料；切回 App 時馬上看一次 */
+setInterval(() => {
+  if (syncReady() && document.visibilityState === 'visible' && !syncing && state.view !== 'analyzing') syncNow().catch(() => {})
+}, 40000)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !syncReady() || syncing || state.view === 'analyzing') return
+  if (Date.now() - Number(ls.get(LS.lastSync, '0')) > 10000) syncNow().catch(() => {})
+})
+async function postSync(body) {
+  let res
+  try {
+    res = await fetch(ls.get(LS.sheet), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, key: ls.get(LS.syncKey), dev: deviceId() }) })
+  } catch {
+    throw new Error('連不到 Google（沒有網路？）')
+  }
+  let data
+  try {
+    data = await res.json()
+  } catch {
+    throw new Error('Google 試算表沒有正確回覆：請確認貼的是新版程式碼，而且部署成「新版本」')
+  }
+  if (!data.ok) throw new Error(data.error || '同步失敗')
+  return data
+}
+const SYNC_STORES = { session: idb.sessions, item: idb.items, sample: idb.samples }
+const tOf = (v) => v.updatedAt || v.createdAt || 0
+async function encodeRecord(kind, v) {
+  if (kind === 'session') return { ...v, photos: await Promise.all(v.photos.map(async (p) => ({ ...p, blob: undefined, b64: await blobToBase64(p.blob) }))) }
+  if (kind === 'item') return { ...v, photo: undefined, photoB64: v.photo ? await blobToBase64(v.photo) : '' }
+  return { ...v, blob: undefined, b64: await blobToBase64(v.blob) }
+}
+function decodeRecord(kind, d) {
+  if (kind === 'session') return { ...d, photos: (d.photos || []).map(({ b64, ...p }) => ({ ...p, blob: b64ToBlob(b64 || '') })) }
+  if (kind === 'item') {
+    const { photoB64, ...rest } = d
+    return { ...rest, photo: photoB64 ? b64ToBlob(photoB64) : undefined }
+  }
+  const { b64, ...rest } = d
+  return { ...rest, blob: b64ToBlob(b64 || '') }
+}
+/** 合併同一個品項的兩個版本：名稱、帳面設定等以比較晚改的為準；各位置數量逐格比；別名、進出紀錄、可互換合起來 */
+function mergeItemData(local, remote) {
+  const base = tOf(remote) >= tOf(local) ? remote : local
+  const stock = {}
+  for (const k of new Set([...Object.keys(local.stock || {}), ...Object.keys(remote.stock || {})])) stock[k] = newerEntry(local.stock?.[k], remote.stock?.[k])
+  const moves = [...new Map([...(local.moves || []), ...(remote.moves || [])].map((m) => [`${m.at}|${m.kind}|${m.qty}`, m])).values()].sort((a, b) => a.at - b.at)
+  const book = moves.length ? bookFromMoves(moves) : base.book
+  return {
+    ...base,
+    stock,
+    moves,
+    book,
+    aliases: [...new Set([...(local.aliases || []), ...(remote.aliases || [])])],
+    equiv: [...new Set([...(local.equiv || []), ...(remote.equiv || [])])],
+    photo: base.photo || local.photo || remote.photo,
+  }
+}
+/** 比較兩個版本內容是否一樣（不看照片、時間） */
+const itemSig = (it) =>
+  JSON.stringify([
+    it.no,
+    it.label,
+    it.brand,
+    it.model,
+    it.spec,
+    it.status,
+    it.book,
+    it.safety,
+    Object.entries(it.stock || {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    [...(it.aliases || [])].sort(),
+    (it.moves || []).map((m) => `${m.at}|${m.kind}|${m.qty}`),
+    [...(it.equiv || [])].sort(),
+  ])
+/** 套用一筆別台的資料；回傳本機有沒有變 */
+async function applyRemote(rec) {
+  if (rec.k === 'settings') {
+    if (!rec.d || rec.t <= Number(ls.get(LS.settingsAt, '0'))) return false
+    ls.set(LS.locations, JSON.stringify(rec.d.locations || []))
+    if (rec.d.catalog != null) ls.set(LS.catalog, rec.d.catalog)
+    ls.set(LS.settingsAt, String(rec.t))
+    ls.set(LS.settingsSyncT, String(rec.t))
+    return true
+  }
+  const i = rec.k.indexOf(':')
+  const kind = rec.k.slice(0, i)
+  const id = rec.k.slice(i + 1)
+  const store = SYNC_STORES[kind]
+  if (!store) return false
+  const cur = await store.get(id)
+  if (rec.del) {
+    if (!cur || tOf(cur) > rec.t) return false
+    await store.del(id)
+    if (kind === 'session' && state.session?.id === id && ['review', 'capture'].includes(state.view)) {
+      toast('這次盤點在另一台被刪掉了')
+      go('home')
+    }
+    return true
+  }
+  if (!rec.d) return false
+  // 品項：兩台都改過（例如兩個人同時盤到同一種、在不同格）→ 合併，不要互相蓋掉
+  if (kind === 'item' && cur) {
+    const remote = { ...decodeRecord('item', rec.d), updatedAt: rec.t }
+    const merged = mergeItemData(cur, remote)
+    if (itemSig(merged) === itemSig(remote)) {
+      // 雲端那份已經包含本機的全部：直接用它（標成已同步）
+      await idb.items.putRaw({ ...remote, photo: remote.photo || cur.photo, _syncT: rec.t })
+      return itemSig(cur) !== itemSig(remote)
+    }
+    // 本機有雲端沒有的：存合併結果，時間設得比雲端新、標成還沒同步，等一下傳上去讓大家一致
+    await idb.items.putRaw({ ...merged, updatedAt: Math.max(Date.now(), rec.t + 1), _syncT: undefined })
+    scheduleSync(2000)
+    return itemSig(merged) !== itemSig(cur)
+  }
+  if (cur && tOf(cur) >= rec.t) return false
+  const v = { ...decodeRecord(kind, rec.d), updatedAt: rec.t, _syncT: rec.t }
+  // 兩台同時建立新品項、料號撞號：本機還沒傳上去的那個改用新號碼
+  if (kind === 'item') {
+    const items = await idb.items.all()
+    for (const x of items) {
+      if (x.id !== v.id && x.no === v.no && x._syncT === undefined) {
+        x.no = nextNo([...items, v])
+        await idb.items.put(x)
+      }
+    }
+  }
+  await store.putRaw(v)
+  if (kind === 'session' && state.session?.id === id) {
+    state.session = v
+    if (state.view === 'review') toast('另一台更新了這次盤點')
+  }
+  return true
+}
+/** 同步一次（同時只跑一個）：先上傳、再下載 */
+async function syncNow(onProgress = () => {}) {
+  if (!syncReady()) throw new Error('還沒開啟多台同步')
+  if (syncing) return syncing
+  syncing = (async () => {
+    state.syncState = 'syncing'
+    // 1. 上傳：還沒同步過的
+    const jobs = []
+    for (const s of await db.all()) if (tOf(s) !== s._syncT && s.photos.some((p) => p.status === 'done')) jobs.push(['session', s])
+    for (const it of await itemsAll(true)) if (tOf(it) !== it._syncT) jobs.push(['item', it])
+    for (const sm of await idb.samples.all().catch(() => [])) if (tOf(sm) !== sm._syncT) jobs.push(['sample', sm])
+    const settingsAt = Number(ls.get(LS.settingsAt, '0'))
+    const settingsDirty = settingsAt && String(settingsAt) !== ls.get(LS.settingsSyncT)
+    const deleted = readJson(LS.deleted, [])
+    const total = jobs.length + deleted.length + (settingsDirty ? 1 : 0)
+    let batch = []
+    let marks = []
+    let size = 0
+    let sent = 0
+    const flush = async () => {
+      if (!batch.length) return
+      const r = await postSync({ action: 'push', records: batch })
+      // 雲端已經有比較新的（別台改的）→ 不要標成已同步；下面下載時會拿到新的版本再合併
+      const skipped = new Set(r.skipped || [])
+      for (const [i, m] of marks.entries()) if (!skipped.has(batch[i].k)) await m()
+      sent += batch.length
+      onProgress(`上傳 ${sent}／${total}`)
+      batch = []
+      marks = []
+      size = 0
+    }
+    const add = async (rec, mark) => {
+      const len = JSON.stringify(rec).length
+      if (size && size + len > 5e6) await flush()
+      batch.push(rec)
+      marks.push(mark)
+      size += len
+    }
+    for (const [kind, v] of jobs) {
+      const t = tOf(v)
+      await add({ k: `${kind}:${v.id}`, t, d: await encodeRecord(kind, v) }, async () => {
+        await SYNC_STORES[kind].markSynced(v.id, t)
+        if (kind === 'item') {
+          const c = itemsCache?.find((x) => x.id === v.id)
+          if (c && tOf(c) === t) c._syncT = t
+        }
+        if (kind === 'session' && state.session?.id === v.id && tOf(state.session) === t) state.session._syncT = t
+      })
+    }
+    if (settingsDirty) await add({ k: 'settings', t: settingsAt, d: { locations: locations(), catalog: ls.get(LS.catalog) } }, async () => ls.set(LS.settingsSyncT, String(settingsAt)))
+    for (const d of deleted)
+      await add({ k: d.k, t: d.t, del: true }, async () => {
+        ls.set(LS.deleted, JSON.stringify(readJson(LS.deleted, []).filter((x) => !(x.k === d.k && x.t === d.t))))
+      })
+    await flush()
+    // 2. 下載：別台送上去、比上次新的
+    let cursor = Number(ls.get(LS.pulled, '0'))
+    let got = 0
+    let changed = false
+    for (let round = 0; round < 200; round++) {
+      const r = await postSync({ action: 'pull', since: cursor })
+      for (const rec of r.records) if (await applyRemote(rec)) changed = true
+      got += r.records.length
+      if (r.records.length) onProgress(`下載 ${got} 筆`)
+      cursor = r.next
+      ls.set(LS.pulled, String(cursor))
+      if (!r.more) break
+    }
+    ls.set(LS.lastSync, String(Date.now()))
+    state.syncState = ''
+    if (changed) {
+      itemsCache = null
+      if (['home', 'items', 'item', 'report', 'locations', 'review'].includes(state.view)) render()
+    } else if (state.view === 'home') render()
+    return { pushed: sent, pulled: got, changed }
+  })()
+    .catch((e) => {
+      state.syncState = 'error'
+      state.syncError = e.message
+      if (state.view === 'home') render()
+      throw e
+    })
+    .finally(() => (syncing = null))
+  return syncing
+}
+/** 連結碼＝網址＋同步密碼（給另一台貼上） */
+const linkCode = () => `${ls.get(LS.sheet)}#k=${ls.get(LS.syncKey)}`
+function parseLinkCode(text) {
+  const m = /^(https:\/\/script\.google\.com\/macros\/s\/[^#\s]+\/exec)#k=([\w-]{12,})$/.exec(String(text).trim())
+  return m ? { url: m[1], key: m[2] } : null
+}
+const newSyncKey = () => {
+  const a = new Uint8Array(18)
+  crypto.getRandomValues(a)
+  return [...a].map((b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24)
+}
+const syncLabel = () => {
+  if (state.syncState === 'syncing') return '同步中…'
+  if (state.syncState === 'error') return '同步沒成功'
+  const t = Number(ls.get(LS.lastSync, '0'))
+  return t ? `已同步 ${fmtTime(t)}` : '還沒同步'
+}
+
 // ───────────────────────── 總表：很多次盤點合在一起 ─────────────────────────
 const pad2 = (n) => String(n).padStart(2, '0')
 const ymd = (t) => {
@@ -2511,20 +2886,22 @@ async function syncToSheet(sessions) {
   const rows = reportOf(sessions).detail.map((d) => [d.date, d.time, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source, d.id])
   // 品項庫整張一起送（試算表那邊整張覆蓋「品項庫」工作表；舊版試算表程式碼會忽略）
   const items = [ITEM_HEAD, ...itemRows(await itemsAll())]
-  const body = JSON.stringify({ rows, items })
+  const body = JSON.stringify({ rows, items, key: ls.get(LS.syncKey) || undefined, dev: deviceId() })
   let confirmed = null
+  let data = null
   try {
-    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })
-    const data = await res.json()
-    if (!data.ok) throw new Error(data.error || '試算表回傳錯誤')
-    confirmed = data.rows
+    data = await (await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })).json()
   } catch {
-    await fetch(url, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })
+    data = null
   }
+  // 試算表有回話但說不行（例如同步密碼不對）→ 照實說；讀不到回覆 → 改成「只送出、不看回覆」
+  if (data && !data.ok) throw new Error(data.error || '試算表回傳錯誤')
+  if (data) confirmed = data.rows
+  else await fetch(url, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })
   const now = Date.now()
   for (const s of sessions) {
     s.syncedAt = now
-    await db.put(s)
+    await db.putRaw(s) // 只記本機狀態：不要因此把照片再傳一次到雲端
   }
   return confirmed
 }
@@ -2797,8 +3174,9 @@ $app.addEventListener('click', async (e) => {
   }
   if (d.stockDel) {
     const it = await currentItem()
-    if (!it?.stock[d.stockDel] || !confirm(`拿掉「${stockPlace(it.stock[d.stockDel])}」的 ${it.stock[d.stockDel].count} 個？（盤錯位置、重複算時用）`)) return
-    delete it.stock[d.stockDel]
+    const st = it?.stock[d.stockDel]
+    if (!st || st.removed || !confirm(`拿掉「${stockPlace(st)}」的 ${st.count} 個？（盤錯位置、重複算時用）`)) return
+    it.stock[d.stockDel] = removedEntry(st)
     await putItem(it)
     return render()
   }
@@ -2867,6 +3245,7 @@ $app.addEventListener('click', async (e) => {
     case 'delete-session':
       if (!confirm('確定刪除這次盤點？照片和結果都會刪掉，記在品項庫的數量也會拿掉。')) return
       await db.del(state.session.id)
+      tombstone(`session:${state.session.id}`)
       await unlinkSession(state.session.id)
       toast('已刪除')
       return go('home')
@@ -2931,13 +3310,96 @@ $app.addEventListener('click', async (e) => {
       return render()
     case 'save-catalog':
       ls.set(LS.catalog, document.getElementById('catalog').value.trim())
+      touchSettings()
       return toast('清單已儲存')
     case 'reset-catalog':
       ls.set(LS.catalog, '')
+      touchSettings()
       toast('已恢復預設清單')
       return render()
     case 'force-update':
       return forceUpdate()
+    // ── 多台裝置同步 ──
+    case 'sync-start': {
+      ls.set(LS.syncKey, newSyncKey())
+      try {
+        await postSync({ action: 'hello' })
+      } catch (err) {
+        ls.set(LS.syncKey, '')
+        return toast(err.message)
+      }
+      toast('已開啟同步，第一次上傳中…（照片多會比較久）')
+      render()
+      return syncNow((m) => toast(m))
+        .then((r) => toast(`同步完成：上傳 ${r.pushed} 筆。接著按「複製連結碼」貼到另一台`))
+        .catch((err) => toast(`同步沒成功：${err.message}`))
+        .finally(() => state.view === 'settings' && render())
+    }
+    case 'sync-link': {
+      const code = parseLinkCode(document.getElementById('link-code').value)
+      if (!code) return toast('連結碼不對：要整段貼上（https://script.google.com/…/exec#k=…）')
+      const before = { url: ls.get(LS.sheet), key: ls.get(LS.syncKey) }
+      ls.set(LS.sheet, code.url)
+      ls.set(LS.syncKey, code.key)
+      try {
+        await postSync({ action: 'hello' })
+      } catch (err) {
+        ls.set(LS.sheet, before.url)
+        ls.set(LS.syncKey, before.key)
+        return toast(err.message)
+      }
+      ls.set(LS.pulled, '0') // 新連結：從頭下載一次
+      toast('連結成功，下載資料中…')
+      render()
+      return syncNow((m) => toast(m))
+        .then((r) => toast(`同步完成：下載 ${r.pulled} 筆、上傳 ${r.pushed} 筆`))
+        .catch((err) => toast(`同步沒成功：${err.message}`))
+        .finally(() => render())
+    }
+    case 'sync-rekey': {
+      if (!confirm('換新的同步密碼？\n換完後，其他裝置（同事、電腦）要重新貼上新的連結碼才會繼續同步。')) return
+      const newKey = newSyncKey()
+      try {
+        await postSync({ action: 'rekey', newKey })
+      } catch (err) {
+        return toast(err.message)
+      }
+      ls.set(LS.syncKey, newKey)
+      try {
+        await navigator.clipboard.writeText(linkCode())
+        toast('已換新密碼，新的連結碼已複製：私訊給還要一起盤點的人')
+      } catch {
+        toast('已換新密碼：按「複製連結碼」給還要一起盤點的人')
+      }
+      return render()
+    }
+    case 'sync-leave': {
+      if (!confirm('這台退出同步，並清除這台的盤點紀錄、品項庫、樣品照、儲位？\n雲端和其他裝置的資料不會刪。API Key 也會一起清掉。')) return
+      clearTimeout(syncTimer)
+      for (const k of [LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog]) ls.set(k, '')
+      // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
+      await idb.sessions.clear()
+      await idb.items.clear()
+      await idb.samples.clear()
+      itemsCache = null
+      state.session = null
+      toast('這台已退出同步，資料已清除')
+      return go('home')
+    }
+    case 'sync-copy':
+      try {
+        await navigator.clipboard.writeText(linkCode())
+        return toast('已複製連結碼：私訊給同事或自己，到另一台的「設定 → 多人、多台同步」貼上')
+      } catch {
+        return toast('這個瀏覽器不讓複製')
+      }
+    case 'sync-now':
+      if (!syncReady()) return go('settings')
+      toast('同步中…')
+      return syncNow((m) => toast(m))
+        .then((r) => toast(r.pushed || r.pulled ? `同步完成：上傳 ${r.pushed}、下載 ${r.pulled}` : '已經是最新的'))
+        .catch((err) => toast(`同步沒成功：${err.message}`))
+        .finally(() => ['home', 'settings'].includes(state.view) && render())
     case 'finish': {
       // 完成：記進品項庫；有設定 Google 試算表又開著自動同步，就順便寫進去（在背景送，不用等）
       const s = state.session
@@ -2947,6 +3409,8 @@ $app.addEventListener('click', async (e) => {
         toast(r ? (r.created ? `已記進品項庫：${r.linked} 種（新的 ${r.created} 種，到「品項」確認名稱）` : `已記進品項庫：${r.linked} 種`) : '記進品項庫失敗：請打開這次盤點，再按一次完成')
       }
       go('home')
+      // 盤完馬上傳給大家（不用等）
+      if (syncReady()) syncNow().catch((err) => toast(`同步沒成功：${err.message}；有網路時會再自動試`))
       if (s && ls.get(LS.sheet) && ls.get(LS.autoSync, '1') === '1') {
         syncToSheet([s])
           .then((n) => {
@@ -3030,10 +3494,12 @@ $app.addEventListener('click', async (e) => {
     case 'del-sample':
       if (!confirm('刪掉這張樣品照？')) return
       await idb.samples.del(d.id)
+      tombstone(`sample:${d.id}`)
       toast('已刪掉樣品照')
       return render()
     case 'clear-all':
-      if (!confirm('確定刪除全部盤點紀錄（含照片）？刪了救不回來。\n品項庫、各位置的數量、儲位會保留。')) return
+      if (!confirm(`確定刪除全部盤點紀錄（含照片）？刪了救不回來。\n品項庫、各位置的數量、儲位會保留。${syncReady() ? '\n有開多台同步：其他裝置的盤點紀錄也會一起刪掉。' : ''}`)) return
+      for (const s of await db.all()) tombstone(`session:${s.id}`)
       await db.clear()
       return toast('已全部刪除；品項庫保留')
     // ── 品項庫 ──
@@ -3077,8 +3543,11 @@ $app.addEventListener('click', async (e) => {
       if (!it) return
       const inbound = d.action === 'move-in'
       return numberSheet({ title: inbound ? '進貨幾個？' : '賣出幾個？', sub: `${esc(itemTitle(it))}：帳面數${inbound ? '加' : '減'}這麼多。${it.book == null ? `還沒有帳面數，會從實盤 ${onHand(it)} 開始算。` : `目前帳面 ${it.book}。`}`, value: '1', action: inbound ? '記進貨' : '記賣出' }, async (n) => {
-        it.book = Math.max(0, (it.book ?? onHand(it)) + (inbound ? n : -n))
-        it.moves.push({ at: Date.now(), kind: inbound ? 'in' : 'out', qty: n })
+        const now = Date.now()
+        // 還沒有帳面數：先記一筆「從實盤開始」，帳面數才算得回來（多人同步時用進出紀錄重算）
+        if (it.book == null) it.moves.push({ at: now - 1, kind: 'set', qty: onHand(it) })
+        it.moves.push({ at: now, kind: inbound ? 'in' : 'out', qty: n })
+        it.book = bookFromMoves(it.moves)
         await putItem(it)
         toast(`帳面數變成 ${it.book}`)
       })
@@ -3086,7 +3555,7 @@ $app.addEventListener('click', async (e) => {
     case 'book-set': {
       const it = await currentItem()
       if (!it) return
-      return numberSheet({ title: '帳面數', sub: '應該要有幾個。第一次盤點完，直接用實盤數當起點最快；之後進貨、賣出再加減。', value: it.book ?? onHand(it), quick: Object.keys(it.stock || {}).length ? [{ n: onHand(it), label: `用實盤數 ${onHand(it)}` }] : [] }, async (n) => {
+      return numberSheet({ title: '帳面數', sub: '應該要有幾個。第一次盤點完，直接用實盤數當起點最快；之後進貨、賣出再加減。', value: it.book ?? onHand(it), quick: liveStock(it).length ? [{ n: onHand(it), label: `用實盤數 ${onHand(it)}` }] : [] }, async (n) => {
         it.book = n
         it.moves.push({ at: Date.now(), kind: 'set', qty: n })
         await putItem(it)
@@ -3228,3 +3697,5 @@ async function forceUpdate() {
 }
 
 render()
+// 打開 App：有開同步就先跟大家對一次
+if (syncReady()) setTimeout(() => syncNow().catch(() => {}), 1200)
