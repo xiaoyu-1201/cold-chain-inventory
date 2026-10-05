@@ -316,6 +316,9 @@ button.row[aria-current='true'] {
   font: inherit;
   cursor: pointer;
 }
+.sum-doubt.tip {
+  margin: 0 0 10px;
+}
 .sum-doubt .meta {
   color: var(--text-2);
   font-size: 14px;

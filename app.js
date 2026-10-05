@@ -12,7 +12,7 @@ const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = { key: 'inventory:apiKey', model: 'inventory:model', catalog: 'inventory:catalog', pinned: 'inventory:modelPinned', sheet: 'inventory:sheetUrl', autoSync: 'inventory:autoSync', locations: 'inventory:locations' }
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.0（10/5・品項庫、查型號、儲位、帳面對實盤）'
+const VERSION = '3.1（10/5・叫貨設定看得懂、新品項提醒）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1337,21 +1337,37 @@ async function viewItems() {
   for (const it of list) byLabel.set(it.label, [...(byLabel.get(it.label) || []), it])
   return `
   <main class="app">
-    <div class="nav"><button class="btn small plain" data-go="locations">儲位</button><span class="nav-right"><button class="icon-btn" data-action="items-more" aria-label="匯入、匯出、備份">⋯</button><button class="icon-btn" data-action="item-add" aria-label="新增品項">＋</button></span></div>
+    <div class="nav"><button class="btn small plain" data-go="locations">儲位</button><span class="nav-right"><button class="icon-btn" data-action="items-more" aria-label="匯入、匯出、備份">⋯</button><button class="btn small" data-action="item-add">＋ 新增</button></span></div>
     <h1 class="large-title">品項庫</h1>
     <p class="subtitle">${items.length ? `${items.length} 種商品・${locations().length} 個儲位。盤點按「完成」就會自動更新。` : '盤點按「完成」，數到的東西就會自動記進來。'}</p>
     ${
       items.length
         ? `<div class="seg" role="tablist" aria-label="篩選">${ITEM_FILTERS.map((x) => `<button role="tab" aria-selected="${x.id === f.id}" data-item-filter="${x.id}">${x.label} ${items.filter(x.test).length}</button>`).join('')}</div>
-           <input class="field search" id="item-search" type="search" placeholder="搜尋品名、型號、料號、儲位" autocomplete="off" enterkeyhint="search">
+           ${f.id === 'all' && items.some((it) => it.status === 'new') ? `<button class="sum-doubt tip" data-item-filter="new"><span class="sum-dot" aria-hidden="true">!</span><span class="grow"><b>${items.filter((it) => it.status === 'new').length} 個新的品項，請確認名稱</b><br><span class="meta">盤點時 AI 自動建立的；名稱對就按「確認」，重複的就合併</span></span>${chev}</button>` : ''}
+           ${f.id === 'order' && list.length ? `<button class="btn secondary block" data-action="order-copy" style="margin-bottom:6px">複製叫貨清單（貼到 LINE）</button>` : ''}
+           ${f.id === 'order' && !list.length ? '' : '<input class="field search" id="item-search" type="search" placeholder="搜尋品名、型號、料號、儲位" autocomplete="off" enterkeyhint="search">'}
            ${
              list.length
                ? [...byLabel]
                    .map(([label, its]) => `<section class="item-sec"><p class="section-title">${esc(label)}（${its.length}）</p><div class="group">${its.map(itemRow).join('')}</div></section>`)
                    .join('')
-               : `<div class="empty"><p>${f.id === 'order' ? '沒有該叫貨的。<br>在品項裡設「安全庫存」，低於就會列在這裡。' : f.id === 'diff' ? '實盤跟帳面都一樣。<br>（要先設定帳面數才會比對）' : '沒有新的品項。'}</p></div>`
+               : f.id === 'order'
+                 ? `<div class="hint-card stack" style="margin-top:12px">
+                      <div><b>還沒有要叫貨的。</b></div>
+                      <div>先告訴 App 每一種「<b>剩幾個就要叫貨</b>」：數量剩這麼多（或更少）時，就會出現在這裡。${items.some((it) => it.safety != null) ? '' : '<br>目前每一種都還沒設定。'}</div>
+                      <button class="btn small" data-action="safety-pick">設定「剩幾個就要叫貨」</button>
+                    </div>`
+                 : `<div class="empty"><p>${f.id === 'diff' ? '實盤跟帳面都一樣。<br>（要先在品項裡設定「帳面數」才會比對）' : '沒有新的品項，都確認過了。'}</p></div>`
            }
-           <p class="empty" id="search-empty" hidden>找不到。可以到「查型號」用型號找替代品。</p>`
+           <p class="empty" id="search-empty" hidden>找不到。可以到「查型號」用型號找替代品。</p>
+           <details class="steps" style="margin-top:18px"><summary>品項庫怎麼用？</summary>
+             <ol>
+               <li><b>記進來：</b>盤點完按「完成・記進品項庫」，數到的東西會自動記進來。也可以按右上「＋ 新增」，或到「查型號」拍標籤加入。</li>
+               <li><b>確認名稱：</b>標「新的」是 AI 自動建立的，點進去看名稱對不對，對就按「確認」。</li>
+               <li><b>叫貨提醒：</b>點進一個品項，設「剩幾個就要叫貨」；數量少於這個數字，就會出現在上面的「叫貨」。</li>
+               <li><b>帳面數：</b>點進品項按「設定帳面數 → 用實盤數」當起點；之後進貨按「＋ 進貨」、賣掉按「－ 賣出」。下次盤點數量跟帳面不一樣，就會出現在「差異」。</li>
+             </ol>
+           </details>`
         : `<div class="hint-card stack">
              <div><b>品項庫會自己長出來</b>：不用先建好。每次盤點按「完成・記進品項庫」，數到的每一種都會變成一筆（有料號、在哪裡、幾個）。</div>
              <div>也可以：</div>
@@ -1391,7 +1407,7 @@ async function viewItem() {
       <div class="row-actions" style="margin-top:14px"><button class="btn small secondary" data-action="move-in">＋ 進貨</button><button class="btn small secondary" data-action="move-out">－ 賣出</button><button class="btn small secondary" data-action="book-set">設定帳面數</button></div>
     </section>
     <p class="section-title">叫貨提醒</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">安全庫存</span><br><span class="meta">${needsOrder(it) ? '⚠️ 已經到了，該叫貨' : '剩這麼多（或更少）就列進叫貨清單'}</span></span><span class="stepper"><button data-safety="-1" aria-label="減一">−</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="安全庫存"><button data-safety="1" aria-label="加一">＋</button></span></div></div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">剩幾個就要叫貨</span><br><span class="meta">${needsOrder(it) ? `⚠️ 現在大概剩 ${expected(it)} 個，該叫貨了` : it.safety == null ? '按 ＋ 設一個數字，例如 3：剩 3 個以下就會出現在「叫貨」' : `剩 ${it.safety} 個以下，就會出現在「叫貨」`}</span></span><span class="stepper"><button data-safety="-1" aria-label="減一">−</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="剩幾個就要叫貨"><button data-safety="1" aria-label="加一">＋</button></span></div></div>
     <p class="section-title">在哪裡（${stock.length} 個位置）</p>
     ${
       stock.length
@@ -1452,7 +1468,7 @@ function lookupResults() {
   const eq = equivalentsFor(matches[0] || null, decoded, items)
   const links = linksFor({ brand: read?.brand || main?.brand || '', model: read?.model || main?.model || q, label: read?.label || '' }, decoded)
   if (!q && !read)
-    return `<p class="section-title">可以查</p>
+    return `<p class="section-title">可以查（點一個試試看）</p>
       <div class="chips">${EXAMPLES.map((x) => `<button class="chip" data-example="${esc(x)}">${esc(x)}</button>`).join('')}</div>
       <p class="footnote">看得懂：各牌乾燥過濾器（DML、DCL、ADK、EK、FD、C-）、Danfoss 膨脹閥（TEX、TES、TEN）、KP 壓力開關、EVR 電磁閥、散熱器排×支×鏡面、銅管分數、冷媒、Danfoss 訂購碼。看不懂的型號也會找店裡有沒有，並附原廠搜尋連結。</p>`
   const exact = read ? items.find((it) => findItem([it], read)) : null
@@ -1484,7 +1500,7 @@ async function viewLookup() {
     <div class="nav"><span></span></div>
     <h1 class="large-title">查型號</h1>
     <p class="subtitle">客人拿零件或型號來問：拍標籤或打型號，馬上看是什麼、店裡有沒有、可以用什麼替代。</p>
-    <label class="hero-btn ${busy ? 'busy' : ''}" ${busy ? 'aria-disabled="true"' : ''}><span class="hero-icon" aria-hidden="true">${busy ? '<span class="spinner small"></span>' : '📷'}</span><span class="grow"><b>${busy ? 'AI 讀標籤中…' : '拍標籤／銘牌'}</b><br><span class="meta">${busy ? '大約 5～15 秒' : '外盒、銘牌、零件上的刻字都可以'}</span></span><input type="file" accept="image/*" capture="environment" id="label-cam" class="sr-only" ${busy || !ls.get(LS.key) ? 'disabled' : ''}></label>
+    <label class="hero-btn ${busy ? 'busy' : ''}" ${busy ? 'aria-disabled="true"' : ''}><span class="hero-icon" aria-hidden="true">${busy ? '<span class="spinner small"></span>' : '📷'}</span><span class="grow"><b>${busy ? 'AI 讀標籤中…' : '拍型號標籤'}</b><br><span class="meta">${busy ? '大約 5～15 秒' : '外盒、貼紙、機器上的型號牌、零件上的刻字都可以'}</span></span><input type="file" accept="image/*" capture="environment" id="label-cam" class="sr-only" ${busy || !ls.get(LS.key) ? 'disabled' : ''}></label>
     ${ls.get(LS.key) ? '' : '<p class="footnote">拍標籤要先到「設定」貼上 API Key；打型號查詢不用。</p>'}
     <input class="field search" id="lookup-q" type="search" placeholder="或打型號：DML 083S、TES 2、4×11×330" value="${esc(q)}" autocomplete="off" enterkeyhint="search" spellcheck="false">
     <div id="lookup-results">${lookupResults()}</div>
@@ -2089,7 +2105,7 @@ function itemsMoreSheet() {
   sheet(
     `<h2 class="sheet-title">品項庫</h2>
      <div class="group">
-       <button class="row" id="m-import"><span class="grow"><span class="title">貼上 Excel 清單</span><br><span class="meta">一次匯入品名、型號、帳面數、安全庫存</span></span>${chev}</button>
+       <button class="row" id="m-import"><span class="grow"><span class="title">貼上 Excel 清單</span><br><span class="meta">一次匯入品名、型號、帳面數、剩幾個要叫貨</span></span>${chev}</button>
        <button class="row" id="m-xlsx"><span class="grow"><span class="title">下載品項庫 Excel</span><br><span class="meta">實盤、帳面、差異、叫貨清單</span></span>${chev}</button>
        <button class="row" id="m-order"><span class="grow"><span class="title">複製叫貨清單</span><br><span class="meta">貼到 LINE 給廠商或老闆</span></span>${chev}</button>
      </div>
@@ -2112,7 +2128,7 @@ function itemsMoreSheet() {
       el.querySelector('#m-order').onclick = async () => {
         close()
         const list = (await itemsAll()).filter(needsOrder)
-        if (!list.length) return toast('沒有該叫貨的（要先在品項裡設安全庫存）')
+        if (!list.length) return toast('沒有該叫貨的（要先在品項裡設「剩幾個就要叫貨」）')
         try {
           await navigator.clipboard.writeText(orderText(list))
           toast(`已複製 ${list.length} 項叫貨清單`)
@@ -2135,10 +2151,10 @@ function itemsMoreSheet() {
   )
 }
 const orderText = (list) =>
-  [`叫貨清單 ${ymd(Date.now())}`, ...list.map((it) => `・${itemTitle(it)}${it.brand || it.model ? `（${[it.brand, it.model].filter(Boolean).join(' ')}）` : ''}：剩 ${expected(it)}，安全庫存 ${it.safety}`)].join('\n')
+  [`叫貨清單 ${ymd(Date.now())}`, ...list.map((it) => `・${itemTitle(it)}${it.brand || it.model ? `（${[it.brand, it.model].filter(Boolean).join(' ')}）` : ''}：剩 ${expected(it)} 個（設定剩 ${it.safety} 個以下要叫貨）`)].join('\n')
 
 /** 品項庫的表格（Excel、Google 試算表共用） */
-const ITEM_HEAD = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '安全庫存', '狀態', '在哪裡（位置 數量）', '最近盤點']
+const ITEM_HEAD = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '剩幾個要叫貨（安全庫存）', '狀態', '在哪裡（位置 數量）', '最近盤點']
 function itemRows(items) {
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
   return [...items]
@@ -2166,7 +2182,7 @@ function itemRows(items) {
 }
 const itemSheets = (items) => [
   { name: '品項庫', rows: [ITEM_HEAD, ...itemRows(items)] },
-  { name: '叫貨清單', rows: [['料號', '品名', '品牌', '型號', '尺寸／規格', '現在大概有', '安全庫存'], ...items.filter(needsOrder).map((it) => [it.no, it.label, it.brand, it.model, it.spec, expected(it), it.safety])] },
+  { name: '叫貨清單', rows: [['料號', '品名', '品牌', '型號', '尺寸／規格', '現在大概有', '剩幾個要叫貨（安全庫存）'], ...items.filter(needsOrder).map((it) => [it.no, it.label, it.brand, it.model, it.spec, expected(it), it.safety])] },
 ]
 const itemsXlsx = (items) => makeXlsx(itemSheets(items))
 
@@ -2178,7 +2194,7 @@ function parseTable(text) {
   const rows = lines.map((l) => l.split(sep).map((c) => c.trim().replace(/^"(.*)"$/, '$1')))
   const head = rows[0].map((h) => h.replace(/\s/g, ''))
   const col = (...ws) => head.findIndex((h) => ws.some((w) => h.includes(w)))
-  const safety = col('安全', '最低')
+  const safety = col('安全', '最低', '叫貨')
   const bookWords = ['帳面', '庫存', '數量', '存量']
   const c = { no: col('料號', '編號'), label: col('品名', '名稱', '品項'), brand: col('品牌', '廠牌'), model: col('型號'), spec: col('規格', '尺寸'), book: head.findIndex((h, i) => i !== safety && bookWords.some((w) => h.includes(w))), safety }
   if (c.label < 0) throw new Error('第一列要有標題，而且要有「品名」')
@@ -3110,6 +3126,25 @@ $app.addEventListener('click', async (e) => {
       if (state.lookup.read?.url) URL.revokeObjectURL(state.lookup.read.url)
       state.lookup = { q: '', read: null, busy: false }
       return render()
+    case 'safety-pick':
+      // 「叫貨」是空的：直接選一個品項 → 填「剩幾個就要叫貨」
+      return pickItem('設定哪一種？', '選一個品項，再填「剩幾個就要叫貨」。之後可以一個一個設。', [], async (it) => {
+        if (!it) return
+        numberSheet({ title: '剩幾個就要叫貨？', sub: `${esc(itemTitle(it))}：現在大概剩 ${expected(it)} 個。填 3 的意思是：剩 3 個以下就提醒叫貨。`, value: it.safety ?? 3, action: '儲存' }, async (n) => {
+          it.safety = n
+          await putItem(it)
+          toast(needsOrder(it) ? `已設定：${itemTitle(it)} 現在就該叫貨了` : `已設定：剩 ${n} 個以下會提醒叫貨`)
+        })
+      })
+    case 'order-copy': {
+      const list = (await itemsAll()).filter(needsOrder)
+      try {
+        await navigator.clipboard.writeText(orderText(list))
+        return toast(`已複製 ${list.length} 項叫貨清單，到 LINE 貼上`)
+      } catch {
+        return toast('這個瀏覽器不讓複製，請改用 ⋯ → 下載品項庫 Excel')
+      }
+    }
     case 'loc-add':
       return locationSheet(-1)
     case 'loc-print':
