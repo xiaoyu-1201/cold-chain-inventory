@@ -8,11 +8,12 @@
  * 4. 複製「網頁應用程式網址」（https://script.google.com/macros/s/…/exec），貼到拍照盤點 App 的「設定 → Google 試算表」
  * 之後每次在 App 按「完成」，這次的盤點就會寫進來；同一次盤點重複送，會先刪掉舊的再寫，不會重複。
  *
- * 會自動建立四個工作表：
+ * 會自動建立五個工作表（每次同步自動更新；手動改會先跳警告）：
+ * - 總覽：數字卡片（品項、件數、該叫貨、盤虧、盤盈、儲位已盤）、該叫貨／盤差最大前 10、儲位盤點進度、圖表
+ * - 庫存：每個品項的實盤、帳面、差異、叫貨點、在哪裡、最近盤點、盤點人（盤虧紅、該叫貨橘）
+ * - 儲位庫存：每一格放了什麼、幾個、誰什麼時候盤的
+ * - 盤差報告：實盤≠帳面的品項；後三欄「原因說明、處理方式、主管確認」給主管填，重新同步會保留
  * - 盤點紀錄：每一次、每一種商品一列（原始資料，不要手動改欄位順序）
- * - 總表：每個品項在每個盤點日期各幾件（自動計算）
- * - 最新一次：最近一次盤點的品項與數量，數量多的排前面（自動計算）
- * - 品項庫：料號、實盤、帳面、差異、剩幾個要叫貨、該叫貨（每次同步整張更新，不要手動改）
  *
  * 多人同步（手機、電腦、同事看到同一份資料）：
  * - 盤點紀錄（含照片）、品項庫、儲位、樣品照存在你自己的 Google 雲端硬碟「拍照盤點同步資料（不要刪）」資料夾。
@@ -94,9 +95,9 @@ function doPost(e) {
     }
     if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEAD.length).setValues(rows)
     sh.getRange(2, 1, Math.max(1, sh.getLastRow() - 1), 1).setNumberFormat('yyyy/mm/dd')
-    ensureSummary(ss)
-    if (data.items && data.items.length) writeItems(ss, data.items)
-    return json({ ok: true, rows: rows.length, items: data.items ? data.items.length - 1 : 0 })
+    if (data.report && data.report.items) writeReports(ss, data.report)
+    else if (data.items && data.items.length) writeTable(ss, '庫存', 1, data.items, { color: COLOR.green }) // 舊版 App
+    return json({ ok: true, rows: rows.length, items: data.report ? data.report.items.length - 1 : 0 })
   } finally {
     lock.releaseLock()
   }
@@ -329,7 +330,7 @@ function syncPull(data, P) {
 }
 
 function ensureRaw(ss) {
-  const sh = ss.getSheetByName(RAW) || ss.insertSheet(RAW, 0)
+  const sh = ss.getSheetByName(RAW) || ss.insertSheet(RAW, ss.getSheets().length) // 原始資料放最後面
   if (sh.getLastRow() === 0) {
     sh.appendRow(HEAD)
     sh.setFrozenRows(1)
@@ -339,44 +340,286 @@ function ensureRaw(ss) {
   return sh
 }
 
-/** 品項庫：整張覆蓋（第一列是標題）；盤虧標紅、該叫貨標橘 */
-function writeItems(ss, table) {
-  const sh = ss.getSheetByName('品項庫') || ss.insertSheet('品項庫', 1)
-  sh.clear()
+// ───────────── 公司用的報表：總覽、庫存、儲位庫存、盤差報告 ─────────────
+// App 每次同步送來三張表（第一列是標題）：items（庫存）、stock（儲位庫存）、locs（儲位進度）。
+// 時間欄位送 {$t: 毫秒}，這邊轉成真的日期（才能排序、篩選）。
+const COLOR = { blue: '#0a84ff', green: '#30a46c', orange: '#f76b15', red: '#e5484d', gray: '#8e8e93', head: '#e8f0fe', card: '#f2f2f7', loss: '#fde8e8', gain: '#e8f0fe', order: '#fff4e0' }
+
+function cellOf(v) {
+  return v && typeof v === 'object' && v.$t ? new Date(v.$t) : v
+}
+function rowsOf(table) {
   const width = table[0].length
-  const rows = table.map((r) => {
-    const row = r.slice(0, width)
+  return table.map(function (r) {
+    const row = r.slice(0, width).map(cellOf)
     while (row.length < width) row.push('')
     return row
   })
-  sh.getRange(1, 1, rows.length, width).setValues(rows)
+}
+function styleHeader(sh, width) {
+  sh.getRange(1, 1, 1, width).setFontWeight('bold').setBackground(COLOR.head).setVerticalAlignment('middle')
   sh.setFrozenRows(1)
-  sh.getRange(1, 1, 1, width).setFontWeight('bold').setBackground('#e8f0fe')
-  const status = table[0].indexOf('狀態')
-  if (rows.length < 2 || status < 0) return
-  // 一次設定整張的底色（一列一列設會很慢）
-  const colors = rows.slice(1).map((r) => {
-    const s = String(r[status] || '')
-    const c = s.indexOf('盤虧') >= 0 ? '#fde8e8' : s.indexOf('該叫貨') >= 0 ? '#fff4e0' : null
-    return r.map(() => c)
+}
+/** 自動產生的工作表：有人手動改會先跳警告（不會擋住，只是提醒） */
+function protectWarn(sh, unprotectedA1) {
+  if (sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).length) return
+  const p = sh.protect().setDescription('由拍照盤點 App 自動產生：請在 App 裡改').setWarningOnly(true)
+  if (unprotectedA1) p.setUnprotectedRanges([sh.getRange(unprotectedA1)])
+}
+function sheetAt(ss, name, index) {
+  return ss.getSheetByName(name) || ss.insertSheet(name, Math.min(index, ss.getSheets().length))
+}
+/** 整張重寫一張表：標題、凍結、篩選、時間格式、欄寬 */
+function writeTable(ss, name, index, table, opt) {
+  const sh = sheetAt(ss, name, index)
+  if (sh.getFilter()) sh.getFilter().remove()
+  sh.clear()
+  const rows = rowsOf(table)
+  const width = rows[0].length
+  sh.getRange(1, 1, rows.length, width).setValues(rows)
+  styleHeader(sh, width)
+  ;(opt.timeCols || []).forEach(function (h) {
+    const c = rows[0].indexOf(h)
+    if (c >= 0 && rows.length > 1) sh.getRange(2, c + 1, rows.length - 1, 1).setNumberFormat('yyyy/mm/dd hh:mm')
   })
-  sh.getRange(2, 1, colors.length, width).setBackgrounds(colors)
+  if (rows.length > 1) sh.getRange(1, 1, rows.length, width).createFilter()
+  sh.setTabColor(opt.color)
+  sh.autoResizeColumns(1, width)
+  protectWarn(sh)
+  return { sh: sh, rows: rows }
 }
 
-function ensureSummary(ss) {
-  if (!ss.getSheetByName('總表')) {
-    const s = ss.insertSheet('總表')
-    s.getRange('A1').setValue('每個品項在每次盤點日期各幾件（自動計算，不用改）').setFontWeight('bold')
-    s.getRange('A3').setFormula('=QUERY(\'盤點紀錄\'!A:K,"select D, G, sum(H) where D is not null group by D, G pivot A",1)')
-    s.setFrozenRows(3)
-  }
-  if (!ss.getSheetByName('最新一次')) {
-    const s = ss.insertSheet('最新一次')
-    s.getRange('A1').setValue('最近一次盤點日期').setFontWeight('bold')
-    s.getRange('B1').setFormula("=MAX('盤點紀錄'!A2:A)").setNumberFormat('yyyy/mm/dd')
-    s.getRange('A3').setFormula(
-      '=QUERY(\'盤點紀錄\'!A:K,"select D, G, E, F, sum(H) where A = date \'"&TEXT(B1,"yyyy-mm-dd")&"\' group by D, G, E, F order by sum(H) desc label D \'品名\', G \'尺寸／規格\', E \'品牌\', F \'型號\', sum(H) \'數量\'",1)',
+function writeReports(ss, rep) {
+  // 舊版的「品項庫」改名成「庫存」
+  const old = ss.getSheetByName('品項庫')
+  if (old && !ss.getSheetByName('庫存')) old.setName('庫存')
+  const inv = writeTable(ss, '庫存', 1, rep.items, { timeCols: ['最近盤點'], color: COLOR.green })
+  // 庫存：盤虧標紅、該叫貨標橘（一次設定整張底色，一列一列設會很慢）
+  const st = inv.rows[0].indexOf('狀態')
+  if (inv.rows.length > 1 && st >= 0) {
+    inv.sh.getRange(2, 1, inv.rows.length - 1, inv.rows[0].length).setBackgrounds(
+      inv.rows.slice(1).map(function (r) {
+        const s = String(r[st] || '')
+        const c = s.indexOf('盤虧') >= 0 ? COLOR.loss : s.indexOf('該叫貨') >= 0 ? COLOR.order : null
+        return r.map(function () {
+          return c
+        })
+      }),
     )
-    s.setFrozenRows(3)
   }
+  writeTable(ss, '儲位庫存', 2, rep.stock, { timeCols: ['盤點時間'], color: COLOR.blue })
+  writeDiff(ss, rep.items)
+  writeDashboard(ss, rep)
+  const raw = ss.getSheetByName(RAW)
+  if (raw) raw.setTabColor(COLOR.gray)
+  // 新試算表預設的空白工作表（工作表1／Sheet1）沒用到就刪掉
+  ss.getSheets().forEach(function (s) {
+    if (/^(工作表|Sheet)\d+$/.test(s.getName()) && s.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(s)
+  })
+}
+
+/** 盤差報告：只列實盤≠帳面，差越多排越前面；後面三欄給主管填（重新同步也會保留） */
+function writeDiff(ss, items) {
+  const H = items[0]
+  const col = function (h) {
+    return H.indexOf(h)
+  }
+  const BASE = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '差異比例', '在哪裡（位置 數量）', '最近盤點', '盤點人']
+  const NOTE = ['原因說明（請填）', '處理方式（請填）', '主管確認']
+  const sh = sheetAt(ss, '盤差報告', 3)
+  // 先把主管填過的留下來（用料號對）
+  const notes = {}
+  const last = sh.getLastRow()
+  if (last > 1) {
+    sh.getRange(2, 1, last - 1, BASE.length + NOTE.length)
+      .getValues()
+      .forEach(function (r) {
+        if (r[0]) notes[String(r[0])] = r.slice(BASE.length)
+      })
+  }
+  if (sh.getFilter()) sh.getFilter().remove()
+  sh.clear()
+  const diffs = items
+    .slice(1)
+    .filter(function (r) {
+      return r[col('差異')] !== '' && Number(r[col('差異')]) !== 0
+    })
+    .sort(function (a, b) {
+      return Math.abs(b[col('差異')]) - Math.abs(a[col('差異')])
+    })
+  const rows = [BASE.concat(NOTE)].concat(
+    diffs.map(function (r) {
+      const d = Number(r[col('差異')])
+      const book = Number(r[col('帳面')])
+      return [r[col('料號')], r[col('品名')], r[col('品牌')], r[col('型號')], r[col('尺寸／規格')], r[col('實盤')], r[col('帳面')], d, book ? d / book : '', r[col('在哪裡（位置 數量）')], cellOf(r[col('最近盤點')]), r[col('盤點人')]].concat(notes[String(r[col('料號')])] || ['', '', false])
+    }),
+  )
+  const width = rows[0].length
+  sh.getRange(1, 1, rows.length, width).setValues(rows)
+  styleHeader(sh, width)
+  sh.getRange(1, BASE.length + 1, 1, NOTE.length).setBackground(COLOR.order)
+  if (rows.length > 1) {
+    const n = rows.length - 1
+    sh.getRange(2, 9, n, 1).setNumberFormat('0%')
+    sh.getRange(2, 11, n, 1).setNumberFormat('yyyy/mm/dd hh:mm')
+    sh.getRange(2, width, n, 1).insertCheckboxes()
+    sh.getRange(2, 1, n, BASE.length).setBackgrounds(
+      diffs.map(function (r) {
+        const c = Number(r[col('差異')]) < 0 ? COLOR.loss : COLOR.gain
+        return BASE.map(function () {
+          return c
+        })
+      }),
+    )
+    sh.getRange(1, 1, rows.length, width).createFilter()
+  } else {
+    sh.getRange(2, 1).setValue('目前沒有盤差：實盤跟帳面都一樣（或還沒設定帳面數）。').setFontColor(COLOR.gray)
+  }
+  sh.setTabColor(COLOR.red)
+  sh.autoResizeColumns(1, width)
+  protectWarn(sh, 'M:O')
+}
+
+/** 總覽：給主管一眼看懂（數字卡片、需要處理的事、儲位盤點進度、圖表） */
+function writeDashboard(ss, rep) {
+  const sh = sheetAt(ss, '總覽', 0)
+  sh.getCharts().forEach(function (c) {
+    sh.removeChart(c)
+  })
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart()
+  sh.clear()
+  sh.setHiddenGridlines(true)
+  sh.setTabColor(COLOR.blue)
+  const H = rep.items[0]
+  const col = function (h) {
+    return H.indexOf(h)
+  }
+  const items = rep.items.slice(1)
+  const num = function (v) {
+    return Number(v) || 0
+  }
+  const sum = function (list, f) {
+    return list.reduce(function (n, r) {
+      return n + f(r)
+    }, 0)
+  }
+  const losses = items.filter(function (r) {
+    return r[col('差異')] !== '' && num(r[col('差異')]) < 0
+  })
+  const gains = items.filter(function (r) {
+    return r[col('差異')] !== '' && num(r[col('差異')]) > 0
+  })
+  const orders = items.filter(function (r) {
+    return String(r[col('狀態')]).indexOf('該叫貨') >= 0
+  })
+  const locs = rep.locs.slice(1)
+  const counted = locs.filter(function (r) {
+    return r[6] !== '還沒盤'
+  })
+  const stale = locs.filter(function (r) {
+    return r[6] === '超過 30 天沒盤'
+  })
+  // 欄寬：A 留白，B～M 六張卡片（每張兩欄）
+  sh.setColumnWidth(1, 16)
+  sh.setColumnWidths(2, 12, 92)
+  sh.getRange('B1').setValue('盤點總覽').setFontSize(22).setFontWeight('bold')
+  sh.getRange('B2').setValue('最後同步：').setFontColor(COLOR.gray)
+  sh.getRange('C2').setValue(new Date(rep.at || Date.now())).setNumberFormat('yyyy/mm/dd hh:mm').setFontColor(COLOR.gray).setHorizontalAlignment('left')
+  sh.getRange('E2').setValue('這一頁由拍照盤點 App 自動產生，不用改；細節看後面的工作表。').setFontColor(COLOR.gray)
+  const cards = [
+    ['品項', items.length, '種商品', COLOR.blue],
+    ['實盤總件數', sum(items, function (r) {
+      return num(r[col('實盤')])
+    }), '件', COLOR.blue],
+    ['該叫貨', orders.length, '項（看「庫存」橘色）', orders.length ? COLOR.orange : COLOR.green],
+    ['盤虧', losses.length, '項，少 ' + -sum(losses, function (r) {
+      return num(r[col('差異')])
+    }) + ' 件', losses.length ? COLOR.red : COLOR.green],
+    ['盤盈', gains.length, '項，多 ' + sum(gains, function (r) {
+      return num(r[col('差異')])
+    }) + ' 件', gains.length ? COLOR.blue : COLOR.green],
+    ['儲位已盤', counted.length + '／' + locs.length, stale.length ? stale.length + ' 格超過 30 天沒盤' : '格', stale.length ? COLOR.orange : COLOR.green],
+  ]
+  cards.forEach(function (c, i) {
+    const colNo = 2 + i * 2
+    sh.getRange(4, colNo, 3, 2).setBackground(COLOR.card)
+    sh.getRange(4, colNo, 1, 2).merge().setValue(c[0]).setFontColor(COLOR.gray).setFontSize(11)
+    sh.getRange(5, colNo, 1, 2).merge().setValue(c[1]).setFontSize(26).setFontWeight('bold').setFontColor(c[3]).setHorizontalAlignment('left')
+    sh.getRange(6, colNo, 1, 2).merge().setValue(c[2]).setFontColor(COLOR.gray).setFontSize(10)
+  })
+  // 需要處理：左邊該叫貨、右邊盤差最大
+  const section = function (row, colNo, title, head, data, empty) {
+    sh.getRange(row, colNo).setValue(title).setFontWeight('bold').setFontSize(13)
+    sh.getRange(row + 1, colNo, 1, head.length).setValues([head]).setFontWeight('bold').setBackground(COLOR.head)
+    if (data.length) sh.getRange(row + 2, colNo, data.length, head.length).setValues(data)
+    else sh.getRange(row + 2, colNo).setValue(empty).setFontColor(COLOR.gray)
+  }
+  section(
+    8,
+    2,
+    '該叫貨（前 10 項）',
+    ['料號', '品名', '規格', '現在', '叫貨點'],
+    orders.slice(0, 10).map(function (r) {
+      return [r[col('料號')], r[col('品名')], r[col('尺寸／規格')], r[col('帳面')] !== '' ? r[col('帳面')] : r[col('實盤')], r[col('剩幾個要叫貨（安全庫存）')]]
+    }),
+    '沒有要叫貨的',
+  )
+  section(
+    8,
+    8,
+    '盤差最大（前 10 項）',
+    ['料號', '品名', '實盤', '帳面', '差異'],
+    losses
+      .concat(gains)
+      .sort(function (a, b) {
+        return Math.abs(b[col('差異')]) - Math.abs(a[col('差異')])
+      })
+      .slice(0, 10)
+      .map(function (r) {
+        return [r[col('料號')], r[col('品名')], r[col('實盤')], r[col('帳面')], r[col('差異')]]
+      }),
+    '沒有盤差',
+  )
+  // 儲位盤點進度
+  const locRow = 22
+  sh.getRange(locRow, 2).setValue('儲位盤點進度').setFontWeight('bold').setFontSize(13)
+  const locTable = rowsOf(rep.locs)
+  sh.getRange(locRow + 1, 2, locTable.length, locTable[0].length).setValues(locTable)
+  sh.getRange(locRow + 1, 2, 1, locTable[0].length).setFontWeight('bold').setBackground(COLOR.head)
+  if (locTable.length > 1) {
+    sh.getRange(locRow + 2, 6, locTable.length - 1, 1).setNumberFormat('yyyy/mm/dd hh:mm')
+    sh.getRange(locRow + 2, 8, locTable.length - 1, 1).setFontColors(
+      locTable.slice(1).map(function (r) {
+        return [r[6] === '已盤' ? COLOR.green : r[6] === '還沒盤' ? COLOR.gray : COLOR.orange]
+      }),
+    )
+  } else sh.getRange(locRow + 2, 2).setValue('還沒建立儲位：在 App「品項 → 儲位」建立').setFontColor(COLOR.gray)
+  // 圖表：件數最多的品名（資料放在最右邊 Y:Z）
+  const byLabel = {}
+  items.forEach(function (r) {
+    byLabel[r[col('品名')]] = (byLabel[r[col('品名')]] || 0) + num(r[col('實盤')])
+  })
+  const top = Object.keys(byLabel)
+    .map(function (k) {
+      return [k, byLabel[k]]
+    })
+    .sort(function (a, b) {
+      return b[1] - a[1]
+    })
+    .slice(0, 10)
+  if (top.length) {
+    sh.getRange(1, 25, top.length + 1, 2).setValues([['品名', '實盤件數']].concat(top)).setFontColor(COLOR.gray)
+    sh.insertChart(
+      sh
+        .newChart()
+        .setChartType(Charts.ChartType.BAR)
+        .addRange(sh.getRange(1, 25, top.length + 1, 2))
+        .setPosition(locRow, 10, 0, 0)
+        .setOption('title', '件數最多的品名（前 10）')
+        .setOption('legend', { position: 'none' })
+        .setOption('colors', [COLOR.blue])
+        .build(),
+    )
+  }
+  protectWarn(sh)
 }
