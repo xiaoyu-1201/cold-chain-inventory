@@ -25,10 +25,21 @@ const LS = {
   settingsSyncT: 'inventory:settingsSyncT',
   pulled: 'inventory:syncPulled',
   lastSync: 'inventory:lastSync',
+  memberName: 'inventory:memberName',
+  memberRole: 'inventory:memberRole',
+  memberId: 'inventory:memberId',
 }
+/** 檢視者不能用的動作 */
+const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick'])
+/** 權限（跟 Google 雲端硬碟的「共用」一樣） */
+const ROLE_LABEL = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
+const ROLE_DESC = { owner: '全部都可以；不能被移除', manager: '可以盤點、修改，也可以邀請、移除人', editor: '可以盤點、修改', viewer: '只能看（可以下載 Excel）' }
+const myRole = () => (ls.get(LS.syncKey) ? ls.get(LS.memberRole) || 'editor' : 'owner')
+const canEdit = () => myRole() !== 'viewer'
+const canManage = () => ['owner', 'manager'].includes(myRole())
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.2（10/5・多人多台同步、同步密碼）'
+const VERSION = '3.3（10/5・共用權限：只能看／可以改、移除、搬家）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1130,7 +1141,9 @@ async function viewHome() {
     <h1 class="large-title">拍照盤點</h1>
     <p class="subtitle">拍貨架，AI 數品項；跟原圖對照，再用 ＋／－ 修正。</p>
     ${
-      hasKey
+      !canEdit()
+        ? `<div class="hint-card"><b>你是檢視者（只能看）</b>：可以看大家的盤點紀錄、品項庫，也可以下載 Excel；不能盤點或修改。需要盤點請找管理員改成「編輯者」。</div>`
+        : hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">📷</span><span class="grow"><b>新盤點</b><br><span class="meta">拍一格貨架；有貼儲位標籤會自動填位置</span></span>${chev}</button>`
         : `<div class="hint-card stack"><div><b>要拍照辨識：</b>先到「設定」貼上你的免費 Gemini API Key（只會存在這台裝置）。<br>只想看手機盤點的結果（例如在電腦上）：到「設定 → 多人、多台同步」貼上連結碼就好，不用 Key。</div><button class="btn small" data-go="settings">去設定</button></div>`
     }
@@ -1151,7 +1164,7 @@ async function viewHome() {
         ? `<div class="group">${sessions
             .map((s) => {
               const failed = s.photos.length && s.photos.every((p) => p.status !== 'done')
-              const meta = [fmtTime(s.createdAt), s.place && placeLabel(s.place), s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.linkedAt ? '' : '還沒按完成', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
+              const meta = [fmtTime(s.createdAt), s.place && placeLabel(s.place), s.by && `${s.by} 盤`, s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.linkedAt ? '' : '還沒按完成', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
               return `<button class="row" data-open="${s.id}"><img src="${s.photos[0] ? urlOf(s.photos[0]) : ''}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)"><span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>${chev}</button>`
             })
             .join('')}</div>`
@@ -1237,9 +1250,9 @@ function viewReview() {
   const notes = s.photos.map((p, i) => (p.note ? `<p class="footnote">第 ${i + 1} 張 AI 備註：${esc(p.note)}</p>` : '')).join('')
   return `
   <main class="app">
-    <div class="nav">${backBtn('home', '盤點')}<button class="btn small secondary" data-action="add">＋ 手動新增</button></div>
+    <div class="nav">${backBtn('home', '盤點')}<button class="btn small secondary edit-only" data-action="add">＋ 手動新增</button></div>
     <h1 class="large-title">${esc(s.place ? placeLabel(s.place) : '盤點結果')}</h1>
-    <p class="subtitle">${fmtTime(s.createdAt)}${s.model ? `・${esc(s.model)}` : ''}</p>
+    <p class="subtitle">${fmtTime(s.createdAt)}${s.by ? `・${esc(s.by)} 盤` : ''}${s.model ? `・${esc(s.model)}` : ''}</p>
     ${errors ? `<div class="stack">${errors}</div>` : ''}
     ${
       groups.length
@@ -1250,7 +1263,7 @@ function viewReview() {
             </div>
             ${
               doubts.length
-                ? `<button class="sum-doubt" data-action="review-doubts"><span class="sum-dot" aria-hidden="true">?</span><span class="grow"><b>${doubts.length} 個要確認</b><br><span class="meta">可能尺寸不同或 AI 沒把握；只看這幾個就好</span></span>${chev}</button>`
+                ? `<button class="sum-doubt edit-only" data-action="review-doubts"><span class="sum-dot" aria-hidden="true">?</span><span class="grow"><b>${doubts.length} 個要確認</b><br><span class="meta">可能尺寸不同或 AI 沒把握；只看這幾個就好</span></span>${chev}</button>`
                 : `<div class="sum-ok"><span aria-hidden="true">✓</span> 沒有需要確認的${state.refining && state.refining.session === s.id ? '（相似品還在比對）' : ''}</div>`
             }
           </section>`
@@ -1263,7 +1276,7 @@ function viewReview() {
            </div>
            ${state.addMode ? '<div class="add-hint" role="status"><b>點照片上漏掉的那一個</b>，會在那裡加一個框 <button class="btn small plain" data-action="add-cancel">取消</button></div>' : ''}
            ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張"><img src="${urlOf(p)}" alt=""></button>`).join('')}</div>` : ''}
-           <div class="row-actions" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>＋ 漏掉的，點照片補一個</button></div>
+           <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>＋ 漏掉的，點照片補一個</button></div>
            <p class="footnote">點照片上的框：直接改成別的種類，改完自動跳下一個。點下面的清單：看那一種在哪裡；數量不對按 ＋／－。</p>`
         : ''
     }
@@ -1297,17 +1310,17 @@ function viewReview() {
               <span class="name">${esc(g.label)}</span><span class="pencil" aria-hidden="true">✎</span>${g.manual ? '<span class="badge edit">手動</span>' : doubtsByKey.get(g.key) ? `<span class="badge low">${doubtsByKey.get(g.key)} 個要確認</span>` : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}${itemsCache && !findItem(itemsCache, g) ? '<span class="badge ok">新品項</span>' : ''}
               <br><span class="spec">${esc(detailOf(g) || '點 ✎ 補品牌、型號、尺寸')}${!g.manual && g.count !== g.boxes ? `・照片裡 ${g.boxes} 個` : ''}</span>
             </button>
-            <span class="stepper"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">−</button><input inputmode="numeric" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.label)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">＋</button></span>
+            <span class="stepper edit-only"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">−</button><input inputmode="numeric" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.label)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">＋</button></span><span class="qty view-only"><b>${g.count}</b></span>
           </div>`,
             )
             .join('')}</div>`
         : `<div class="empty"><p>這次沒有找到商品。<br>可以重拍，或按右上「手動新增」。</p></div>`
     }
-    <div class="row-actions" style="margin-top:22px">
+    <div class="row-actions edit-only" style="margin-top:22px">
       <button class="btn danger small" data-action="delete-session">刪除這次盤點</button>
     </div>
   </main>
-  <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn" data-action="finish">完成・記進品項庫</button></div></div>`
+  <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn edit-only" data-action="finish">完成・記進品項庫</button></div></div>`
 }
 
 async function viewSettings() {
@@ -1330,19 +1343,19 @@ async function viewSettings() {
     <p class="section-title">店內品項清單</p>
     <textarea class="field" id="catalog" spellcheck="false">${esc(catalogLines().join('\n'))}</textarea>
     <p class="footnote">一行一種品項，括號裡寫規格或別名。AI 會照這裡的名稱寫，修正時也會跳出來給你選。</p>
-    <div class="row-actions" style="margin-top:10px"><button class="btn small" data-action="save-catalog">儲存清單</button><button class="btn small secondary" data-action="reset-catalog">恢復預設</button></div>
+    <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small" data-action="save-catalog">儲存清單</button><button class="btn small secondary" data-action="reset-catalog">恢復預設</button></div>
     <p class="section-title">樣品照（${samples.length}）</p>
     ${
       samples.length
         ? `<div class="group">${samples
             .map(
               (s, i) =>
-                `<div class="row"><img src="${sampleUrl(s)}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:contain;background:var(--card-2)"><span class="grow"><span class="title">${esc(s.label)}</span><br><span class="meta">${esc(detailOf(s) || '沒有填品牌、型號、尺寸')}${i >= MAX_SAMPLES ? '・超過 30 張，這張不會送' : ''}</span></span><button class="btn small danger" data-action="del-sample" data-id="${esc(s.id)}">刪除</button></div>`,
+                `<div class="row"><img src="${sampleUrl(s)}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:contain;background:var(--card-2)"><span class="grow"><span class="title">${esc(s.label)}</span><br><span class="meta">${esc(detailOf(s) || '沒有填品牌、型號、尺寸')}${i >= MAX_SAMPLES ? '・超過 30 張，這張不會送' : ''}</span></span><button class="btn small danger edit-only" data-action="del-sample" data-id="${esc(s.id)}">刪除</button></div>`,
             )
             .join('')}</div>`
         : ''
     }
-    <div class="row-actions" style="margin-top:10px"><label class="btn small secondary">📷 拍一張樣品<input type="file" accept="image/*" capture="environment" id="sample-cam" class="sr-only"></label></div>
+    <div class="row-actions edit-only" style="margin-top:10px"><label class="btn small secondary">📷 拍一張樣品<input type="file" accept="image/*" capture="environment" id="sample-cam" class="sr-only"></label></div>
     <p class="footnote">長得很像、只差尺寸的商品（例如不同分數的三通），每一種存一張樣品照，名稱和尺寸寫清楚。辨識時會一起送給 AI 比對（最多 30 張，新的優先）。<br>最快的存法：盤點結果裡先點那個框、再點一次 →「儲存，並存成樣品照」。</p>
     <p class="section-title">Google 試算表</p>
     <div class="stack">
@@ -1362,31 +1375,39 @@ async function viewSettings() {
       <p>試算表會自動建立「盤點紀錄」（每次盤點每一種一列）、「總表」（每個品項在每次盤點各幾件）、「最新一次」（最近一次盤點的數量）、「品項庫」（料號、實盤、帳面、差異、該叫貨）。資料只會寫進你自己的試算表。</p>
       <p><b>以前連結過的：</b>要有「品項庫」工作表和多台同步，請重新複製程式碼貼上 → 存檔 →「部署」→「管理部署作業」→ ✎ 編輯 → 版本選「新版本」→ 部署（網址不變；會再問一次授權，因為要存到你的雲端硬碟）。</p>
     </details>
-    <p class="section-title">多人、多台同步（大家看到同一份）</p>
+    <p class="section-title">共用（跟 Google 雲端硬碟一樣）</p>
     ${
       syncReady()
         ? `<div class="group">
-            <div class="row"><span class="grow"><span class="title">已開啟・${esc(syncLabel())}</span><br><span class="meta">${state.syncState === 'error' && state.syncError ? esc(state.syncError) : '誰盤完都會自動傳上去；App 開著時每 40 秒自動更新'}</span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
-            <button class="row" data-action="sync-copy"><span class="grow"><span class="title">複製連結碼</span><br><span class="meta">只傳給要一起盤點的同事、或自己的電腦（私訊，不要貼在群組）</span></span>${chev}</button>
-            <button class="row" data-action="sync-rekey"><span class="grow"><span class="title">換新的同步密碼</span><br><span class="meta">有人離職、手機遺失、連結碼外流時用：舊的連結碼馬上失效</span></span>${chev}</button>
-            <button class="row" data-action="sync-leave"><span class="grow"><span class="title" style="color:var(--red)">這台退出同步並清除資料</span><br><span class="meta">交還手機、換手機時用；雲端的資料不會刪</span></span>${chev}</button>
+            <div class="row"><span class="avatar" aria-hidden="true">${esc((ls.get(LS.memberName) || '我').slice(0, 1))}</span><span class="grow"><span class="title">${esc(ls.get(LS.memberName) || '我')}（這台）</span><br><span class="meta">${ROLE_LABEL[myRole()]}・${state.syncState === 'error' && state.syncError ? esc(state.syncError) : esc(syncLabel())}</span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
+            ${
+              canManage()
+                ? `<button class="row" data-action="share-open"><span class="grow"><span class="title" style="color:var(--tint)">共用設定</span><br><span class="meta">邀請同事、改權限（只能看／可以改）、移除離職的人</span></span>${chev}</button>`
+                : `<div class="row muted">${ROLE_DESC[myRole()]}。要加人或改權限，請找擁有者或管理員。</div>`
+            }
+            <button class="row" data-action="sync-leave"><span class="grow"><span class="title" style="color:var(--red)">這台退出並清除資料</span><br><span class="meta">交還手機、換手機時用；雲端的資料不會刪</span></span>${chev}</button>
           </div>`
         : ls.get(LS.sheet)
-          ? '<button class="btn block" data-action="sync-start">開啟多台同步（第一台先按這個）</button><p class="footnote">開啟後按「複製連結碼」，貼到另一台，就會看到同一份盤點紀錄和品項庫。</p>'
-          : '<div class="group"><div class="row muted">第一台：先完成上面的 Google 試算表連結，再回來開啟同步。<br>第二台以後：直接在下面貼上連結碼。</div></div>'
+          ? '<button class="btn block" data-action="sync-start">開啟多人同步（我是擁有者）</button><p class="footnote">開啟後到「共用設定」邀請同事：每個人一組自己的連結碼，可以設「只能看」或「可以改」。</p>'
+          : '<div class="group"><div class="row muted">擁有者：先完成上面的 Google 試算表連結，再回來開啟同步。<br>被邀請的人：直接在下面貼上收到的連結碼。</div></div>'
     }
-    <details class="steps" ${syncReady() ? '' : 'open'}><summary>${syncReady() ? '換成另一個連結碼' : '這台是第二台以後：貼上連結碼'}</summary>
+    ${
+      syncReady()
+        ? ''
+        : `<details class="steps" open><summary>我收到連結碼了</summary>
       <div class="stack" style="margin-top:8px">
         <input class="field" id="link-code" placeholder="貼上連結碼（https://script.google.com/…#k=…）" autocomplete="off" spellcheck="false">
-        <button class="btn small" data-action="sync-link">用連結碼連結這台</button>
+        <button class="btn small" data-action="sync-link">加入</button>
       </div>
-    </details>
+    </details>`
+    }
     <details class="steps"><summary>資料安全嗎？（公司資產）</summary>
       <ol>
-        <li><b>資料放在哪：</b>只在你的 Google 雲端硬碟「拍照盤點同步資料」資料夾和你的試算表；建議用公司的 Google 帳號建立，資料就屬於公司。GitHub 上只有程式，沒有任何盤點資料。</li>
-        <li><b>誰讀得到：</b>要有「網址＋同步密碼」（都在連結碼裡）才讀得到。密碼是 24 碼亂數，猜不到；傳輸全程加密（HTTPS）。部署時選的「所有人」只代表可以呼叫網址，沒有密碼一律拒絕。</li>
-        <li><b>連結碼＝鑰匙：</b>只私訊給要一起盤點的人；有人離職或外流，按「換新的同步密碼」，舊的馬上失效，再把新的連結碼給還在的人。</li>
-        <li><b>手機上也有一份：</b>每台裝置會存一份方便離線看；手機請設螢幕鎖。退出時按「這台退出同步並清除資料」。</li>
+        <li><b>資料放在哪：</b>只在擁有者的 Google 雲端硬碟「拍照盤點同步資料」資料夾和試算表。可以先用個人帳號，之後在「共用設定 → 搬到另一個 Google 帳號」搬到公司帳號（大家自動跟過去）。GitHub 上只有程式，沒有任何盤點資料。</li>
+        <li><b>誰讀得到：</b>只有共用名單裡的人。每個人一組自己的連結碼（亂數，猜不到；雲端只存雜湊值），傳輸全程加密（HTTPS）。部署時選的「所有人」只代表可以呼叫網址，沒有連結碼一律拒絕。</li>
+        <li><b>權限：</b>擁有者、管理員（可以邀請／移除人）、編輯者（可以盤點、修改）、檢視者（只能看）。改權限馬上生效，不用換連結碼。</li>
+        <li><b>有人離職：</b>在「共用設定」把他「移除權限」就好，其他人不用改；他的手機下次連線時，App 裡的公司資料會自動清除。</li>
+        <li><b>手機上也有一份：</b>每台裝置會存一份方便離線看；手機請設螢幕鎖。</li>
         <li><b>拍照辨識：</b>照片會送到 Google Gemini 分析。免費版的條款寫明：Google 可以用送去的內容改善產品，也可能有人工審閱。擔心的話，到 Google AI Studio 開啟付費（照用量計費），付費版不會拿去改善產品。照片裡不要拍到價格單、客戶資料。</li>
       </ol>
     </details>
@@ -1394,7 +1415,7 @@ async function viewSettings() {
     <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
     <p class="footnote">辨識一直失敗時按這個，把結果截圖給我看。</p>
     <p class="section-title">資料</p>
-    <div class="row-actions"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>
+    <div class="row-actions edit-only"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>
     <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
     <p class="footnote" style="margin-top:18px;text-align:center">拍照盤點 版本 ${VERSION}</p>
     <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
@@ -1435,13 +1456,13 @@ async function viewItems() {
   for (const it of list) byLabel.set(it.label, [...(byLabel.get(it.label) || []), it])
   return `
   <main class="app">
-    <div class="nav"><button class="btn small plain" data-go="locations">儲位</button><span class="nav-right"><button class="icon-btn" data-action="items-more" aria-label="匯入、匯出、備份">⋯</button><button class="btn small" data-action="item-add">＋ 新增</button></span></div>
+    <div class="nav"><button class="btn small plain" data-go="locations">儲位</button><span class="nav-right"><button class="icon-btn" data-action="items-more" aria-label="匯入、匯出、備份">⋯</button><button class="btn small edit-only" data-action="item-add">＋ 新增</button></span></div>
     <h1 class="large-title">品項庫</h1>
     <p class="subtitle">${items.length ? `${items.length} 種商品・${locations().length} 個儲位。盤點按「完成」就會自動更新。` : '盤點按「完成」，數到的東西就會自動記進來。'}</p>
     ${
       items.length
         ? `<div class="seg" role="tablist" aria-label="篩選">${ITEM_FILTERS.map((x) => `<button role="tab" aria-selected="${x.id === f.id}" data-item-filter="${x.id}">${x.label} ${items.filter(x.test).length}</button>`).join('')}</div>
-           ${f.id === 'all' && items.some((it) => it.status === 'new') ? `<button class="sum-doubt tip" data-item-filter="new"><span class="sum-dot" aria-hidden="true">!</span><span class="grow"><b>${items.filter((it) => it.status === 'new').length} 個新的品項，請確認名稱</b><br><span class="meta">盤點時 AI 自動建立的；名稱對就按「確認」，重複的就合併</span></span>${chev}</button>` : ''}
+           ${f.id === 'all' && items.some((it) => it.status === 'new') ? `<button class="sum-doubt tip edit-only" data-item-filter="new"><span class="sum-dot" aria-hidden="true">!</span><span class="grow"><b>${items.filter((it) => it.status === 'new').length} 個新的品項，請確認名稱</b><br><span class="meta">盤點時 AI 自動建立的；名稱對就按「確認」，重複的就合併</span></span>${chev}</button>` : ''}
            ${f.id === 'order' && list.length ? `<button class="btn secondary block" data-action="order-copy" style="margin-bottom:6px">複製叫貨清單（貼到 LINE）</button>` : ''}
            ${f.id === 'order' && !list.length ? '' : '<input class="field search" id="item-search" type="search" placeholder="搜尋品名、型號、料號、儲位" autocomplete="off" enterkeyhint="search">'}
            ${
@@ -1453,7 +1474,7 @@ async function viewItems() {
                  ? `<div class="hint-card stack" style="margin-top:12px">
                       <div><b>還沒有要叫貨的。</b></div>
                       <div>先告訴 App 每一種「<b>剩幾個就要叫貨</b>」：數量剩這麼多（或更少）時，就會出現在這裡。${items.some((it) => it.safety != null) ? '' : '<br>目前每一種都還沒設定。'}</div>
-                      <button class="btn small" data-action="safety-pick">設定「剩幾個就要叫貨」</button>
+                      <button class="btn small edit-only" data-action="safety-pick">設定「剩幾個就要叫貨」</button>
                     </div>`
                  : `<div class="empty"><p>${f.id === 'diff' ? '實盤跟帳面都一樣。<br>（要先在品項裡設定「帳面數」才會比對）' : '沒有新的品項，都確認過了。'}</p></div>`
            }
@@ -1489,11 +1510,11 @@ async function viewItem() {
   const links = linksFor(it, decoded)
   return `
   <main class="app">
-    <div class="nav">${backBtn('items', '品項')}<button class="btn small secondary" data-action="item-edit">編輯</button></div>
+    <div class="nav">${backBtn('items', '品項')}<button class="btn small secondary edit-only" data-action="item-edit">編輯</button></div>
     <div class="item-head">${itemThumb(it, 64)}<div class="grow"><h1 class="large-title">${esc(itemTitle(it))}</h1><p class="subtitle">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</p></div></div>
     ${
       it.status === 'new'
-        ? `<div class="hint-card stack"><div><b>盤點時自動建立的。</b>名稱、尺寸對嗎？跟別的品項重複就合併。</div><div class="row-actions"><button class="btn small" data-action="item-confirm">✓ 對，確認</button><button class="btn small secondary" data-action="item-edit">修改</button><button class="btn small secondary" data-action="item-merge">合併到…</button></div></div>`
+        ? `<div class="hint-card stack edit-only"><div><b>盤點時自動建立的。</b>名稱、尺寸對嗎？跟別的品項重複就合併。</div><div class="row-actions"><button class="btn small" data-action="item-confirm">✓ 對，確認</button><button class="btn small secondary" data-action="item-edit">修改</button><button class="btn small secondary" data-action="item-merge">合併到…</button></div></div>`
         : ''
     }
     <section class="summary">
@@ -1502,14 +1523,14 @@ async function viewItem() {
         <div><span class="stock-label">帳面</span><span class="stock-big">${it.book ?? '—'}</span><span class="stock-sub">${it.book == null ? '還沒設定' : '進貨加、賣出減'}</span></div>
         <div><span class="stock-label">差異</span><span class="stock-big ${d < 0 ? 'neg' : d > 0 ? 'pos' : ''}">${d == null ? '—' : `${d > 0 ? '+' : ''}${d}`}</span><span class="stock-sub">${d == null ? '設定帳面數才比' : d > 0 ? '盤盈（多了）' : d < 0 ? '盤虧（少了）' : '一樣'}</span></div>
       </div>
-      <div class="row-actions" style="margin-top:14px"><button class="btn small secondary" data-action="move-in">＋ 進貨</button><button class="btn small secondary" data-action="move-out">－ 賣出</button><button class="btn small secondary" data-action="book-set">設定帳面數</button></div>
+      <div class="row-actions edit-only" style="margin-top:14px"><button class="btn small secondary" data-action="move-in">＋ 進貨</button><button class="btn small secondary" data-action="move-out">－ 賣出</button><button class="btn small secondary" data-action="book-set">設定帳面數</button></div>
     </section>
     <p class="section-title">叫貨提醒</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">剩幾個就要叫貨</span><br><span class="meta">${needsOrder(it) ? `⚠️ 現在大概剩 ${expected(it)} 個，該叫貨了` : it.safety == null ? '按 ＋ 設一個數字，例如 3：剩 3 個以下就會出現在「叫貨」' : `剩 ${it.safety} 個以下，就會出現在「叫貨」`}</span></span><span class="stepper"><button data-safety="-1" aria-label="減一">−</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="剩幾個就要叫貨"><button data-safety="1" aria-label="加一">＋</button></span></div></div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">剩幾個就要叫貨</span><br><span class="meta">${needsOrder(it) ? `⚠️ 現在大概剩 ${expected(it)} 個，該叫貨了` : it.safety == null ? '按 ＋ 設一個數字，例如 3：剩 3 個以下就會出現在「叫貨」' : `剩 ${it.safety} 個以下，就會出現在「叫貨」`}</span></span><span class="stepper edit-only"><button data-safety="-1" aria-label="減一">−</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="剩幾個就要叫貨"><button data-safety="1" aria-label="加一">＋</button></span><span class="qty view-only"><b>${it.safety ?? '—'}</b></span></div></div>
     <p class="section-title">在哪裡（${stock.length} 個位置）</p>
     ${
       stock.length
-        ? `<div class="group">${stock.map(([k, st]) => `<div class="row"><span class="grow"><span class="title">${esc(stockPlace(st))}</span><br><span class="meta">${fmtTime(st.at)} 盤點</span></span><span class="qty"><b>${st.count}</b></span><button class="icon-btn small" data-stock-del="${esc(k)}" aria-label="拿掉這個位置的數量">×</button></div>`).join('')}</div>`
+        ? `<div class="group">${stock.map(([k, st]) => `<div class="row"><span class="grow"><span class="title">${esc(stockPlace(st))}</span><br><span class="meta">${fmtTime(st.at)} 盤點</span></span><span class="qty"><b>${st.count}</b></span><button class="icon-btn small edit-only" data-stock-del="${esc(k)}" aria-label="拿掉這個位置的數量">×</button></div>`).join('')}</div>`
         : '<div class="group"><div class="row muted">還沒盤點過。盤點時按「完成」就會記在這裡。</div></div>'
     }
     ${
@@ -1521,7 +1542,7 @@ async function viewItem() {
     <div class="group">
       ${eq.rule.map((e) => equivRow(e)).join('')}
       ${eq.linked.map((x) => equivRow({ brand: x.brand, model: x.model || itemTitle(x), item: x, linked: true })).join('')}
-      <button class="row" data-action="equiv-add"><span class="swatch" style="--c:var(--tint);pointer-events:none">＋</span><span class="grow"><span class="title" style="color:var(--tint)">加一個可以互換的品項</span><br><span class="meta">例如客人常問的別牌同規格</span></span></button>
+      <button class="row edit-only" data-action="equiv-add"><span class="swatch" style="--c:var(--tint);pointer-events:none">＋</span><span class="grow"><span class="title" style="color:var(--tint)">加一個可以互換的品項</span><br><span class="meta">例如客人常問的別牌同規格</span></span></button>
     </div>
     ${decoded.find((x) => x.note)?.note ? `<p class="footnote">${esc(decoded.find((x) => x.note).note)}</p>` : ''}
     ${links.length ? `<p class="section-title">查原廠資料</p><div class="group">${links.map((l) => `<a class="row" href="${esc(l.url)}" target="_blank" rel="noreferrer"><span class="grow">${esc(l.title)}</span>${chev}</a>`).join('')}</div>` : ''}
@@ -1534,7 +1555,7 @@ async function viewItem() {
             .join('')}</div>`
         : ''
     }
-    <div class="row-actions" style="margin-top:22px"><button class="btn small secondary" data-action="item-merge">合併到另一個品項</button><button class="btn small danger" data-action="item-delete">刪除品項</button></div>
+    <div class="row-actions edit-only" style="margin-top:22px"><button class="btn small secondary" data-action="item-merge">合併到另一個品項</button><button class="btn small danger" data-action="item-delete">刪除品項</button></div>
     <p class="footnote">以前的寫法（AI 認過的名稱）：${esc((it.aliases || []).length)} 種，以後辨識到都會算進這一項。</p>
   </main>`
 }
@@ -1576,7 +1597,7 @@ function lookupResults() {
         ? `<section class="summary read-card">
             <div class="read-head">${read.url ? `<img src="${read.url}" alt="拍到的標籤">` : ''}<div class="grow"><span class="stock-label">AI 讀到</span><b>${esc(read.label || '（看不出品名）')}</b><br><span class="meta">${esc([read.brand, read.model, read.spec].filter(Boolean).join('・') || '看不出型號')}</span>${read.code ? `<br><span class="meta">訂購碼 ${esc(read.code)}</span>` : ''}</div></div>
             ${read.text ? `<details class="trace"><summary>標籤上的字</summary>${esc(read.text)}</details>` : ''}
-            <div class="row-actions" style="margin-top:12px">${exact ? `<button class="btn small" data-item-open="${exact.id}">打開 ${esc(exact.no)}（店裡有 ${onHand(exact)}）</button>` : '<button class="btn small" data-action="read-add">加入品項庫</button>'}<button class="btn small secondary" data-action="read-clear">清除</button></div>
+            <div class="row-actions" style="margin-top:12px">${exact ? `<button class="btn small" data-item-open="${exact.id}">打開 ${esc(exact.no)}（店裡有 ${onHand(exact)}）</button>` : '<button class="btn small edit-only" data-action="read-add">加入品項庫</button>'}<button class="btn small secondary" data-action="read-clear">清除</button></div>
           </section>`
         : ''
     }
@@ -1628,7 +1649,7 @@ async function viewLocations() {
             .join('')}</div>`
         : '<div class="group"><div class="row muted">還沒有儲位。按下面「新增儲位」，可以一次建立一整排。</div></div>'
     }
-    <div class="row-actions" style="margin-top:14px"><button class="btn" style="flex:1" data-action="loc-add">＋ 新增儲位</button><button class="btn secondary" style="flex:1" data-action="loc-print" ${locs.length ? '' : 'disabled'}>列印標籤</button></div>
+    <div class="row-actions" style="margin-top:14px"><button class="btn edit-only" style="flex:1" data-action="loc-add">＋ 新增儲位</button><button class="btn secondary" style="flex:1" data-action="loc-print" ${locs.length ? '' : 'disabled'}>列印標籤</button></div>
     <details class="steps"><summary>怎麼編號比較好？</summary>
       <ol><li>字母＝第幾排貨架（A、B、C…），數字＝第幾層（由上往下 01、02…）。例：B-03＝B 排第 3 層。</li><li>標籤印出來剪下，貼在每一層的正中間、正面朝外；拍照時把標籤一起拍進去。</li><li>同一格要一次拍完（可以拍好幾張）。重盤同一格，會以新的那次為準（這次沒拍到的，就從這一格拿掉）；不同格的數量會加起來變成「實盤」。</li></ol>
     </details>
@@ -1666,6 +1687,8 @@ async function render() {
     nv.scrollTop = keep.y * nv.scrollHeight
   }
   document.body.classList.toggle('no-scroll', !!document.querySelector('.viewer'))
+  // 檢視者：所有修改用的按鈕藏起來（CSS：body.read-only .edit-only）
+  document.body.classList.toggle('read-only', !canEdit())
   bindInputs()
 }
 
@@ -2204,14 +2227,14 @@ function itemsMoreSheet() {
   sheet(
     `<h2 class="sheet-title">品項庫</h2>
      <div class="group">
-       <button class="row" id="m-import"><span class="grow"><span class="title">貼上 Excel 清單</span><br><span class="meta">一次匯入品名、型號、帳面數、剩幾個要叫貨</span></span>${chev}</button>
+       <button class="row edit-only" id="m-import"><span class="grow"><span class="title">貼上 Excel 清單</span><br><span class="meta">一次匯入品名、型號、帳面數、剩幾個要叫貨</span></span>${chev}</button>
        <button class="row" id="m-xlsx"><span class="grow"><span class="title">下載品項庫 Excel</span><br><span class="meta">實盤、帳面、差異、叫貨清單</span></span>${chev}</button>
        <button class="row" id="m-order"><span class="grow"><span class="title">複製叫貨清單</span><br><span class="meta">貼到 LINE 給廠商或老闆</span></span>${chev}</button>
      </div>
      <p class="section-title">備份（換手機、手機壞掉時用）</p>
      <div class="group">
        <button class="row" id="m-backup"><span class="grow"><span class="title">備份品項庫</span><br><span class="meta">下載一個檔案：品項、儲位、樣品照（不含盤點照片）</span></span>${chev}</button>
-       <label class="row"><span class="grow"><span class="title">從備份還原</span><br><span class="meta">選之前下載的備份檔，跟現有的合併</span></span>${chev}<input type="file" accept="application/json,.json" id="m-restore" class="sr-only"></label>
+       <label class="row edit-only"><span class="grow"><span class="title">從備份還原</span><br><span class="meta">選之前下載的備份檔，跟現有的合併</span></span>${chev}<input type="file" accept="application/json,.json" id="m-restore" class="sr-only"></label>
      </div>
      <p class="footnote">品項庫只存在這支手機；建議每週備份一次，或連結 Google 試算表自動同步。</p>`,
     (el, close) => {
@@ -2566,16 +2589,17 @@ function scheduleSync(ms = 6000) {
   if (!syncReady()) return
   clearTimeout(syncTimer)
   syncTimer = setTimeout(() => {
+    if (state.moving) return
     if (state.view === 'analyzing' || syncing) return scheduleSync(ms)
     syncNow().catch(() => {})
   }, ms)
 }
 /** 大家自動同步：App 開著時每 40 秒看一次有沒有別人的新資料；切回 App 時馬上看一次 */
 setInterval(() => {
-  if (syncReady() && document.visibilityState === 'visible' && !syncing && state.view !== 'analyzing') syncNow().catch(() => {})
+  if (syncReady() && document.visibilityState === 'visible' && !syncing && !state.moving && state.view !== 'analyzing') syncNow().catch(() => {})
 }, 40000)
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible' || !syncReady() || syncing || state.view === 'analyzing') return
+  if (document.visibilityState !== 'visible' || !syncReady() || syncing || state.moving || state.view === 'analyzing') return
   if (Date.now() - Number(ls.get(LS.lastSync, '0')) > 10000) syncNow().catch(() => {})
 })
 async function postSync(body) {
@@ -2591,8 +2615,43 @@ async function postSync(body) {
   } catch {
     throw new Error('Google 試算表沒有正確回覆：請確認貼的是新版程式碼，而且部署成「新版本」')
   }
+  // 擁有者把資料搬到新的 Google 帳號：自動改用新網址（連結碼不用重貼）
+  if (data.moved && !body.followed) {
+    ls.set(LS.sheet, data.moved)
+    toast('資料搬到新的位置了，已自動跟過去')
+    return postSync({ ...body, followed: true })
+  }
+  // 被移除權限：這台的公司資料自動清掉
+  if (data.revoked === true && !data.ok) {
+    await wipeLocal('這台已經被移除權限，App 裡的資料已清除')
+    throw new Error('這台已經被移除權限，App 裡的資料已清除')
+  }
+  // 權限隨時可能被管理員改：每次回覆都更新
+  if (data.me?.role) {
+    const changed = data.me.role !== ls.get(LS.memberRole)
+    ls.set(LS.memberRole, data.me.role)
+    ls.set(LS.memberName, data.me.name || '')
+    ls.set(LS.memberId, data.me.id || '')
+    if (changed) {
+      toast(`你的權限：${ROLE_LABEL[data.me.role]}（${ROLE_DESC[data.me.role]}）`)
+      setTimeout(render, 0)
+    }
+  }
   if (!data.ok) throw new Error(data.error || '同步失敗')
   return data
+}
+/** 清除這台的資料（退出同步、被移除權限時） */
+async function wipeLocal(msg) {
+  clearTimeout(syncTimer)
+  for (const k of [LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId]) ls.set(k, '')
+  // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
+  await idb.sessions.clear()
+  await idb.items.clear()
+  await idb.samples.clear()
+  itemsCache = null
+  state.session = null
+  toast(msg)
+  go('home')
 }
 const SYNC_STORES = { session: idb.sessions, item: idb.items, sample: idb.samples }
 const tOf = (v) => v.updatedAt || v.createdAt || 0
@@ -2708,8 +2767,9 @@ async function syncNow(onProgress = () => {}) {
   if (syncing) return syncing
   syncing = (async () => {
     state.syncState = 'syncing'
-    // 1. 上傳：還沒同步過的
+    // 1. 上傳：還沒同步過的（檢視者只下載）
     const jobs = []
+    const viewer = !canEdit()
     for (const s of await db.all()) if (tOf(s) !== s._syncT && s.photos.some((p) => p.status === 'done')) jobs.push(['session', s])
     for (const it of await itemsAll(true)) if (tOf(it) !== it._syncT) jobs.push(['item', it])
     for (const sm of await idb.samples.all().catch(() => [])) if (tOf(sm) !== sm._syncT) jobs.push(['sample', sm])
@@ -2740,6 +2800,10 @@ async function syncNow(onProgress = () => {}) {
       marks.push(mark)
       size += len
     }
+    if (viewer) {
+      jobs.length = 0
+      deleted.length = 0
+    }
     for (const [kind, v] of jobs) {
       const t = tOf(v)
       await add({ k: `${kind}:${v.id}`, t, d: await encodeRecord(kind, v) }, async () => {
@@ -2751,7 +2815,7 @@ async function syncNow(onProgress = () => {}) {
         if (kind === 'session' && state.session?.id === v.id && tOf(state.session) === t) state.session._syncT = t
       })
     }
-    if (settingsDirty) await add({ k: 'settings', t: settingsAt, d: { locations: locations(), catalog: ls.get(LS.catalog) } }, async () => ls.set(LS.settingsSyncT, String(settingsAt)))
+    if (settingsDirty && !viewer) await add({ k: 'settings', t: settingsAt, d: { locations: locations(), catalog: ls.get(LS.catalog) } }, async () => ls.set(LS.settingsSyncT, String(settingsAt)))
     for (const d of deleted)
       await add({ k: d.k, t: d.t, del: true }, async () => {
         ls.set(LS.deleted, JSON.stringify(readJson(LS.deleted, []).filter((x) => !(x.k === d.k && x.t === d.t))))
@@ -2797,6 +2861,215 @@ const newSyncKey = () => {
   const a = new Uint8Array(18)
   crypto.getRandomValues(a)
   return [...a].map((b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24)
+}
+/** 共用設定（像 Google 雲端硬碟的「共用」視窗）：新增使用者＋權限、名單、一般存取權 */
+function shareSheet() {
+  const appUrl = `${location.origin}${location.pathname}`
+  const personRow = (p) => {
+    const me = p.id === (ls.get(LS.memberId) || (myRole() === 'owner' ? 'owner' : ''))
+    const meta = p.seen ? `最後上線 ${fmtTime(p.seen)}` : '還沒加入'
+    const right =
+      p.role === 'owner'
+        ? `<span class="muted role-text">擁有者</span>${me ? '<button class="btn small plain" data-rename-me>改名字</button>' : ''}`
+        : me
+          ? `<span class="muted role-text">${ROLE_LABEL[p.role]}</span>`
+          : `<select class="role-select" data-member="${esc(p.id)}" data-name="${esc(p.name)}" data-role="${p.role}" aria-label="${esc(p.name)} 的權限">
+              ${['manager', 'editor', 'viewer'].map((r) => `<option value="${r}" ${r === p.role ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}
+              <option disabled>──────</option>
+              <option value="rename">改名字…</option>
+              <option value="reissue">重新產生連結碼…</option>
+              <option value="remove">移除權限</option>
+            </select>`
+    return `<div class="row person"><span class="avatar" aria-hidden="true">${esc(p.name.slice(0, 1))}</span><span class="grow"><span class="title">${esc(p.name)}${me ? '（你）' : ''}</span><br><span class="meta">${meta}</span></span>${right}</div>`
+  }
+  sheet(
+    `<h2 class="sheet-title">共用「拍照盤點」</h2>
+     <div class="form">
+       <input class="field" id="sh-name" placeholder="新增使用者：名字（例如 阿明、辦公室電腦）" autocomplete="off">
+       <div class="row-actions"><select class="field role-pick" id="sh-role" aria-label="權限"><option value="editor">編輯者（可以盤點、修改）</option><option value="viewer">檢視者（只能看）</option><option value="manager">管理員（也可以加人）</option></select><button class="btn" id="sh-invite">邀請</button></div>
+     </div>
+     <p class="section-title">擁有存取權的使用者</p>
+     <div class="group" id="sh-list"><div class="row muted">載入中…</div></div>
+     <p class="section-title">一般存取權</p>
+     <div class="group"><div class="row"><span class="avatar lock" aria-hidden="true">🔒</span><span class="grow"><span class="title">限制</span><br><span class="meta">只有上面名單裡的人，用自己的連結碼才能開啟</span></span></div></div>
+     <details class="steps"><summary>權限說明</summary><ol>${Object.keys(ROLE_LABEL)
+       .map((r) => `<li><b>${ROLE_LABEL[r]}：</b>${ROLE_DESC[r]}</li>`)
+       .join('')}<li>有人離職：選「移除權限」，只有他失效；他的手機下次連線，App 裡的資料會自動清除。其他人不用改。</li><li>換手機或連結碼外流：選「重新產生連結碼」，舊的馬上失效。</li></ol></details>
+     ${myRole() === 'owner' ? '<button class="btn plain block" id="sh-move" style="margin-top:14px">搬到另一個 Google 帳號（例如公司帳號）</button>' : ''}`,
+    (el, close) => {
+      const list = el.querySelector('#sh-list')
+      const load = async () => {
+        let people
+        try {
+          people = (await postSync({ action: 'members' })).people
+        } catch (e) {
+          list.innerHTML = `<div class="row muted">${esc(e.message)}</div>`
+          return
+        }
+        list.innerHTML = people.map(personRow).join('')
+        list.querySelector('[data-rename-me]')?.addEventListener('click', () => {
+          close()
+          nameSheet('owner', '你的名字？', '大家會在盤點紀錄看到是誰盤的。')
+        })
+        list.querySelectorAll('select[data-member]').forEach((sel) =>
+          sel.addEventListener('change', async () => {
+            const { member: id, name, role } = sel.dataset
+            const v = sel.value
+            sel.value = role // 先還原，成功才更新
+            try {
+              if (['manager', 'editor', 'viewer'].includes(v)) {
+                await postSync({ action: 'setRole', id, role: v })
+                toast(`「${name}」改成${ROLE_LABEL[v]}，下次同步就生效`)
+              } else if (v === 'rename') {
+                close()
+                return nameSheet(id, `改「${name}」的名字`, '')
+              } else if (v === 'reissue') {
+                if (!confirm(`幫「${name}」重新產生連結碼？\n舊的連結碼馬上失效（他舊手機上的資料會在下次連線時清除）。`)) return
+                const key = newSyncKey()
+                await postSync({ action: 'reissue', id, newKey: key })
+                close()
+                return linkSheet(name, role, `${ls.get(LS.sheet)}#k=${key}`, appUrl)
+              } else if (v === 'remove') {
+                if (!confirm(`移除「${name}」的權限？\n只有他不能再用，其他人不用改。他的手機下次連線時，App 裡的公司資料會自動清除。`)) return
+                await postSync({ action: 'remove', id })
+                toast(`已移除「${name}」`)
+              }
+              load()
+            } catch (e) {
+              toast(e.message)
+            }
+          }),
+        )
+      }
+      load()
+      el.querySelector('#sh-invite').onclick = async () => {
+        const name = el.querySelector('#sh-name').value.trim()
+        if (!name) return toast('請先填名字')
+        const role = el.querySelector('#sh-role').value
+        const key = newSyncKey()
+        try {
+          await postSync({ action: 'invite', name, role, newKey: key })
+        } catch (e) {
+          return toast(e.message)
+        }
+        close()
+        linkSheet(name, role, `${ls.get(LS.sheet)}#k=${key}`, appUrl)
+      }
+      el.querySelector('#sh-move')?.addEventListener('click', () => {
+        close()
+        moveSheet()
+      })
+    },
+  )
+}
+/** 邀請完：顯示只給這個人的連結碼（關掉就看不到了，雲端只存雜湊值） */
+function linkSheet(name, role, code, appUrl) {
+  const text = `拍照盤點的連結碼（只給你用，不要轉傳）：\n${code}\n\n打開 ${appUrl} → 右上「設定」→「我收到連結碼了」→ 貼上 → 加入`
+  sheet(
+    `<h2 class="sheet-title">給「${esc(name)}」的連結碼</h2>
+     <p class="sheet-sub">${ROLE_LABEL[role]}：${ROLE_DESC[role]}</p>
+     <textarea class="field code" readonly rows="3">${esc(code)}</textarea>
+     <div class="row-actions" style="margin-top:10px"><button class="btn" id="lk-copy" style="flex:1">複製</button>${navigator.share ? '<button class="btn secondary" id="lk-share" style="flex:1">傳給他…</button>' : ''}</div>
+     <ol class="steps-list">
+       <li>私訊給「${esc(name)}」（不要貼在群組）。</li>
+       <li>他打開拍照盤點 →「設定」→「我收到連結碼了」→ 貼上 →「加入」。</li>
+       <li>這組只給他一個人用。他離職時，在「共用設定」移除權限就好，其他人不用改。</li>
+     </ol>
+     <p class="footnote">關掉之後就看不到這組連結碼了（雲端只存雜湊值，比較安全）；忘了可以「重新產生連結碼」。</p>`,
+    (el) => {
+      el.querySelector('#lk-copy').onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(text)
+          toast('已複製（含使用說明）：私訊給他')
+        } catch {
+          el.querySelector('textarea').select()
+          toast('請長按上面的連結碼複製')
+        }
+      }
+      el.querySelector('#lk-share')?.addEventListener('click', () => navigator.share({ text }).catch(() => {}))
+    },
+  )
+}
+/** 改名字（擁有者自己 id＝owner） */
+function nameSheet(id, title, sub) {
+  sheet(
+    `<h2 class="sheet-title">${esc(title)}</h2>${sub ? `<p class="sheet-sub">${esc(sub)}</p>` : ''}
+     <input class="field" id="nm-val" value="${esc(id === (ls.get(LS.memberId) || 'owner') ? ls.get(LS.memberName) : '')}" maxlength="30" autocomplete="off">
+     <button class="btn block" id="nm-save" style="margin-top:12px">儲存</button>`,
+    (el, close) => {
+      const input = el.querySelector('#nm-val')
+      input.focus()
+      el.querySelector('#nm-save').onclick = async () => {
+        const name = input.value.trim()
+        if (!name) return toast('名字不能空白')
+        try {
+          await postSync({ action: 'rename', id, name })
+        } catch (e) {
+          return toast(e.message)
+        }
+        if (id === (ls.get(LS.memberId) || 'owner')) ls.set(LS.memberName, name)
+        close()
+        toast('已儲存')
+        render()
+      }
+    },
+  )
+}
+/** 搬到另一個 Google 帳號（只有擁有者）：資料、共用的人、權限一起搬；舊位置會叫大家自動跟過去 */
+function moveSheet() {
+  sheet(
+    `<h2 class="sheet-title">搬到另一個 Google 帳號</h2>
+     <p class="sheet-sub">例如從個人帳號搬到公司帳號。資料、共用的人和權限都會一起搬；大家的 App 會自動跟過去，不用重貼連結碼。</p>
+     <ol class="steps-list">
+       <li>用新的帳號開一個 Google 試算表 →「擴充功能」→「Apps Script」→ 貼上程式碼（設定 →「複製試算表程式碼」）→ 部署成網頁應用程式（執行身分：我；存取：所有人）。</li>
+       <li>把新的「網頁應用程式網址」貼在下面，按「開始搬家」。這支手機要開著、有網路，直到顯示完成。</li>
+     </ol>
+     <input class="field" id="mv-url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" spellcheck="false">
+     <button class="btn block" id="mv-go" style="margin-top:12px">開始搬家</button>
+     <p class="footnote" id="mv-status"></p>`,
+    (el) => {
+      const status = (m) => (el.querySelector('#mv-status').textContent = m)
+      el.querySelector('#mv-go').onclick = async (ev) => {
+        const newUrl = el.querySelector('#mv-url').value.trim()
+        const oldUrl = ls.get(LS.sheet)
+        if (!/^https:\/\/script\.google\.com\/macros\/s\/[^#\s]+\/exec$/.test(newUrl)) return toast('網址不對：要是 https://script.google.com/macros/s/…/exec')
+        if (newUrl === oldUrl) return toast('這是現在用的網址；請貼新帳號的網址')
+        const btn = ev.currentTarget
+        btn.disabled = true
+        state.moving = true // 搬家中：背景自動同步先停（網址會暫時切來切去）
+        clearTimeout(syncTimer)
+        try {
+          status('1／4 先把最新的資料下載到這台…')
+          await syncNow()
+          status('2／4 在新位置開啟同步…')
+          ls.set(LS.sheet, newUrl)
+          await postSync({ action: 'hello' })
+          ls.set(LS.sheet, oldUrl)
+          const ex = await postSync({ action: 'exportMembers' })
+          ls.set(LS.sheet, newUrl)
+          await postSync({ action: 'importMembers', members: ex.members, revokedHashes: ex.revokedHashes, ownerName: ex.ownerName })
+          status('3／4 把全部資料傳到新位置（照片多會比較久）…')
+          for (const store of Object.values(SYNC_STORES)) for (const v of await store.all()) await store.putRaw({ ...v, _syncT: undefined })
+          ls.set(LS.settingsSyncT, '')
+          ls.set(LS.pulled, '0')
+          itemsCache = null
+          await syncNow(status)
+          status('4／4 通知大家改用新位置…')
+          ls.set(LS.sheet, oldUrl)
+          await postSync({ action: 'moveTo', url: newUrl })
+          ls.set(LS.sheet, newUrl)
+          status('搬家完成：大家的 App 下次同步會自動跟過來。舊的試算表和資料夾確認沒問題後可以刪掉。')
+          toast('搬家完成')
+        } catch (e) {
+          ls.set(LS.sheet, oldUrl)
+          status(`沒有完成：${e?.message || String(e)}。資料還在原本的位置，可以再試一次。`)
+          btn.disabled = false
+        } finally {
+          state.moving = false
+        }
+      }
+    },
+  )
 }
 const syncLabel = () => {
   if (state.syncState === 'syncing') return '同步中…'
@@ -3144,6 +3417,12 @@ $app.addEventListener('click', async (e) => {
     return
   }
   const d = t.dataset
+  // 檢視者：擋掉所有會改資料的動作（按鈕本來就藏起來了，這裡再保險一次）
+  if (!canEdit() && (EDIT_ACTIONS.has(d.action) || d.step || d.edit || d.retry !== undefined || d.locEdit !== undefined || d.stockDel || d.safety || d.removePhoto !== undefined || d.place !== undefined)) return toast('你是檢視者：只能看，不能修改')
+  if (!canEdit() && d.focus !== undefined && d.obj) {
+    state.focus = state.focus === d.focus ? null : d.focus
+    return render()
+  }
   if (d.go) return go(d.go)
   if (d.range) {
     state.range = d.range
@@ -3230,7 +3509,8 @@ $app.addEventListener('click', async (e) => {
 
   switch (d.action) {
     case 'new':
-      state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], counts: {}, manual: [] }
+      // by＝誰盤的（共用名單裡的名字）
+      state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], counts: {}, manual: [], by: ls.get(LS.memberName) || '' }
       return go('capture')
     case 'analyze':
       state.session.place = document.getElementById('place')?.value.trim() || ''
@@ -3330,10 +3610,12 @@ $app.addEventListener('click', async (e) => {
       }
       toast('已開啟同步，第一次上傳中…（照片多會比較久）')
       render()
-      return syncNow((m) => toast(m))
-        .then((r) => toast(`同步完成：上傳 ${r.pushed} 筆。接著按「複製連結碼」貼到另一台`))
+      syncNow((m) => toast(m))
+        .then((r) => toast(`同步完成：上傳 ${r.pushed} 筆。接著到「共用設定」邀請同事`))
         .catch((err) => toast(`同步沒成功：${err.message}`))
         .finally(() => state.view === 'settings' && render())
+      // 先問名字：大家會看到「誰盤的」
+      return nameSheet('owner', '你的名字？', '大家會在盤點紀錄看到是誰盤的（例如：小宇、店長）。')
     }
     case 'sync-link': {
       const code = parseLinkCode(document.getElementById('link-code').value)
@@ -3356,43 +3638,11 @@ $app.addEventListener('click', async (e) => {
         .catch((err) => toast(`同步沒成功：${err.message}`))
         .finally(() => render())
     }
-    case 'sync-rekey': {
-      if (!confirm('換新的同步密碼？\n換完後，其他裝置（同事、電腦）要重新貼上新的連結碼才會繼續同步。')) return
-      const newKey = newSyncKey()
-      try {
-        await postSync({ action: 'rekey', newKey })
-      } catch (err) {
-        return toast(err.message)
-      }
-      ls.set(LS.syncKey, newKey)
-      try {
-        await navigator.clipboard.writeText(linkCode())
-        toast('已換新密碼，新的連結碼已複製：私訊給還要一起盤點的人')
-      } catch {
-        toast('已換新密碼：按「複製連結碼」給還要一起盤點的人')
-      }
-      return render()
-    }
-    case 'sync-leave': {
-      if (!confirm('這台退出同步，並清除這台的盤點紀錄、品項庫、樣品照、儲位？\n雲端和其他裝置的資料不會刪。API Key 也會一起清掉。')) return
-      clearTimeout(syncTimer)
-      for (const k of [LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog]) ls.set(k, '')
-      // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
-      await idb.sessions.clear()
-      await idb.items.clear()
-      await idb.samples.clear()
-      itemsCache = null
-      state.session = null
-      toast('這台已退出同步，資料已清除')
-      return go('home')
-    }
-    case 'sync-copy':
-      try {
-        await navigator.clipboard.writeText(linkCode())
-        return toast('已複製連結碼：私訊給同事或自己，到另一台的「設定 → 多人、多台同步」貼上')
-      } catch {
-        return toast('這個瀏覽器不讓複製')
-      }
+    case 'share-open':
+      return shareSheet()
+    case 'sync-leave':
+      if (!confirm('這台退出同步，並清除這台的盤點紀錄、品項庫、樣品照、儲位？\n雲端和其他人的資料不會刪。API Key 也會一起清掉。')) return
+      return wipeLocal('這台已退出同步，資料已清除')
     case 'sync-now':
       if (!syncReady()) return go('settings')
       toast('同步中…')

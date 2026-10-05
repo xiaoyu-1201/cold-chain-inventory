@@ -14,35 +14,57 @@
  * - 最新一次：最近一次盤點的品項與數量，數量多的排前面（自動計算）
  * - 品項庫：料號、實盤、帳面、差異、剩幾個要叫貨、該叫貨（每次同步整張更新，不要手動改）
  *
- * 多台裝置同步（手機、電腦看到同一份資料）：
+ * 多人同步（手機、電腦、同事看到同一份資料）：
  * - 盤點紀錄（含照片）、品項庫、儲位、樣品照存在你自己的 Google 雲端硬碟「拍照盤點同步資料（不要刪）」資料夾。
- * - 第一台開啟同步時會設定「同步密碼」（存在這個程式的指令碼屬性 SYNC_KEY）；之後每次讀寫都要帶對密碼，只有網址讀不到資料。
- * - 忘記密碼（例如手機重設）：Apps Script 左邊「專案設定」→ 最下面「指令碼屬性」→ 刪掉 SYNC_KEY，再從 App 重新開啟同步。
+ * - 權限像 Google 雲端硬碟的「共用」：擁有者（第一台）、管理員（可以邀請／移除人）、編輯者（可以盤點、修改）、檢視者（只能看）。
+ * - 每個人一組自己的連結碼（只存雜湊值）；有人離職，管理員在 App 按「移除權限」，只有他失效，其他人不用改；被移除的裝置下次連線會自動清除資料。
+ * - 擁有者的手機不見了：Apps Script 左邊「專案設定」→ 最下面「指令碼屬性」→ 刪掉 SYNC_KEY，再從 App 重新開啟同步（其他人的權限會保留）。
  */
 const RAW = '盤點紀錄'
 const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID']
+const SYNC_ACTIONS = ['push', 'pull', 'members', 'invite', 'remove', 'setRole', 'rename', 'reissue']
+const ROLE_NAME = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 
 function doPost(e) {
   const data = JSON.parse(e.postData.contents)
-  // 同步密碼：設定過就一定要帶對。還沒設定時，只有使用者在 App 按「開啟同步」（hello）才能設定；
-  // 背景自動同步（push／pull）不能設定，也讀不到任何資料（避免還開著的舊裝置搶先設定）
+  // 一次讀完全部設定（讀寫次數有每日上限）
   const props = PropertiesService.getScriptProperties()
-  let saved = props.getProperty('SYNC_KEY')
-  if (!saved && data.action === 'hello' && data.key && String(data.key).length >= 16) {
+  const P = props.getProperties()
+  // 還沒開啟同步：只有使用者在 App 按「開啟同步」（hello）才能設定擁有者；背景同步不能設定，也讀不到資料
+  if (!P.SYNC_KEY && data.action === 'hello' && data.key && String(data.key).length >= 16) {
     props.setProperty('SYNC_KEY', String(data.key))
-    saved = String(data.key)
+    P.SYNC_KEY = String(data.key)
   }
-  if (saved && data.key !== saved) return json({ ok: false, error: '同步密碼不對：請在已經連好的那台裝置按「複製連結碼」，貼到這台' })
-  if (!saved && ['push', 'pull', 'rekey'].indexOf(data.action) >= 0) return json({ ok: false, error: '還沒開啟同步：請在第一台裝置按「開啟多台同步」' })
-  if (data.action === 'hello') return json({ ok: true, sheet: SpreadsheetApp.getActiveSpreadsheet().getName() })
-  // 換同步密碼（有人離職、連結碼外流）：要先帶對舊密碼；換完舊的連結碼全部失效
-  if (data.action === 'rekey') {
-    if (!data.newKey || String(data.newKey).length < 16) return json({ ok: false, error: '新密碼太短' })
-    props.setProperty('SYNC_KEY', String(data.newKey))
+  const syncOn = !!P.SYNC_KEY
+  const who = syncOn ? whoIs(P, data.key) : null
+  if (syncOn && !who) {
+    const revoked = JSON.parse(P.SYNC_REVOKED || '[]').indexOf(sha(data.key || '')) >= 0
+    return json({ ok: false, revoked: revoked, error: revoked ? '這台已經被移除權限，不能再同步' : '連結碼不對或已經失效：請找管理員要一個新的連結碼' })
+  }
+  if (!syncOn && (data.action === 'hello' || SYNC_ACTIONS.indexOf(data.action) >= 0)) return json({ ok: false, error: '還沒開啟同步：請在第一台裝置按「開啟多人同步」' })
+  if (who) touchSeen(props, P, who)
+  // 搬家（例如從個人帳號搬到公司帳號）：只有擁有者能做；搬完後，舊的位置會告訴每台 App 新網址，大家自動跟過去
+  if (who && who.role === 'owner' && data.action === 'exportMembers') return json({ ok: true, members: membersOf(P), revokedHashes: JSON.parse(P.SYNC_REVOKED || '[]'), ownerName: P.SYNC_OWNER_NAME || '' })
+  if (who && who.role === 'owner' && data.action === 'importMembers') {
+    props.setProperty('SYNC_MEMBERS', JSON.stringify(data.members || []))
+    props.setProperty('SYNC_REVOKED', JSON.stringify(data.revokedHashes || []))
+    if (data.ownerName) props.setProperty('SYNC_OWNER_NAME', String(data.ownerName))
     return json({ ok: true })
   }
-  if (data.action === 'push') return json(syncPush(data))
-  if (data.action === 'pull') return json(syncPull(data))
+  if (who && who.role === 'owner' && data.action === 'moveTo') {
+    if (data.url) props.setProperty('SYNC_MOVED', String(data.url))
+    else props.deleteProperty('SYNC_MOVED')
+    return json({ ok: true })
+  }
+  if (who && P.SYNC_MOVED) return json({ ok: false, moved: P.SYNC_MOVED, error: '資料已經搬到新的位置' })
+  const me = who ? { role: who.role, name: who.name, id: who.id } : {}
+  const canEdit = !who || who.role !== 'viewer'
+  const canManage = who && (who.role === 'owner' || who.role === 'manager')
+  if (data.action === 'hello') return json({ ok: true, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me })
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { me: me }))
+  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P), { me: me }) : { ok: false, viewer: true, me: me, error: '你是檢視者，只能看' })
+  if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
+  if (!canEdit) return json({ ok: false, viewer: true, error: '你是檢視者，只能看' })
   const lock = LockService.getScriptLock()
   lock.waitLock(20000)
   try {
@@ -80,14 +102,122 @@ function json(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON)
 }
 
+// ───────────── 共用的人與權限 ─────────────
+/** 連結碼只存雜湊值（SHA-256）：就算有人看到設定，也拿不到別人的連結碼 */
+function sha(text) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(text), Utilities.Charset.UTF_8)
+    .map(function (b) {
+      return ((b + 256) % 256).toString(16).padStart(2, '0')
+    })
+    .join('')
+}
+function membersOf(P) {
+  return JSON.parse(P.SYNC_MEMBERS || '[]')
+}
+/** 這個連結碼是誰：擁有者（第一台）或共用名單裡的人 */
+function whoIs(P, key) {
+  if (!key) return null
+  if (key === P.SYNC_KEY) return { id: 'owner', name: P.SYNC_OWNER_NAME || '擁有者', role: 'owner' }
+  const h = sha(key)
+  const m = membersOf(P).filter(function (x) {
+    return x.h === h
+  })[0]
+  return m ? { id: m.id, name: m.name, role: m.role } : null
+}
+/** 最後上線時間：超過 10 分鐘才寫一次（省讀寫次數） */
+function touchSeen(props, P, who) {
+  const now = Date.now()
+  if (who.id === 'owner') {
+    if (now - Number(P.SYNC_OWNER_SEEN || 0) > 600000) props.setProperty('SYNC_OWNER_SEEN', String(now))
+    return
+  }
+  const list = membersOf(P)
+  const m = list.filter(function (x) {
+    return x.id === who.id
+  })[0]
+  if (m && now - (m.seen || 0) > 600000) {
+    m.seen = now
+    props.setProperty('SYNC_MEMBERS', JSON.stringify(list))
+  }
+}
+/** 管理共用的人（擁有者、管理員才能用） */
+function manage(data, props, P, who) {
+  const lock = LockService.getScriptLock()
+  lock.waitLock(20000)
+  try {
+    // 鎖住後重新讀（別的管理員可能剛改過）
+    const list = JSON.parse(props.getProperty('SYNC_MEMBERS') || '[]')
+    const find = function (id) {
+      return list.filter(function (x) {
+        return x.id === id
+      })[0]
+    }
+    const save = function () {
+      props.setProperty('SYNC_MEMBERS', JSON.stringify(list))
+    }
+    const okRole = function (r) {
+      return r === 'manager' || r === 'editor' || r === 'viewer'
+    }
+    if (data.action === 'members') {
+      const people = [{ id: 'owner', name: P.SYNC_OWNER_NAME || '擁有者', role: 'owner', seen: Number(P.SYNC_OWNER_SEEN || 0) }].concat(
+        list.map(function (m) {
+          return { id: m.id, name: m.name, role: m.role, at: m.at, seen: m.seen || 0 }
+        }),
+      )
+      return { ok: true, people: people }
+    }
+    if (data.action === 'invite') {
+      const name = String(data.name || '').trim().slice(0, 30)
+      if (!name) return { ok: false, error: '請填名字' }
+      if (!okRole(data.role)) return { ok: false, error: '權限不對' }
+      if (!data.newKey || String(data.newKey).length < 16) return { ok: false, error: '連結碼太短' }
+      const id = Utilities.getUuid()
+      list.push({ id: id, name: name, role: data.role, h: sha(data.newKey), at: Date.now(), seen: 0 })
+      save()
+      return { ok: true, id: id }
+    }
+    if (data.id === 'owner') {
+      // 擁有者不能被移除、不能被改權限；只能改名字
+      if (data.action === 'rename' && who.role === 'owner') {
+        props.setProperty('SYNC_OWNER_NAME', String(data.name || '').trim().slice(0, 30) || '擁有者')
+        return { ok: true }
+      }
+      return { ok: false, error: '擁有者不能被移除或改權限' }
+    }
+    const m = find(data.id)
+    if (!m) return { ok: false, error: '找不到這個人（可能已經被移除）' }
+    if (data.action === 'setRole') {
+      if (!okRole(data.role)) return { ok: false, error: '權限不對' }
+      m.role = data.role
+    } else if (data.action === 'rename') {
+      m.name = String(data.name || '').trim().slice(0, 30) || m.name
+    } else if (data.action === 'reissue' || data.action === 'remove') {
+      // 舊的連結碼列入黑名單：那台下次連線會自動清除資料
+      const revoked = JSON.parse(props.getProperty('SYNC_REVOKED') || '[]')
+      revoked.push(m.h)
+      props.setProperty('SYNC_REVOKED', JSON.stringify(revoked.slice(-500)))
+      if (data.action === 'remove') list.splice(list.indexOf(m), 1)
+      else {
+        if (!data.newKey || String(data.newKey).length < 16) return { ok: false, error: '連結碼太短' }
+        m.h = sha(data.newKey)
+        m.seen = 0
+      }
+    }
+    save()
+    return { ok: true }
+  } finally {
+    lock.releaseLock()
+  }
+}
+
 // ───────────── 多台裝置同步：資料存在雲端硬碟，一筆一個檔案＋一個目錄檔（index.json） ─────────────
 /**
  * 目錄：{ 鍵: { t: 裝置上的修改時間, s: 收到的順序（這邊的時間）, d: 哪一台送的, f: 檔案 ID, del: 是否已刪除 } }
  * 鍵例如 session:xxx（一次盤點，含照片）、item:xxx（品項）、sample:xxx（樣品照）、settings（儲位、品項清單）
  */
-function syncFolder() {
+function syncFolder(P) {
   const props = PropertiesService.getScriptProperties()
-  const id = props.getProperty('SYNC_FOLDER')
+  const id = P.SYNC_FOLDER
   if (id) {
     try {
       return DriveApp.getFolderById(id)
@@ -97,6 +227,7 @@ function syncFolder() {
   }
   const folder = DriveApp.createFolder('拍照盤點同步資料（不要刪）')
   props.setProperty('SYNC_FOLDER', folder.getId())
+  P.SYNC_FOLDER = folder.getId()
   return folder
 }
 function readIndex(folder) {
@@ -112,14 +243,13 @@ function writeIndex(folder, idx) {
 }
 
 /** 上傳：比較新的才寫（以裝置上的修改時間為準）；舊檔案丟到垃圾桶 */
-function syncPush(data) {
+function syncPush(data, props, P) {
   const lock = LockService.getScriptLock()
   lock.waitLock(30000)
   try {
-    const folder = syncFolder()
+    const folder = syncFolder(P)
     const idx = readIndex(folder)
-    // 順序號一定越來越大（同一毫秒兩次上傳也不會重複），下載時才不會漏
-    const props = PropertiesService.getScriptProperties()
+    // 順序號一定越來越大（同一毫秒兩次上傳也不會重複），下載時才不會漏；鎖住後重新讀一次，別人剛寫的才不會被蓋掉
     let seq = Math.max(Date.now(), Number(props.getProperty('SYNC_SEQ') || 0) + 1)
     let n = 0
     const skipped = []
@@ -150,8 +280,8 @@ function syncPush(data) {
 }
 
 /** 下載：別台送來、比 since 新的；一次最多約 8 MB 或 60 筆，more＝還有 */
-function syncPull(data) {
-  const folder = syncFolder()
+function syncPull(data, P) {
+  const folder = syncFolder(P)
   const idx = readIndex(folder)
   const since = Number(data.since) || 0
   const dev = String(data.dev || '')
