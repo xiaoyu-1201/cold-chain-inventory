@@ -28,6 +28,8 @@ const LS = {
   memberName: 'inventory:memberName',
   memberRole: 'inventory:memberRole',
   memberId: 'inventory:memberId',
+  roster: 'inventory:roster',
+  counterId: 'inventory:counterId',
 }
 /** 檢視者不能用的動作 */
 const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick'])
@@ -37,9 +39,25 @@ const ROLE_DESC = { owner: '全部都可以；不能被移除', manager: '可以
 const myRole = () => (ls.get(LS.syncKey) ? ls.get(LS.memberRole) || 'editor' : 'owner')
 const canEdit = () => myRole() !== 'viewer'
 const canManage = () => ['owner', 'manager'].includes(myRole())
+/** 共用名單（只有名字）：顯示「誰盤的」用；名字改了，以前的紀錄也顯示新名字 */
+const roster = () => {
+  try {
+    return JSON.parse(ls.get(LS.roster, '[]')) || []
+  } catch {
+    return []
+  }
+}
+const personName = (id, fallback = '') => roster().find((p) => p.id === id)?.name || fallback
+/** 這台的盤點人：預設是這台的使用者；擁有者／管理員可以在設定改（例如店裡共用的平板） */
+const currentCounter = () => {
+  const id = ls.get(LS.counterId) || ls.get(LS.memberId)
+  const name = personName(id, id === ls.get(LS.memberId) ? ls.get(LS.memberName) : '')
+  return id && name ? { id, name } : null
+}
+const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.3（10/5・共用權限：只能看／可以改、移除、搬家）'
+const VERSION = '3.4（10/5・盤點人：預先選好、管理員可改）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1164,7 +1182,7 @@ async function viewHome() {
         ? `<div class="group">${sessions
             .map((s) => {
               const failed = s.photos.length && s.photos.every((p) => p.status !== 'done')
-              const meta = [fmtTime(s.createdAt), s.place && placeLabel(s.place), s.by && `${s.by} 盤`, s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.linkedAt ? '' : '還沒按完成', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
+              const meta = [byName(s) ? `${byName(s)} 盤・${fmtTime(s.createdAt)}` : fmtTime(s.createdAt), s.place && placeLabel(s.place), s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.linkedAt ? '' : '還沒按完成', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
               return `<button class="row" data-open="${s.id}"><img src="${s.photos[0] ? urlOf(s.photos[0]) : ''}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)"><span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>${chev}</button>`
             })
             .join('')}</div>`
@@ -1180,6 +1198,11 @@ function viewCapture() {
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}</div>
     <h1 class="large-title">新盤點</h1>
+    ${
+      s.by
+        ? `<div class="group" style="margin-bottom:10px"><div class="row"><span style="width:96px" class="muted">盤點人</span><span class="grow"><b>${esc(s.by)}</b></span><span class="muted" style="font-size:14px">${canManage() ? '' : '由管理員設定'}</span>${canManage() ? '<button class="btn small plain" data-action="counter-session">換人</button>' : ''}</div></div>`
+        : ''
+    }
     <div class="group"><label class="row"><span style="width:96px" class="muted">位置</span><input class="inline" id="place" placeholder="${locations().length ? '點下面的儲位；拍到標籤也會自動填' : '例：A-01（拍到儲位標籤會自動填）'}" value="${esc(s.place)}" autocomplete="off"></label></div>
     ${
       locations().length
@@ -1252,7 +1275,11 @@ function viewReview() {
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}<button class="btn small secondary edit-only" data-action="add">＋ 手動新增</button></div>
     <h1 class="large-title">${esc(s.place ? placeLabel(s.place) : '盤點結果')}</h1>
-    <p class="subtitle">${fmtTime(s.createdAt)}${s.by ? `・${esc(s.by)} 盤` : ''}${s.model ? `・${esc(s.model)}` : ''}</p>
+    ${
+      byName(s) || syncReady()
+        ? `<div class="by-line"><span class="avatar small" aria-hidden="true">${esc((byName(s) || '?').slice(0, 1))}</span><span class="grow"><b>盤點人：${esc(byName(s) || '沒有記錄')}</b><br><span class="meta">${fmtTime(s.createdAt)}${s.model ? `・${esc(s.model)}` : ''}</span></span>${canManage() && syncReady() ? '<button class="btn small plain" data-action="counter-session">更正</button>' : ''}</div>`
+        : `<p class="subtitle">${fmtTime(s.createdAt)}${s.model ? `・${esc(s.model)}` : ''}</p>`
+    }
     ${errors ? `<div class="stack">${errors}</div>` : ''}
     ${
       groups.length
@@ -1380,6 +1407,9 @@ async function viewSettings() {
       syncReady()
         ? `<div class="group">
             <div class="row"><span class="avatar" aria-hidden="true">${esc((ls.get(LS.memberName) || '我').slice(0, 1))}</span><span class="grow"><span class="title">${esc(ls.get(LS.memberName) || '我')}（這台）</span><br><span class="meta">${ROLE_LABEL[myRole()]}・${state.syncState === 'error' && state.syncError ? esc(state.syncError) : esc(syncLabel())}</span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
+            <div class="row"><span class="grow"><span class="title">這台的盤點人</span><br><span class="meta">新盤點會自動記成這個人，不用每次選${canManage() ? '' : '；由擁有者或管理員設定'}</span></span>${
+              canManage() ? `<button class="btn small secondary" data-action="counter-device">${esc(currentCounter()?.name || '選擇')}</button>` : `<b>${esc(currentCounter()?.name || '—')}</b>`
+            }</div>
             ${
               canManage()
                 ? `<button class="row" data-action="share-open"><span class="grow"><span class="title" style="color:var(--tint)">共用設定</span><br><span class="meta">邀請同事、改權限（只能看／可以改）、移除離職的人</span></span>${chev}</button>`
@@ -2637,13 +2667,20 @@ async function postSync(body) {
       setTimeout(render, 0)
     }
   }
+  if (Array.isArray(data.roster) && data.roster.length) {
+    const changed = JSON.stringify(data.roster) !== ls.get(LS.roster)
+    ls.set(LS.roster, JSON.stringify(data.roster))
+    // 選的盤點人被移除了：改回這台自己
+    if (ls.get(LS.counterId) && !data.roster.some((p) => p.id === ls.get(LS.counterId))) ls.set(LS.counterId, '')
+    if (changed && ['home', 'review', 'settings', 'capture'].includes(state.view)) setTimeout(render, 0)
+  }
   if (!data.ok) throw new Error(data.error || '同步失敗')
   return data
 }
 /** 清除這台的資料（退出同步、被移除權限時） */
 async function wipeLocal(msg) {
   clearTimeout(syncTimer)
-  for (const k of [LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId]) ls.set(k, '')
+  for (const k of [LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId]) ls.set(k, '')
   // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
   await idb.sessions.clear()
   await idb.items.clear()
@@ -2962,6 +2999,25 @@ function shareSheet() {
     },
   )
 }
+/** 選盤點人：共用名單裡的人（名字由擁有者／管理員取） */
+function counterSheet(currentId, title, sub, onPick) {
+  const people = roster()
+  if (!people.length) return toast('同步一次後才有名單；先按「立即同步」')
+  sheet(
+    `<h2 class="sheet-title">${esc(title)}</h2><p class="sheet-sub">${esc(sub)}</p>
+     <div class="group">${people
+       .map((p) => `<button class="row" data-pick="${esc(p.id)}" ${p.id === currentId ? 'aria-current="true"' : ''}><span class="avatar" aria-hidden="true">${esc(p.name.slice(0, 1))}</span><span class="grow"><span class="title">${esc(p.name)}</span></span>${p.id === currentId ? '<span class="muted">✓</span>' : ''}</button>`)
+       .join('')}</div>
+     <p class="footnote">名單裡沒有的人：到「共用設定」邀請，名字由擁有者或管理員取。</p>`,
+    (el, close) =>
+      el.querySelectorAll('[data-pick]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          close()
+          await onPick(people.find((p) => p.id === b.dataset.pick))
+        }),
+      ),
+  )
+}
 /** 邀請完：顯示只給這個人的連結碼（關掉就看不到了，雲端只存雜湊值） */
 function linkSheet(name, role, code, appUrl) {
   const text = `拍照盤點的連結碼（只給你用，不要轉傳）：\n${code}\n\n打開 ${appUrl} → 右上「設定」→「我收到連結碼了」→ 貼上 → 加入`
@@ -3119,7 +3175,7 @@ function reportOf(sessions) {
       const it = items.get(k)
       it.total += count
       it.places.set(place, (it.places.get(place) || 0) + count)
-      detail.push({ date: ymd(s.createdAt), time: hm(s.createdAt), place: s.place || '', label: g.label, brand: g.brand, model: g.model, spec: g.spec, count, boxes: g.manual ? '' : g.boxes, source: g.manual ? '手動' : g.edited ? 'AI（有修正）' : 'AI', id: s.id })
+      detail.push({ date: ymd(s.createdAt), time: hm(s.createdAt), place: s.place || '', label: g.label, brand: g.brand, model: g.model, spec: g.spec, count, boxes: g.manual ? '' : g.boxes, source: g.manual ? '手動' : g.edited ? 'AI（有修正）' : 'AI', id: s.id, by: byName(s) })
     }
   }
   const list = [...items.values()].sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.brand, b.brand))
@@ -3133,10 +3189,10 @@ function reportXlsx(sessions, items = []) {
   const r = reportOf(sessions)
   return makeXlsx([
     { name: '總表', rows: [['品名', '尺寸／規格', '品牌', '型號', '總數量', '在哪裡（位置 數量）'], ...r.list.map((it) => [it.label, it.spec, it.brand, it.model, it.total, placesText(it)])] },
-    { name: '明細', rows: [['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源'], ...r.detail.map((d) => [d.date, d.time, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source])] },
+    { name: '明細', rows: [['盤點日期', '時間', '盤點人', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源'], ...r.detail.map((d) => [d.date, d.time, d.by, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source])] },
     {
       name: '盤點清單',
-      rows: [['盤點時間', '位置', '照片張數', '種類', '件數', '辨識模型'], ...[...sessions].sort((a, b) => a.createdAt - b.createdAt).map((s) => [`${ymd(s.createdAt)} ${hm(s.createdAt)}`, s.place || '', s.photos.length, groupsOf(s).length, totalQty(s), s.model || ''])],
+      rows: [['盤點時間', '盤點人', '位置', '照片張數', '種類', '件數', '辨識模型'], ...[...sessions].sort((a, b) => a.createdAt - b.createdAt).map((s) => [`${ymd(s.createdAt)} ${hm(s.createdAt)}`, byName(s), s.place || '', s.photos.length, groupsOf(s).length, totalQty(s), s.model || ''])],
     },
     ...(items.length ? itemSheets(items) : []),
   ])
@@ -3156,7 +3212,7 @@ const reportTsv = (sessions) => {
 async function syncToSheet(sessions) {
   const url = ls.get(LS.sheet)
   if (!url) throw new Error('還沒設定 Google 試算表')
-  const rows = reportOf(sessions).detail.map((d) => [d.date, d.time, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source, d.id])
+  const rows = reportOf(sessions).detail.map((d) => [d.date, d.time, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source, d.id, d.by])
   // 品項庫整張一起送（試算表那邊整張覆蓋「品項庫」工作表；舊版試算表程式碼會忽略）
   const items = [ITEM_HEAD, ...itemRows(await itemsAll())]
   const body = JSON.stringify({ rows, items, key: ls.get(LS.syncKey) || undefined, dev: deviceId() })
@@ -3509,8 +3565,8 @@ $app.addEventListener('click', async (e) => {
 
   switch (d.action) {
     case 'new':
-      // by＝誰盤的（共用名單裡的名字）
-      state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], counts: {}, manual: [], by: ls.get(LS.memberName) || '' }
+      // 盤點人＝這台選好的人（不用每次選；擁有者／管理員可以在設定改）
+      state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], counts: {}, manual: [], by: currentCounter()?.name || '', byId: currentCounter()?.id || '' }
       return go('capture')
     case 'analyze':
       state.session.place = document.getElementById('place')?.value.trim() || ''
@@ -3640,6 +3696,24 @@ $app.addEventListener('click', async (e) => {
     }
     case 'share-open':
       return shareSheet()
+    case 'counter-device':
+    case 'counter-session': {
+      if (!canManage()) return toast('只有擁有者和管理員可以改盤點人')
+      const forSession = d.action === 'counter-session'
+      const s = state.session
+      const cur = forSession ? s?.byId : currentCounter()?.id
+      return counterSheet(cur, forSession ? '這次是誰盤的？' : '這台的盤點人', forSession ? '盤點時間不會變。' : '之後在這台按「新盤點」，都會記成這個人（例如店裡共用的平板）。', async (p) => {
+        if (forSession) {
+          Object.assign(s, { by: p.name, byId: p.id })
+          await save()
+          toast(`盤點人改成「${p.name}」`)
+        } else {
+          ls.set(LS.counterId, p.id === ls.get(LS.memberId) ? '' : p.id)
+          toast(`這台的盤點人：${p.name}`)
+        }
+        render()
+      })
+    }
     case 'sync-leave':
       if (!confirm('這台退出同步，並清除這台的盤點紀錄、品項庫、樣品照、儲位？\n雲端和其他人的資料不會刪。API Key 也會一起清掉。')) return
       return wipeLocal('這台已退出同步，資料已清除')

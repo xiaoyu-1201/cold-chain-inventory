@@ -21,7 +21,7 @@
  * - 擁有者的手機不見了：Apps Script 左邊「專案設定」→ 最下面「指令碼屬性」→ 刪掉 SYNC_KEY，再從 App 重新開啟同步（其他人的權限會保留）。
  */
 const RAW = '盤點紀錄'
-const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID']
+const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID', '盤點人']
 const SYNC_ACTIONS = ['push', 'pull', 'members', 'invite', 'remove', 'setRole', 'rename', 'reissue']
 const ROLE_NAME = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 
@@ -60,8 +60,16 @@ function doPost(e) {
   const me = who ? { role: who.role, name: who.name, id: who.id } : {}
   const canEdit = !who || who.role !== 'viewer'
   const canManage = who && (who.role === 'owner' || who.role === 'manager')
-  if (data.action === 'hello') return json({ ok: true, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me })
-  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { me: me }))
+  // 名單（只有名字，給每台 App 顯示「誰盤的」、選盤點人；名字只有擁有者／管理員能改）
+  const roster = who
+    ? [{ id: 'owner', name: P.SYNC_OWNER_NAME || '擁有者' }].concat(
+        membersOf(P).map(function (m) {
+          return { id: m.id, name: m.name }
+        }),
+      )
+    : []
+  if (data.action === 'hello') return json({ ok: true, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster })
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { me: me, roster: roster }))
   if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P), { me: me }) : { ok: false, viewer: true, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
   if (!canEdit) return json({ ok: false, viewer: true, error: '你是檢視者，只能看' })
@@ -72,6 +80,7 @@ function doPost(e) {
     const sh = ensureRaw(ss)
     const rows = (data.rows || []).map((r) => {
       const row = r.slice(0, HEAD.length)
+      while (row.length < HEAD.length) row.push('') // 舊版 App 少送「盤點人」
       row[0] = new Date(String(row[0]) + 'T00:00:00') // 盤點日期存成真的日期，才能排序、篩選
       return row
     })
@@ -324,8 +333,9 @@ function ensureRaw(ss) {
   if (sh.getLastRow() === 0) {
     sh.appendRow(HEAD)
     sh.setFrozenRows(1)
-    sh.getRange(1, 1, 1, HEAD.length).setFontWeight('bold').setBackground('#e8f0fe')
   }
+  // 以前建立的工作表少了新欄位（例如「盤點人」）：補上標題
+  sh.getRange(1, 1, 1, HEAD.length).setValues([HEAD]).setFontWeight('bold').setBackground('#e8f0fe')
   return sh
 }
 

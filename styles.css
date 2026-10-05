@@ -948,6 +948,29 @@ body.read-only .view-only {
   font-weight: 700;
   font-size: 16px;
 }
+.avatar.small {
+  width: 32px;
+  height: 32px;
+  font-size: 15px;
+}
+/* 結果頁：盤點人＋時間 */
+.by-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: -6px 0 14px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--card);
+}
+.by-line .meta {
+  color: var(--text-2);
+  font-size: 14px;
+}
+.by-line .grow {
+  flex: 1;
+  min-width: 0;
+}
 .avatar.lock {
   background: var(--card-2);
   font-size: 16px;
