@@ -1,7 +1,7 @@
 {
-  "name": "拍照盤點（冷凍材料）",
-  "short_name": "拍照盤點",
-  "description": "拍貨架，AI 辨識品項與數量，原圖對照修正，存檔匯出。",
+  "name": "聖佳智慧庫存",
+  "short_name": "聖佳庫存",
+  "description": "聖佳冷凍材料的智慧庫存工具：拍貨架 AI 盤點、品項庫、查型號與替代品、盤差與複盤。",
   "lang": "zh-Hant",
   "start_url": "./",
   "scope": "./",

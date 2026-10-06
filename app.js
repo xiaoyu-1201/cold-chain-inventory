@@ -1,5 +1,5 @@
 /**
- * 拍照盤點（冷凍材料行）
+ * 聖佳智慧庫存（聖佳冷凍材料；原名「拍照盤點」）
  * 拍貨架 → Gemini 視覺模型找出每個商品並框起來 → 原圖對照、＋／－ 修正 → 存在手機；總表一次匯出 Excel、同步 Google 試算表。
  * 品項庫：按「完成」時自動長出來（料號、各位置數量、帳面數、安全庫存）；查型號：拍標籤或打型號 → 解讀、店裡有沒有、替代品。
  * 沒有後端：API Key 只存在這支手機（localStorage），照片只送到 Google Gemini 分析。
@@ -65,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.8（10/6・平板、電腦寬版）'
+const VERSION = '3.9（10/6・改名：聖佳智慧庫存）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1310,7 +1310,7 @@ const TABS = [
  * 手機：底部分頁列（只在三個主頁）。平板、電腦（≥768px）：同一個元素變成左邊側邊欄，每一頁都有（sub＝子頁面，手機不顯示）。
  */
 const tabBar = (active, sub = false) =>
-  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only">拍照盤點</div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
+  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only">聖佳智慧庫存</div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
 /** 子頁面屬於哪一個主頁（側邊欄標哪一個） */
 const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', lookup: 'lookup', settings: 'settings' }
 
@@ -1321,7 +1321,7 @@ async function viewHome() {
   return `
   <main class="app">
     <div class="nav">${syncReady() ? `<button class="btn small plain sync-pill ${state.syncState || ''}" data-action="sync-now">☁︎ ${esc(syncLabel())}</button>` : '<span></span>'}<button class="icon-btn" data-go="settings" aria-label="設定"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.6 7.6 0 0 0-1.68-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.61-.25 1.17-.58 1.68-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.1-1.65Z"/></svg></button></div>
-    <h1 class="large-title">拍照盤點</h1>
+    <h1 class="large-title">聖佳智慧庫存</h1>
     <p class="subtitle">拍貨架，AI 數品項；跟原圖對照，再用 ＋／－ 修正。</p>
     <div class="home-cards">
     ${
@@ -1641,7 +1641,7 @@ async function viewSettings() {
     <p class="section-title">資料</p>
     <div class="row-actions edit-only"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>
     <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
-    <p class="footnote" style="margin-top:18px;text-align:center">拍照盤點 版本 ${VERSION}</p>
+    <p class="footnote" style="margin-top:18px;text-align:center">聖佳智慧庫存 版本 ${VERSION}</p>
     <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
     <p class="footnote" style="text-align:center">有新版會自動更新；不放心就按這裡。盤點紀錄、樣品照、API Key 都不會被刪。</p>
   </main>`
@@ -2555,7 +2555,7 @@ function itemsMoreSheet() {
       }
       el.querySelector('#m-backup').onclick = async () => {
         close()
-        downloadBlob(await backupBlob(), `拍照盤點備份_${ymd(Date.now())}.json`)
+        downloadBlob(await backupBlob(), `聖佳庫存備份_${ymd(Date.now())}.json`)
         toast('已下載備份檔：存到雲端硬碟或傳給自己')
       }
       el.querySelector('#m-restore').addEventListener('change', async (e) => {
@@ -2752,7 +2752,7 @@ async function restoreBackup(file) {
   } catch {
     return toast('這個檔案打不開')
   }
-  if (data?.app !== '拍照盤點' || data.kind !== 'backup') return toast('這不是拍照盤點的備份檔')
+  if (data?.app !== '拍照盤點' || data.kind !== 'backup') return toast('這不是聖佳智慧庫存的備份檔')
   if (!confirm(`還原 ${fmtTime(data.at)} 的備份：${data.items?.length || 0} 個品項、${data.locations?.length || 0} 個儲位、${data.samples?.length || 0} 張樣品照。\n同一個品項以備份為準，其他的保留。`)) return
   for (const it of data.items || []) await idb.items.put({ ...it, photo: it.photo ? b64ToBlob(it.photo) : undefined })
   for (const s of data.samples || []) if (s.blob) await idb.samples.put({ ...s, blob: b64ToBlob(s.blob) })
@@ -2830,7 +2830,7 @@ function printLabels() {
   const area = document.createElement('div')
   area.id = 'print-area'
   area.innerHTML = locations()
-    .map((l) => `<div class="label"><div class="label-code">${esc(l.code)}</div>${l.name ? `<div class="label-name">${esc(l.name)}</div>` : ''}<div class="label-foot">拍照盤點・儲位</div></div>`)
+    .map((l) => `<div class="label"><div class="label-code">${esc(l.code)}</div>${l.name ? `<div class="label-name">${esc(l.name)}</div>` : ''}<div class="label-foot">聖佳智慧庫存・儲位</div></div>`)
     .join('')
   document.body.appendChild(area)
   window.print()
@@ -3267,8 +3267,8 @@ function joinSheet(code) {
   }
   clean()
   sheet(
-    `<h2 class="sheet-title">加入公司的拍照盤點</h2>
-     <p class="sheet-sub">你被邀請一起用拍照盤點。加入後，大家盤點的資料會自動同步到這支手機。</p>
+    `<h2 class="sheet-title">加入聖佳智慧庫存</h2>
+     <p class="sheet-sub">你被邀請一起用「聖佳智慧庫存」。加入後，大家盤點的資料會自動同步到這支手機。</p>
      <button class="btn block" id="j-go" style="margin-top:8px">加入</button>
      <p class="footnote" style="margin-top:10px">這個邀請只給你一個人用，請不要轉傳。</p>`,
     (el, close) => {
@@ -3290,7 +3290,7 @@ function joinSheet(code) {
              standalone()
                ? ''
                : `<p class="section-title" style="margin-top:14px">把 App 放到手機桌面，之後比較好找</p>
-                  <ol class="steps-list">${ios ? '<li>按畫面下方的分享鍵（方框加箭頭 ⬆︎）。</li><li>往下滑，按「加入主畫面」→「新增」。</li>' : '<li>按右上角的「⋮」。</li><li>按「加到主畫面」或「安裝應用程式」。</li>'}<li>之後點桌面上的「拍照盤點」就能打開。</li></ol>`
+                  <ol class="steps-list">${ios ? '<li>按畫面下方的分享鍵（方框加箭頭 ⬆︎）。</li><li>往下滑，按「加入主畫面」→「新增」。</li>' : '<li>按右上角的「⋮」。</li><li>按「加到主畫面」或「安裝應用程式」。</li>'}<li>之後點桌面上的「聖佳庫存」就能打開。</li></ol>`
            }
            <button class="btn block" id="j-ok" style="margin-top:12px">知道了</button>`,
           (el2, close2) => (el2.querySelector('#j-ok').onclick = close2),
@@ -3325,7 +3325,7 @@ function shareSheet() {
     return `<div class="row person"><span class="avatar" aria-hidden="true">${esc(p.name.slice(0, 1))}</span><span class="grow"><span class="title">${esc(p.name)}${me ? '（你）' : ''}</span><br><span class="meta">${meta}</span></span>${right}</div>`
   }
   sheet(
-    `<h2 class="sheet-title">共用「拍照盤點」</h2>
+    `<h2 class="sheet-title">共用「聖佳智慧庫存」</h2>
      <div class="form">
        <input class="field" id="sh-name" placeholder="新增使用者：名字（例如 阿明、辦公室電腦）" autocomplete="off">
        <div class="row-actions"><select class="field role-pick" id="sh-role" aria-label="權限"><option value="editor">編輯者（可以盤點、修改）</option><option value="viewer">檢視者（只能看）</option><option value="manager">管理員（也可以加人）</option></select><button class="btn" id="sh-invite">邀請</button></div>
@@ -3427,7 +3427,7 @@ function counterSheet(currentId, title, sub, onPick) {
 function linkSheet(name, role, code, appUrl) {
   // 一鍵加入：同事在 LINE 點連結 → 自動打開 App → 按「加入」（不用自己複製、貼到設定）
   const link = joinLinkOf(code, appUrl)
-  const text = `${name}你好：這是公司「拍照盤點」的邀請，只給你一個人用，請不要轉傳。\n\n點這個連結就會自動加入：\n${link}\n\n打開後按「加入」就好。`
+  const text = `${name}你好：這是公司「聖佳智慧庫存」的邀請，只給你一個人用，請不要轉傳。\n\n點這個連結就會自動加入：\n${link}\n\n打開後按「加入」就好。`
   sheet(
     `<h2 class="sheet-title">邀請「${esc(name)}」</h2>
      <p class="sheet-sub">${ROLE_LABEL[role]}：${ROLE_DESC[role]}</p>

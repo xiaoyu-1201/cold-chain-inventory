@@ -1,11 +1,11 @@
 /**
- * 拍照盤點 → Google 試算表
+ * 聖佳智慧庫存（原名拍照盤點）→ Google 試算表
  * 用法（只要做一次）：
  * 1. 開一個新的 Google 試算表 → 上方「擴充功能」→「Apps Script」
  * 2. 把這整段貼上（取代原本的內容）→ 存檔
  * 3. 右上「部署」→「新增部署作業」→ 類型選「網頁應用程式」
  *    執行身分：我　／　誰可以存取：所有人 → 部署 → 第一次會要你授權（選自己的帳號 → 進階 → 前往）
- * 4. 複製「網頁應用程式網址」（https://script.google.com/macros/s/…/exec），貼到拍照盤點 App 的「設定 → Google 試算表」
+ * 4. 複製「網頁應用程式網址」（https://script.google.com/macros/s/…/exec），貼到聖佳智慧庫存 App 的「設定 → Google 試算表」
  * 之後每次在 App 按「完成」，這次的盤點就會寫進來；同一次盤點重複送，會先刪掉舊的再寫，不會重複。
  *
  * 會自動建立五個工作表（每次同步自動更新；手動改會先跳警告）：
@@ -363,7 +363,7 @@ function styleHeader(sh, width) {
 /** 自動產生的工作表：有人手動改會先跳警告（不會擋住，只是提醒） */
 function protectWarn(sh, unprotectedA1) {
   if (sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).length) return
-  const p = sh.protect().setDescription('由拍照盤點 App 自動產生：請在 App 裡改').setWarningOnly(true)
+  const p = sh.protect().setDescription('由聖佳智慧庫存 App 自動產生：請在 App 裡改').setWarningOnly(true)
   if (unprotectedA1) p.setUnprotectedRanges([sh.getRange(unprotectedA1)])
 }
 function sheetAt(ss, name, index) {
@@ -541,7 +541,7 @@ function writeDashboard(ss, rep) {
   sh.getRange('B1').setValue('盤點總覽').setFontSize(22).setFontWeight('bold')
   sh.getRange('B2').setValue('最後同步：').setFontColor(COLOR.gray)
   sh.getRange('C2').setValue(new Date(rep.at || Date.now())).setNumberFormat('yyyy/mm/dd hh:mm').setFontColor(COLOR.gray).setHorizontalAlignment('left')
-  sh.getRange('E2').setValue('這一頁由拍照盤點 App 自動產生，不用改；細節看後面的工作表。').setFontColor(COLOR.gray)
+  sh.getRange('E2').setValue('這一頁由聖佳智慧庫存 App 自動產生，不用改；細節看後面的工作表。').setFontColor(COLOR.gray)
   const cards = [
     ['品項', items.length, '種商品', COLOR.blue],
     ['實盤總件數', sum(items, function (r) {
