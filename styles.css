@@ -1607,12 +1607,22 @@ a.row {
 /* 首頁多選（像 iPhone 照片的「選取」） */
 .list-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
   gap: 8px;
+  margin-bottom: 6px;
 }
+.list-head .section-title {
+  margin-bottom: 0;
+}
+/* 清單標題右邊的「選取／完成」：iPhone 的純文字按鈕（不要白底，才不會跟下面的卡片黏在一起） */
 .list-head .btn {
-  margin-top: 14px;
+  min-height: 30px;
+  margin: 0 4px 0 0;
+  padding: 0 12px;
+  background: none;
+  box-shadow: none;
+  font-weight: 600;
 }
 .select-chips {
   margin: 4px 0 10px;
