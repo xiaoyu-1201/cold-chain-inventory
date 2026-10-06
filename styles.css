@@ -1387,3 +1387,194 @@ a.row {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+/* ───────── 平板、電腦：左邊側邊欄＋寬版內容（照 Apple 在 iPad、Mac 的排法；手機不變） ───────── */
+.wide-only,
+.tabbar .wide-only,
+.tabbar.sub {
+  display: none;
+}
+@media (min-width: 768px) {
+  :root {
+    --side: 248px;
+    --content: 960px;
+  }
+  /* 底部分頁列 → 左邊側邊欄（每一頁都有） */
+  .tabbar,
+  .tabbar.sub {
+    display: block;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: auto;
+    width: var(--side);
+    padding: calc(var(--safe-t) + 22px) 12px 20px;
+    border-top: 0;
+    border-right: 0.5px solid var(--line);
+    background: color-mix(in srgb, var(--card-2) 70%, var(--bg));
+    overflow-y: auto;
+  }
+  .tabbar .wide-only {
+    display: flex;
+  }
+  .side-head {
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    padding: 2px 12px 18px;
+  }
+  .tabbar .inner {
+    flex-direction: column;
+    gap: 2px;
+    max-width: none;
+  }
+  .tabbar button {
+    flex: none;
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .tabbar button svg {
+    width: 22px;
+    height: 22px;
+    flex: none;
+    color: var(--tint);
+  }
+  .tabbar button:hover {
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+  }
+  .tabbar button[aria-current='page'] {
+    background: var(--tint);
+    color: #fff;
+  }
+  .tabbar button[aria-current='page'] svg {
+    color: #fff;
+  }
+  .tabbar button:active {
+    transform: none;
+  }
+  /* 內容在側邊欄右邊、置中；清單類的頁面可以寬一點 */
+  body[data-view='review'],
+  body[data-view='item'],
+  body[data-view='items'],
+  body[data-view='quality'] {
+    --content: 1240px;
+  }
+  .app {
+    max-width: none;
+    margin: 0 0 0 var(--side);
+    padding: calc(var(--safe-t) + 20px) max(28px, calc((100vw - var(--side) - var(--content)) / 2)) 64px;
+  }
+  body[data-view='review'] .app,
+  body[data-view='capture'] .app {
+    padding-bottom: 110px;
+  }
+  .toolbar {
+    left: var(--side);
+  }
+  .toolbar .inner {
+    max-width: var(--content);
+  }
+  .toast {
+    left: calc(50% + var(--side) / 2);
+    bottom: 32px;
+  }
+  /* 首頁右上的設定：側邊欄已經有了 */
+  body[data-view='home'] .nav [data-go='settings'] {
+    display: none;
+  }
+  /* 跳出的面板：畫面中間的視窗（不是從底部滑上來） */
+  .sheet-backdrop {
+    align-items: center;
+    padding: 24px;
+  }
+  .sheet {
+    max-width: 560px;
+    max-height: 86dvh;
+    border-radius: 20px;
+    padding: 18px 22px 22px;
+    animation: sheet-pop 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .sheet .grabber {
+    display: none;
+  }
+  @keyframes sheet-pop {
+    from {
+      opacity: 0;
+      transform: scale(0.96);
+    }
+  }
+}
+@media (min-width: 768px) and (prefers-reduced-motion: reduce) {
+  .sheet {
+    animation: none;
+  }
+}
+@media (min-width: 1000px) {
+  /* 首頁：新盤點、總表並排；提醒卡占整列 */
+  .home-cards {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 6px 0 4px;
+  }
+  .home-cards > * {
+    margin: 0 !important;
+  }
+  .home-cards > .hint-card,
+  .home-cards > [data-recount-list] {
+    grid-column: 1 / -1;
+  }
+  /* 盤點結果：照片在左（捲動時固定在畫面上）、總結和品項清單在右，邊看照片邊改 */
+  .review-cols {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(340px, 1fr);
+    grid-template-rows: auto 1fr;
+    column-gap: 28px;
+    align-items: start;
+  }
+  .review-photo {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    position: sticky;
+    top: calc(var(--safe-t) + 16px);
+  }
+  .review-photo .photo-wrap {
+    max-width: calc((100dvh - 220px) * var(--ar, 1.333));
+    margin: 0 auto;
+  }
+  .review-top {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .review-side {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  /* 品項頁：左邊庫存、複盤、位置；右邊型號解讀、替代品、進出紀錄 */
+  .detail-cols {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 28px;
+    align-items: start;
+  }
+  /* 品項清單：分類排成兩欄 */
+  .item-secs {
+    columns: 2;
+    column-gap: 24px;
+  }
+  .item-sec {
+    break-inside: avoid;
+  }
+}
+@media (min-width: 1500px) {
+  .item-secs {
+    columns: 3;
+  }
+}

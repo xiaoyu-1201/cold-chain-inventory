@@ -65,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.7（10/6・點邀請連結就加入）'
+const VERSION = '3.8（10/6・平板、電腦寬版）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1297,14 +1297,22 @@ const ICON = {
   home: '<path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 8.5 12 13l8-4.5M12 13v7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
   items: '<rect x="4" y="4" width="16" height="16" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 9h8M8 12.5h8M8 16h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
   lookup: '<circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15 15 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  settings: '<circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4 18 18M6 18l1.6-1.6M16.4 7.6 18 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
 }
+// 設定：手機在首頁右上角；平板、電腦放進左邊側邊欄（wide）
 const TABS = [
   { id: 'home', label: '盤點' },
   { id: 'items', label: '品項' },
   { id: 'lookup', label: '查型號' },
+  { id: 'settings', label: '設定', wide: true },
 ]
-const tabBar = (active) =>
-  `<nav class="tabbar" aria-label="主選單"><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
+/**
+ * 手機：底部分頁列（只在三個主頁）。平板、電腦（≥768px）：同一個元素變成左邊側邊欄，每一頁都有（sub＝子頁面，手機不顯示）。
+ */
+const tabBar = (active, sub = false) =>
+  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only">拍照盤點</div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
+/** 子頁面屬於哪一個主頁（側邊欄標哪一個） */
+const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', lookup: 'lookup', settings: 'settings' }
 
 async function viewHome() {
   const sessions = await db.all()
@@ -1315,6 +1323,7 @@ async function viewHome() {
     <div class="nav">${syncReady() ? `<button class="btn small plain sync-pill ${state.syncState || ''}" data-action="sync-now">☁︎ ${esc(syncLabel())}</button>` : '<span></span>'}<button class="icon-btn" data-go="settings" aria-label="設定"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.6 7.6 0 0 0-1.68-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.61-.25 1.17-.58 1.68-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.1-1.65Z"/></svg></button></div>
     <h1 class="large-title">拍照盤點</h1>
     <p class="subtitle">拍貨架，AI 數品項；跟原圖對照，再用 ＋／－ 修正。</p>
+    <div class="home-cards">
     ${
       !canEdit()
         ? `<div class="hint-card"><b>你是檢視者（只能看）</b>：可以看大家的盤點紀錄、品項庫，也可以下載 Excel；不能盤點或修改。需要盤點請找管理員改成「編輯者」。</div>`
@@ -1338,6 +1347,7 @@ async function viewHome() {
           <span class="meta">一次匯出 Excel、複製到 Google 試算表${ls.get(LS.sheet) ? '、同步' : ''}</span>
         </span>${chev}</button>`
     })()}
+    </div>
     <p class="section-title">盤點紀錄</p>
     ${
       sessions.length
@@ -1443,6 +1453,7 @@ function viewReview() {
         : `<p class="subtitle">${fmtTime(s.createdAt)}${s.model ? `・${esc(s.model)}` : ''}</p>`
     }
     ${errors ? `<div class="stack">${errors}</div>` : ''}
+    <div class="review-cols"><div class="review-top">
     ${
       groups.length
         ? `<section class="summary" aria-label="盤點總結">
@@ -1463,17 +1474,19 @@ function viewReview() {
           </section>`
         : ''
     }
+    </div><div class="review-photo">
     ${
       photo
-        ? `<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''}" data-photo><img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">${boxes}
+        ? `<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''}" data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}"><img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">${boxes}
              <button class="photo-zoom" data-action="zoom" aria-label="放大看照片">⤢</button>
            </div>
            ${state.addMode ? '<div class="add-hint" role="status"><b>點照片上漏掉的那一個</b>，會在那裡加一個框 <button class="btn small plain" data-action="add-cancel">取消</button></div>' : ''}
            ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張"><img src="${urlOf(p)}" alt=""></button>`).join('')}</div>` : ''}
            <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>＋ 漏掉的，點照片補一個</button></div>
-           <p class="footnote">點照片上的框：直接改成別的種類，改完自動跳下一個。點下面的清單：看那一種在哪裡；數量不對按 ＋／－。</p>`
+           <p class="footnote">點照片上的框：直接改成別的種類，改完自動跳下一個。點品項清單：看那一種在哪裡；數量不對按 ＋／－。</p>`
         : ''
     }
+    </div><div class="review-side">
     ${
       state.viewer && photo
         ? `<div class="viewer" role="dialog" aria-label="放大看照片">
@@ -1518,6 +1531,7 @@ function viewReview() {
     <div class="row-actions edit-only" style="margin-top:22px">
       <button class="btn danger small" data-action="delete-session">刪除這次盤點</button>
     </div>
+    </div></div>
   </main>
   <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn edit-only" data-action="finish">完成・記進品項庫</button></div></div>`
 }
@@ -1611,7 +1625,7 @@ async function viewSettings() {
       <label class="row"><span class="grow"><span class="title">有差異先複盤</span><br><span class="meta">盤到的跟帳面不一樣：請另一個人再數一次，兩次一樣才確定，再選原因，由擁有者或管理員決定要不要調整帳面。</span></span><input type="checkbox" id="rule-recount" ${recountOn() ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
     </div>
     <p class="footnote">${canManage() ? '改了會同步給大家。' : '由擁有者或管理員設定。'}</p>
-    <details class="steps"><summary>資料安全嗎？（公司資產）</summary>
+    ${canManage() ? `<details class="steps"><summary>資料安全嗎？（公司資產）</summary>
       <ol>
         <li><b>資料放在哪：</b>只在擁有者的 Google 雲端硬碟「拍照盤點同步資料」資料夾和試算表。可以先用個人帳號，之後在「共用設定 → 搬到另一個 Google 帳號」搬到公司帳號（大家自動跟過去）。GitHub 上只有程式，沒有任何盤點資料。</li>
         <li><b>誰讀得到：</b>只有共用名單裡的人。每個人一組自己的連結碼（亂數，猜不到；雲端只存雜湊值），傳輸全程加密（HTTPS）。部署時選的「所有人」只代表可以呼叫網址，沒有連結碼一律拒絕。</li>
@@ -1620,7 +1634,7 @@ async function viewSettings() {
         <li><b>手機上也有一份：</b>每台裝置會存一份方便離線看；手機請設螢幕鎖。</li>
         <li><b>拍照辨識：</b>照片會送到 Google Gemini 分析。免費版的條款寫明：Google 可以用送去的內容改善產品，也可能有人工審閱。擔心的話，到 Google AI Studio 開啟付費（照用量計費），付費版不會拿去改善產品。照片裡不要拍到價格單、客戶資料。</li>
       </ol>
-    </details>
+    </details>` : ''}
     <p class="section-title">連線測試</p>
     <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
     <p class="footnote">辨識一直失敗時按這個，把結果截圖給我看。</p>
@@ -1681,9 +1695,9 @@ async function viewItems() {
            ${f.id === 'order' && !list.length ? '' : '<input class="field search" id="item-search" type="search" placeholder="搜尋品名、型號、料號、儲位" autocomplete="off" enterkeyhint="search">'}
            ${
              list.length
-               ? [...byLabel]
+               ? `<div class="item-secs">${[...byLabel]
                    .map(([label, its]) => `<section class="item-sec"><p class="section-title">${esc(label)}（${its.length}）</p><div class="group">${its.map(itemRow).join('')}</div></section>`)
-                   .join('')
+                   .join('')}</div>`
                : f.id === 'order'
                  ? `<div class="hint-card stack" style="margin-top:12px">
                       <div><b>還沒有要叫貨的。</b></div>
@@ -1732,6 +1746,7 @@ async function viewItem() {
         ? `<div class="hint-card stack edit-only"><div><b>盤點時自動建立的。</b>名稱、尺寸對嗎？跟別的品項重複就合併。</div><div class="row-actions"><button class="btn small" data-action="item-confirm">✓ 對，確認</button><button class="btn small secondary" data-action="item-edit">修改</button><button class="btn small secondary" data-action="item-merge">合併到…</button></div></div>`
         : ''
     }
+    <div class="detail-cols"><div class="detail-main">
     <section class="summary">
       ${
         blindMe()
@@ -1754,6 +1769,7 @@ async function viewItem() {
         ? `<div class="group">${stock.map(([k, st]) => `<div class="row"><span class="grow"><span class="title">${esc(stockPlace(st))}</span><br><span class="meta">${fmtTime(st.at)} 盤點</span></span><span class="qty"><b>${st.count}</b></span><button class="icon-btn small edit-only" data-stock-del="${esc(k)}" aria-label="拿掉這個位置的數量">×</button></div>`).join('')}</div>`
         : '<div class="group"><div class="row muted">還沒盤點過。盤點時按「完成」就會記在這裡。</div></div>'
     }
+    </div><div class="detail-side">
     ${
       decoded.length
         ? `<p class="section-title">型號解讀</p><div class="group">${decoded.map((x) => `<div class="row decode"><span class="grow"><span class="title">${esc(x.title)}</span>${x.facts.map((t) => `<br><span class="meta">・${esc(t)}</span>`).join('')}</span></div>`).join('')}</div>`
@@ -1776,6 +1792,7 @@ async function viewItem() {
             .join('')}</div>`
         : ''
     }
+    </div></div>
     <div class="row-actions edit-only" style="margin-top:22px"><button class="btn small secondary" data-action="item-merge">合併到另一個品項</button><button class="btn small danger" data-action="item-delete">刪除品項</button></div>
     <p class="footnote">以前的寫法（AI 認過的名稱）：${esc((it.aliases || []).length)} 種，以後辨識到都會算進這一項。</p>
   </main>`
@@ -1926,7 +1943,9 @@ async function render() {
   // 放大看照片時，重畫畫面不要讓位置跳回左上角
   const vs = document.querySelector('.viewer-scroll')
   const keep = vs ? { x: vs.scrollLeft / Math.max(1, vs.scrollWidth), y: vs.scrollTop / Math.max(1, vs.scrollHeight) } : null
-  $app.innerHTML = html
+  // 平板、電腦：每一頁都有左邊側邊欄（子頁面在手機上不顯示）；body 記住現在哪一頁，給寬版排版用
+  document.body.dataset.view = state.view
+  $app.innerHTML = html.includes('class="tabbar') ? html : html + tabBar(TAB_OF[state.view] || 'home', true)
   const nv = document.querySelector('.viewer-scroll')
   if (keep && nv) {
     nv.scrollLeft = keep.x * nv.scrollWidth
