@@ -65,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.0.4（10/6・iPhone 看得到放大圖、點了會打勾）'
+const VERSION = '4.0.5（10/6・iPhone 點了一定改得到、存不進去會說原因）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -180,14 +180,27 @@ const idb = (() => {
       }
       req.onerror = () => reject(req.error)
     }))
-  const tx = async (store, mode, fn) => {
+  const tx = async (store, mode, fn, retry = true) => {
     const d = await open()
-    return new Promise((resolve, reject) => {
-      const t = d.transaction(store, mode)
-      const r = fn(t.objectStore(store))
-      t.oncomplete = () => resolve(r?.result)
-      t.onerror = () => reject(t.error)
-    })
+    try {
+      return await new Promise((resolve, reject) => {
+        const t = d.transaction(store, mode)
+        const r = fn(t.objectStore(store))
+        t.oncomplete = () => resolve(r?.result)
+        t.onerror = () => reject(t.error)
+        t.onabort = () => reject(t.error || new DOMException('存檔被中斷', 'AbortError'))
+      })
+    } catch (e) {
+      // iPhone 放到背景一陣子，資料庫連線可能被系統收掉（UnknownError／InvalidStateError）：重新連一次再試
+      if (retry && ['InvalidStateError', 'UnknownError', 'AbortError'].includes(e?.name)) {
+        try {
+          d.close()
+        } catch {}
+        p = undefined
+        return tx(store, mode, fn, false)
+      }
+      throw e
+    }
   }
   const storeOf = (store) => ({
     all: async () => ((await tx(store, 'readonly', (s) => s.getAll())) ?? []).sort((a, b) => b.createdAt - a.createdAt),
@@ -291,8 +304,11 @@ const urlOf = (photo) => {
   if (!urls.has(photo.id)) urls.set(photo.id, URL.createObjectURL(photo.blob))
   return urls.get(photo.id)
 }
-/** 框的放大圖：用 SVG 的 viewBox 只露出那一塊（不切圖、不用 canvas，iPhone 也穩），框線用那一種的顏色 */
-function boxZoomSvg(photo, box, color = '#0a84ff') {
+/**
+ * 框的放大圖：用 SVG 的 viewBox 只露出那一塊（不切圖、不用 canvas，iPhone 也穩），框線用那一種的顏色。
+ * ratio＝放大圖格子的寬÷高：把露出的範圍撐到一樣比例、而且不超出照片，格子才不會有一邊空白。
+ */
+function boxZoomSvg(photo, box, color = '#0a84ff', ratio = 0) {
   const W = photo.w || 1000
   const H = photo.h || 1000
   const [a, b, c, d] = box
@@ -301,10 +317,22 @@ function boxZoomSvg(photo, box, color = '#0a84ff') {
   const y1 = (Math.min(a, c) / 1000) * H
   const y2 = (Math.max(a, c) / 1000) * H
   const pad = Math.max(x2 - x1, y2 - y1) * 0.15 + 8
-  const vx = Math.max(0, x1 - pad)
-  const vy = Math.max(0, y1 - pad)
-  const vw = Math.min(W, x2 + pad) - vx
-  const vh = Math.min(H, y2 + pad) - vy
+  let vx = Math.max(0, x1 - pad)
+  let vy = Math.max(0, y1 - pad)
+  let vw = Math.min(W, x2 + pad) - vx
+  let vh = Math.min(H, y2 + pad) - vy
+  if (ratio > 0 && Number.isFinite(ratio)) {
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+    if (vw / vh < ratio) {
+      const nw = Math.min(W, vh * ratio)
+      vx = clamp(vx + vw / 2 - nw / 2, 0, W - nw)
+      vw = nw
+    } else {
+      const nh = Math.min(H, vw / ratio)
+      vy = clamp(vy + vh / 2 - nh / 2, 0, H - nh)
+      vh = nh
+    }
+  }
   return `<svg viewBox="${vx.toFixed(1)} ${vy.toFixed(1)} ${vw.toFixed(1)} ${vh.toFixed(1)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="這一個框的放大圖">
     <image href="${urlOf(photo)}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none"/>
     <path d="M0 0H${W}V${H}H0Z M${x1.toFixed(1)} ${y1.toFixed(1)}V${y2.toFixed(1)}H${x2.toFixed(1)}V${y1.toFixed(1)}Z" fill="#000" fill-opacity="0.35" fill-rule="evenodd"/>
@@ -1337,8 +1365,31 @@ function go(view, extra = {}) {
   render()
   window.scrollTo({ top: 0 })
 }
+/** 存檔失敗一定要讓人看到原因（不然點了像沒反應） */
+function saveFailed(e) {
+  const quota = e?.name === 'QuotaExceededError'
+  toast(quota ? '手機空間不夠，存不進去：請刪掉一些舊的盤點紀錄或手機裡的照片' : `沒有存進手機（${e?.name || e?.message || '不明原因'}）：請把 App 完全關掉（往上滑掉）再打開，再試一次`)
+}
 async function save() {
-  if (state.session) await db.put(state.session)
+  const s = state.session
+  if (!s) return
+  try {
+    await db.put(s)
+  } catch (e) {
+    // iPhone 切回 App 後，之前讀出來的照片有時候讀不到了 → 用資料庫裡的照片重新組一份再存一次
+    try {
+      const fresh = await db.get(s.id)
+      for (const ph of s.photos) {
+        const f = fresh?.photos?.find((x) => x.id === ph.id)
+        if (f?.blob) ph.blob = f.blob
+      }
+      await db.put(s)
+    } catch (e2) {
+      console.error('save', e, e2)
+      saveFailed(e2)
+      throw e2
+    }
+  }
 }
 
 // ───────────────────────── 畫面 ─────────────────────────
@@ -2266,14 +2317,32 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
       go(cur + 1)
     }
     // 點到的那一列先打勾 0.25 秒，看得到「有點到」再換畫面；這段時間不接受別的點擊
+    const untick = () =>
+      body.querySelectorAll('.chosen').forEach((x) => {
+        x.classList.remove('chosen')
+        x.querySelector('.q-tick')?.remove()
+      })
     const tick = async (b) => {
       guardUntil = Date.now() + 1000
+      untick()
       b.classList.add('chosen')
       if (b.classList.contains('row')) b.insertAdjacentHTML('beforeend', '<span class="q-tick" aria-hidden="true">✓</span>')
       await sleep(250)
     }
+    // 存不進去：打勾拿掉、可以馬上再點（原因 save() 已經跳出來）
+    const failed = () => {
+      untick()
+      guardUntil = 0
+    }
+    // 開著這個視窗時，另一台更新了這次盤點（畫面已換成新的那份）：舊的框不能再改
+    const stale = () => {
+      if (state.session === s) return false
+      toast('另一台剛更新了這次盤點：已換成最新的，請再點一次框')
+      finish()
+      return true
+    }
     const assign = async (fields) => {
-      if (guarded()) return
+      if (guarded() || stale()) return
       const { pi, o } = order[cur]
       const oi = s.photos[pi].objects.indexOf(o)
       if (oi < 0) return go(cur + 1)
@@ -2281,7 +2350,13 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
       const before = { label: o.label, brand: o.brand, model: o.model, spec: o.spec, edited: o.edited, checked: o.checked }
       const counts = { ...(s.counts || {}) }
       moveObjects(s, [{ pi, oi }], fields)
-      await save()
+      try {
+        await save()
+      } catch {
+        Object.assign(o, before)
+        s.counts = counts
+        return failed()
+      }
       render()
       const name = `${fields.label}${fields.spec ? `・${fields.spec}` : ''}`
       const undo = {
@@ -2319,7 +2394,7 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
           <h2 class="sheet-title" style="margin:0">${doubt ? '這一個一樣嗎？' : '這一個是哪一種？'}</h2>
           <span class="muted" style="font-size:15px">${doubt ? '要確認的' : ''}第 ${cur + 1} / ${order.length} 個${s.photos.length > 1 ? `・第 ${pi + 1} 張照片` : ''}</span>
         </div>
-        <div class="q-zoom">${boxZoomSvg(photo, o.box, mine?.color)}</div>
+        <div class="q-zoom"></div>
         ${reason ? `<p class="doubt-reason">為什麼要看：${esc(reason)}</p>` : ''}
         <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${esc(detailOf(o))}` : ''}` : esc(o.label)}</p>
         ${doubt ? `<button class="btn block" id="q-same" style="margin-bottom:12px">✓ 一樣，就是「${esc(mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label)}」</button><p class="sheet-sub" style="margin:0 0 8px">不一樣的話，選它是哪一種：</p>` : ''}
@@ -2342,25 +2417,38 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
         </div>
         <button class="btn plain block" id="q-more" style="margin-top:8px">改品牌、型號，或存成樣品照…</button>
         <button class="btn danger block" id="q-del" style="margin-top:8px">這不是商品，刪掉這個框</button>`
+      const zoom = body.querySelector('.q-zoom')
+      zoom.innerHTML = boxZoomSvg(photo, o.box, mine?.color, zoom.clientWidth / zoom.clientHeight)
       const mineName = mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label
-      body.querySelector('#q-same')?.addEventListener('click', async (e) => {
-        if (guarded()) return
-        await tick(e.currentTarget)
+      // 確認一樣：記成「看過了」再存；存不進去就還原
+      const confirmSame = async () => {
+        const was = o.checked
         o.checked = true
-        await save()
+        try {
+          await save()
+          return true
+        } catch {
+          o.checked = was
+          failed()
+          return false
+        }
+      }
+      body.querySelector('#q-same')?.addEventListener('click', async (e) => {
+        if (guarded() || stale()) return
+        await tick(e.currentTarget)
+        if (!(await confirmSame())) return
         render()
         if (cur + 1 < order.length) toast('✓ 確認了，換下一個')
         advance()
       })
       body.querySelectorAll('[data-q]').forEach((b) =>
         b.addEventListener('click', async () => {
-          if (guarded()) return
+          if (guarded() || stale()) return
           await tick(b)
           const g = groups[Number(b.dataset.q)]
           if (g === mine) {
             // 選了目前這一種＝確認一樣（點一個框來看的：直接關掉）
-            o.checked = true
-            await save()
+            if (!(await confirmSame())) return
             if (doubt) {
               if (cur + 1 < order.length) toast('✓ 確認了，換下一個')
               return advance()
