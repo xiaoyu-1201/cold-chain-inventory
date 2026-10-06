@@ -65,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.0.3（10/6・整種一起改、刪掉也能復原）'
+const VERSION = '4.0.4（10/6・iPhone 看得到放大圖、點了會打勾）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -152,6 +152,8 @@ function toast(msg, action) {
   clearTimeout(toastTimer)
   toastTimer = setTimeout(() => el.remove(), action ? 6000 : 2800)
 }
+// iPhone 的 Safari 要有 touchstart 監聽，按鈕按下去才會變色（:active）
+document.addEventListener('touchstart', () => {}, { passive: true })
 
 // ───────────────────────── 存檔（IndexedDB，照片也存在手機） ─────────────────────────
 /** sessions＝盤點紀錄；samples＝樣品照（第 2 版新增）；items＝品項庫（第 3 版新增） */
@@ -248,8 +250,24 @@ async function drawToBlob(bmp, sx, sy, sw, sh, maxSide) {
   return new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.85))
 }
 /** 從盤點照片切下一個框（四周多留一點邊），當樣品照 */
+/** 把照片讀成可以畫的圖：有些 iPhone 的 createImageBitmap 會失敗，改用一般的 <img> 讀 */
+async function bitmapOf(blob) {
+  try {
+    return await createImageBitmap(blob)
+  } catch {
+    const img = new Image()
+    const url = URL.createObjectURL(blob)
+    img.src = url
+    try {
+      await img.decode()
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+    return Object.assign(img, { width: img.naturalWidth, height: img.naturalHeight })
+  }
+}
 async function cropBox(photo, box) {
-  const bmp = await createImageBitmap(photo.blob)
+  const bmp = await bitmapOf(photo.blob)
   const [y1, x1, y2, x2] = box.map((n) => n / 1000)
   const padX = (x2 - x1) * 0.08
   const padY = (y2 - y1) * 0.08
@@ -272,6 +290,26 @@ const urls = new Map()
 const urlOf = (photo) => {
   if (!urls.has(photo.id)) urls.set(photo.id, URL.createObjectURL(photo.blob))
   return urls.get(photo.id)
+}
+/** 框的放大圖：用 SVG 的 viewBox 只露出那一塊（不切圖、不用 canvas，iPhone 也穩），框線用那一種的顏色 */
+function boxZoomSvg(photo, box, color = '#0a84ff') {
+  const W = photo.w || 1000
+  const H = photo.h || 1000
+  const [a, b, c, d] = box
+  const x1 = (Math.min(b, d) / 1000) * W
+  const x2 = (Math.max(b, d) / 1000) * W
+  const y1 = (Math.min(a, c) / 1000) * H
+  const y2 = (Math.max(a, c) / 1000) * H
+  const pad = Math.max(x2 - x1, y2 - y1) * 0.15 + 8
+  const vx = Math.max(0, x1 - pad)
+  const vy = Math.max(0, y1 - pad)
+  const vw = Math.min(W, x2 + pad) - vx
+  const vh = Math.min(H, y2 + pad) - vy
+  return `<svg viewBox="${vx.toFixed(1)} ${vy.toFixed(1)} ${vw.toFixed(1)} ${vh.toFixed(1)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="這一個框的放大圖">
+    <image href="${urlOf(photo)}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none"/>
+    <path d="M0 0H${W}V${H}H0Z M${x1.toFixed(1)} ${y1.toFixed(1)}V${y2.toFixed(1)}H${x2.toFixed(1)}V${y1.toFixed(1)}Z" fill="#000" fill-opacity="0.35" fill-rule="evenodd"/>
+    <rect x="${x1.toFixed(1)}" y="${y1.toFixed(1)}" width="${(x2 - x1).toFixed(1)}" height="${(y2 - y1).toFixed(1)}" fill="none" stroke="${color}" stroke-width="3" vector-effect="non-scaling-stroke" rx="2"/>
+  </svg>`
 }
 
 // ───────────────────────── Gemini ─────────────────────────
@@ -2202,13 +2240,11 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
   // 用物件本身記順序（刪掉框時索引會變）
   const order = [...entries]
   let cur = Math.max(0, Math.min(start, order.length - 1))
-  let previewUrl = ''
   let formOpen = false
   sheet('<div id="q-body"></div>', (el, close) => {
     const body = el.querySelector('#q-body')
     const finish = () => {
       state.focusObj = null
-      if (previewUrl) URL.revokeObjectURL(previewUrl)
       close()
       render()
     }
@@ -2228,6 +2264,13 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
     const advance = () => {
       guardUntil = Date.now() + 600
       go(cur + 1)
+    }
+    // 點到的那一列先打勾 0.25 秒，看得到「有點到」再換畫面；這段時間不接受別的點擊
+    const tick = async (b) => {
+      guardUntil = Date.now() + 1000
+      b.classList.add('chosen')
+      if (b.classList.contains('row')) b.insertAdjacentHTML('beforeend', '<span class="q-tick" aria-hidden="true">✓</span>')
+      await sleep(250)
     }
     const assign = async (fields) => {
       if (guarded()) return
@@ -2253,7 +2296,7 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
       }
       // 點一個框來改：改好就關掉（不要自動跳到下一個，才不會改到本來就對的）
       if (!doubt) {
-        toast(`已改成「${name}」`, undo)
+        toast(`已把這 1 個改成「${name}」`, undo)
         return finish()
       }
       if (cur + 1 >= order.length) {
@@ -2276,7 +2319,7 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
           <h2 class="sheet-title" style="margin:0">${doubt ? '這一個一樣嗎？' : '這一個是哪一種？'}</h2>
           <span class="muted" style="font-size:15px">${doubt ? '要確認的' : ''}第 ${cur + 1} / ${order.length} 個${s.photos.length > 1 ? `・第 ${pi + 1} 張照片` : ''}</span>
         </div>
-        <img id="q-img" alt="這一個框的放大圖" style="display:block;width:100%;height:120px;object-fit:contain;margin:10px 0 8px;border-radius:12px;background:var(--card-2)">
+        <div class="q-zoom">${boxZoomSvg(photo, o.box, mine?.color)}</div>
         ${reason ? `<p class="doubt-reason">為什麼要看：${esc(reason)}</p>` : ''}
         <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${esc(detailOf(o))}` : ''}` : esc(o.label)}</p>
         ${doubt ? `<button class="btn block" id="q-same" style="margin-bottom:12px">✓ 一樣，就是「${esc(mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label)}」</button><p class="sheet-sub" style="margin:0 0 8px">不一樣的話，選它是哪一種：</p>` : ''}
@@ -2299,31 +2342,33 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
         </div>
         <button class="btn plain block" id="q-more" style="margin-top:8px">改品牌、型號，或存成樣品照…</button>
         <button class="btn danger block" id="q-del" style="margin-top:8px">這不是商品，刪掉這個框</button>`
-      body.querySelector('#q-same')?.addEventListener('click', async () => {
+      const mineName = mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label
+      body.querySelector('#q-same')?.addEventListener('click', async (e) => {
         if (guarded()) return
+        await tick(e.currentTarget)
         o.checked = true
         await save()
         render()
+        if (cur + 1 < order.length) toast('✓ 確認了，換下一個')
         advance()
       })
-      cropBox(photo, o.box)
-        .then((blob) => {
-          if (previewUrl) URL.revokeObjectURL(previewUrl)
-          previewUrl = URL.createObjectURL(blob)
-          const img = body.querySelector('#q-img')
-          if (img) img.src = previewUrl
-        })
-        .catch(() => {})
       body.querySelectorAll('[data-q]').forEach((b) =>
         b.addEventListener('click', async () => {
           if (guarded()) return
+          await tick(b)
           const g = groups[Number(b.dataset.q)]
           if (g === mine) {
             // 選了目前這一種＝確認一樣（點一個框來看的：直接關掉）
             o.checked = true
             await save()
-            return doubt ? advance() : finish()
+            if (doubt) {
+              if (cur + 1 < order.length) toast('✓ 確認了，換下一個')
+              return advance()
+            }
+            toast(`沒有改：本來就是「${mineName}」`)
+            return finish()
           }
+          guardUntil = 0
           assign({ label: g.label, brand: g.brand, model: g.model, spec: g.spec })
         }),
       )
@@ -2366,7 +2411,6 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
   }, () => {
     // 點旁邊暗處關掉時，也把標示拿掉
     state.focusObj = null
-    if (previewUrl) URL.revokeObjectURL(previewUrl)
     render()
   })
 }
