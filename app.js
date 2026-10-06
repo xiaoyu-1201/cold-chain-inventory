@@ -65,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.0.2（10/6・改一個框不會改到別的、可以復原）'
+const VERSION = '4.0.3（10/6・整種一起改、刪掉也能復原）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2052,8 +2052,31 @@ function fieldsHtml(v, sug) {
 }
 const readFields = (el) => Object.fromEntries(FIELDS.map((f) => [f, el.querySelector(`#f-${f}`).value.trim()]))
 
-/** 修改整個品項（這一列的全部框一起改） */
-async function editSheet(key) {
+/** 改之前先存一份（復原用）：每張照片的框、AI 刪掉的框、數量、手動新增的品項 */
+const snapSession = (s) => JSON.stringify({ o: s.photos.map((p) => p.objects), g: s.photos.map((p) => p.aiGone || []), c: s.counts || {}, m: s.manual || [] })
+function restoreSession(s, snap) {
+  const v = JSON.parse(snap)
+  s.photos.forEach((p, i) => {
+    p.objects = v.o[i] || []
+    p.aiGone = v.g[i] || []
+  })
+  s.counts = v.c
+  s.manual = v.m
+}
+/** 提示旁邊的「復原」：回到改之前 */
+const undoTo = (s, snap) => ({
+  label: '復原',
+  run: async () => {
+    restoreSession(s, snap)
+    state.focus = null
+    state.focusObj = null
+    await save()
+    render()
+    toast('已復原')
+  },
+})
+
+/** 修改整個品項（這一列的全部框一起改） */async function editSheet(key) {
   const s = state.session
   const g = groupsOf(s).find((x) => x.key === key)
   if (!g) return
@@ -2069,12 +2092,14 @@ async function editSheet(key) {
       el.querySelector('#e-save').onclick = async () => {
         const v = readFields(el)
         if (!v.label) return toast('品名不能空白')
+        const snap = snapSession(s)
         if (g.manual) Object.assign(g.manual, v)
         else moveObjects(s, g.refs, v)
         state.focus = null
         await save()
         close()
         render()
+        toast(g.manual ? '已修改' : `已修改這一種（${g.boxes} 個）`, undoTo(s, snap))
       }
       el.querySelector('#e-refine')?.addEventListener('click', async (ev) => {
         const btn = ev.currentTarget
@@ -2082,6 +2107,7 @@ async function editSheet(key) {
         btn.textContent = '比對中…（約 10～30 秒）'
         try {
           const refs = await sampleRefs()
+          const snap = snapSession(s)
           // 同一張照片的框一起比（大小比較才有意義）
           const byPhoto = new Map()
           g.refs.forEach((r) => byPhoto.set(r.pi, [...(byPhoto.get(r.pi) || []), r.oi]))
@@ -2096,7 +2122,7 @@ async function editSheet(key) {
           await save()
           close()
           render()
-          toast(groups > 1 ? `分成 ${groups} 種了，請對照照片確認` : 'AI 比對後還是認為是同一種；可以點框個別修改，或存樣品照')
+          toast(groups > 1 ? `分成 ${groups} 種了，請對照照片確認` : 'AI 比對後還是認為是同一種；可以點框個別修改，或存樣品照', groups > 1 ? undoTo(s, snap) : undefined)
         } catch (e) {
           btn.disabled = false
           btn.textContent = `再比對一次：把這 ${g.boxes} 個分得更細`
@@ -2117,20 +2143,21 @@ async function editSheet(key) {
       })
       el.querySelector('#e-del').onclick = async () => {
         if (!confirm(`刪掉「${g.label}」${g.manual ? '' : `（${g.boxes} 個框）`}？`)) return
+        const snap = snapSession(s)
         if (g.manual) s.manual = s.manual.filter((m) => m !== g.manual)
         else removeObjects(s, g.refs)
         state.focus = null
         await save()
         close()
         render()
-        toast('已刪掉')
+        toast('已刪掉', undoTo(s, snap))
       }
     },
   )
 }
 
 /**
- * 點照片上的框：「這一個是哪一種？」按一下就改，自動跳到下一個框；一路點下去就分完。
+ * 點照片上的框：「這一個是哪一種？」按一下就改、改好就關（不會改到別的框）；「N 個要確認」逐一看時才自動跳到下一個。
  * 順序是由上到下、由左到右；也可以按 ‹ › 自己跳。
  */
 /** 補框：在點的位置加一個框（大小取這張照片其他框的中間值），標成手動補的，馬上問它是哪一種 */
