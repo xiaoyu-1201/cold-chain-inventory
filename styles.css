@@ -1578,3 +1578,65 @@ a.row {
     columns: 3;
   }
 }
+/* 公司 LOGO（聖佳 SJ） */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.brand-logo {
+  height: 1em;
+  width: auto;
+  flex: none;
+}
+.side-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.side-head .brand-logo {
+  height: 30px;
+}
+.join-logo {
+  display: block;
+  height: 64px;
+  width: auto;
+  margin: 6px auto 10px;
+}
+
+/* 首頁多選（像 iPhone 照片的「選取」） */
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.list-head .btn {
+  margin-top: 14px;
+}
+.select-chips {
+  margin: 4px 0 10px;
+}
+.pick {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--text-3);
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  font-weight: 800;
+  color: #fff;
+}
+.row.picked {
+  background: var(--tint-soft);
+}
+.row.picked .pick {
+  background: var(--tint);
+  border-color: var(--tint);
+}
+.select-bar .btn {
+  flex: 1;
+  padding-inline: 8px;
+}

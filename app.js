@@ -36,7 +36,7 @@ const LS = {
   goldenRuns: 'inventory:goldenRuns',
 }
 /** 檢視者不能用的動作 */
-const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run'])
+const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete'])
 /** 權限（跟 Google 雲端硬碟的「共用」一樣） */
 const ROLE_LABEL = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 const ROLE_DESC = { owner: '全部都可以；不能被移除', manager: '可以盤點、修改，也可以邀請、移除人', editor: '可以盤點、修改', viewer: '只能看（可以下載 Excel）' }
@@ -65,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.9（10/6・改名：聖佳智慧庫存）'
+const VERSION = '4.0（10/6・公司 LOGO、盤點紀錄多選）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1281,6 +1281,8 @@ function equivalentsFor(it, decoded, items) {
 const state = { view: 'home', session: null, photoIndex: 0, focus: null, focusObj: null, busy: false, cancel: false, progress: null, refining: null, addMode: false, viewer: false, zoom: 2, itemFilter: 'all', itemId: null, lookup: { q: '', read: null, busy: false } }
 
 function go(view, extra = {}) {
+  // 離開首頁就結束多選
+  if (view !== 'home') state.selecting = false
   Object.assign(state, { view, focus: null, focusObj: null, addMode: false, viewer: false }, extra)
   render()
   window.scrollTo({ top: 0 })
@@ -1310,7 +1312,7 @@ const TABS = [
  * 手機：底部分頁列（只在三個主頁）。平板、電腦（≥768px）：同一個元素變成左邊側邊欄，每一頁都有（sub＝子頁面，手機不顯示）。
  */
 const tabBar = (active, sub = false) =>
-  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only">聖佳智慧庫存</div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
+  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt="">聖佳智慧庫存</div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
 /** 子頁面屬於哪一個主頁（側邊欄標哪一個） */
 const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', lookup: 'lookup', settings: 'settings' }
 
@@ -1318,10 +1320,16 @@ async function viewHome() {
   const sessions = await db.all()
   const hasKey = !!ls.get(LS.key)
   const toRecount = canEdit() ? (await itemsAll()).filter(needsRecount) : []
+  // 多選：按「選取」後，每一筆前面出現圓圈，下面出現動作列（匯出、記進品項庫、刪除）
+  const sel = !!state.selecting
+  state.selected ??= new Set()
+  for (const id of [...state.selected]) if (!sessions.some((s) => s.id === id)) state.selected.delete(id)
+  const picked = sessions.filter((s) => state.selected.has(s.id))
+  const unfinished = sessions.filter((s) => !s.linkedAt).length
   return `
   <main class="app">
     <div class="nav">${syncReady() ? `<button class="btn small plain sync-pill ${state.syncState || ''}" data-action="sync-now">☁︎ ${esc(syncLabel())}</button>` : '<span></span>'}<button class="icon-btn" data-go="settings" aria-label="設定"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.6 7.6 0 0 0-1.68-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.61-.25 1.17-.58 1.68-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.1-1.65Z"/></svg></button></div>
-    <h1 class="large-title">聖佳智慧庫存</h1>
+    <h1 class="large-title brand"><img class="brand-logo" src="logo.svg" alt="聖佳 LOGO">聖佳智慧庫存</h1>
     <p class="subtitle">拍貨架，AI 數品項；跟原圖對照，再用 ＋／－ 修正。</p>
     <div class="home-cards">
     ${
@@ -1348,20 +1356,37 @@ async function viewHome() {
         </span>${chev}</button>`
     })()}
     </div>
-    <p class="section-title">盤點紀錄</p>
+    <div class="list-head"><p class="section-title">盤點紀錄${sel ? `・已選 ${picked.length} 筆` : ''}</p>${sessions.length ? `<button class="btn small plain" data-action="${sel ? 'select-done' : 'select-start'}">${sel ? '完成' : '選取'}</button>` : ''}</div>
+    ${
+      sel
+        ? `<div class="chips select-chips"><button class="chip" data-action="select-all">${picked.length === sessions.length ? '全不選' : '全選'}</button>${unfinished ? `<button class="chip" data-action="select-unfinished">選還沒按完成的（${unfinished}）</button>` : ''}</div>`
+        : ''
+    }
     ${
       sessions.length
         ? `<div class="group">${sessions
             .map((s) => {
               const failed = s.photos.length && s.photos.every((p) => p.status !== 'done')
               const meta = [byName(s) ? `${byName(s)} 盤・${fmtTime(s.createdAt)}` : fmtTime(s.createdAt), s.place && placeLabel(s.place), s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.linkedAt ? '' : '還沒按完成', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
-              return `<button class="row" data-open="${s.id}"><img src="${s.photos[0] ? urlOf(s.photos[0]) : ''}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)"><span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>${chev}</button>`
+              const on = sel && state.selected.has(s.id)
+              const body = `<img src="${s.photos[0] ? urlOf(s.photos[0]) : ''}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)"><span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>`
+              return sel
+                ? `<button class="row ${on ? 'picked' : ''}" data-pick="${s.id}" aria-pressed="${on}"><span class="pick" aria-hidden="true">${on ? '✓' : ''}</span>${body}</button>`
+                : `<button class="row" data-open="${s.id}">${body}${chev}</button>`
             })
             .join('')}</div>`
         : `<div class="empty"><div class="big">📦</div><p>還沒有盤點紀錄。<br>按上面「新盤點」，拍一層貨架試試看。</p></div>`
     }
   </main>
-  ${tabBar('home')}`
+  ${
+    sel
+      ? `<div class="toolbar select-bar"><div class="inner">
+          <button class="btn secondary" data-action="bulk-export" ${picked.length ? '' : 'disabled'}>匯出 Excel</button>
+          <button class="btn secondary edit-only" data-action="bulk-finish" ${picked.length ? '' : 'disabled'}>記進品項庫</button>
+          <button class="btn danger edit-only" data-action="bulk-delete" ${picked.length ? '' : 'disabled'}>刪除</button>
+        </div></div>`
+      : tabBar('home')
+  }`
 }
 
 function viewCapture() {
@@ -3267,7 +3292,7 @@ function joinSheet(code) {
   }
   clean()
   sheet(
-    `<h2 class="sheet-title">加入聖佳智慧庫存</h2>
+    `<img class="join-logo" src="logo.svg" alt="聖佳 LOGO"><h2 class="sheet-title" style="text-align:center">加入聖佳智慧庫存</h2>
      <p class="sheet-sub">你被邀請一起用「聖佳智慧庫存」。加入後，大家盤點的資料會自動同步到這支手機。</p>
      <button class="btn block" id="j-go" style="margin-top:8px">加入</button>
      <p class="footnote" style="margin-top:10px">這個邀請只給你一個人用，請不要轉傳。</p>`,
@@ -4039,7 +4064,7 @@ $app.addEventListener('click', async (e) => {
   // 補框模式：點照片哪裡，就在那裡加一個框（大小跟這張照片的其他框差不多），再選它是哪一種
   const wrap = e.target.closest('[data-photo]')
   if (state.addMode && wrap && !e.target.closest('[data-action]')) return addBoxAt(wrap, e)
-  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-qrange],[data-recount-list],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example]')
+  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-qrange],[data-recount-list],[data-pick],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example]')
   if (!t) {
     // 點空白處取消標示（不捲回頂端）
     if (state.focus && !e.target.closest('.photo-wrap,.item')) {
@@ -4068,6 +4093,12 @@ $app.addEventListener('click', async (e) => {
   if ('recountList' in d) {
     state.itemFilter = 'recount'
     return go('items')
+  }
+  // 多選：點一筆＝勾／取消
+  if (d.pick) {
+    if (state.selected.has(d.pick)) state.selected.delete(d.pick)
+    else state.selected.add(d.pick)
+    return render()
   }
   if (d.open) {
     state.session = await db.get(d.open)
@@ -4170,6 +4201,66 @@ $app.addEventListener('click', async (e) => {
       await unlinkSession(state.session.id)
       toast('已刪除')
       return go('home')
+    // ── 首頁多選 ──
+    case 'select-start':
+      state.selecting = true
+      state.selected = new Set()
+      return render()
+    case 'select-done':
+      state.selecting = false
+      return render()
+    case 'select-all': {
+      const all = await db.all()
+      state.selected = state.selected.size === all.length ? new Set() : new Set(all.map((s) => s.id))
+      return render()
+    }
+    case 'select-unfinished':
+      state.selected = new Set((await db.all()).filter((s) => !s.linkedAt).map((s) => s.id))
+      return render()
+    case 'bulk-export': {
+      const list = (await db.all()).filter((s) => state.selected.has(s.id))
+      if (!list.length) return
+      downloadBlob(reportXlsx(list, await itemsAll(true), await whoOfStock()), `盤點_${list.length}次_${ymd(Date.now())}.xlsx`)
+      return toast(`已下載 Excel（${list.length} 次盤點）`)
+    }
+    case 'bulk-finish': {
+      const list = (await db.all()).filter((s) => state.selected.has(s.id) && s.photos.some((p) => p.status === 'done'))
+      if (!list.length) return toast('選到的都沒有辨識成功的照片，沒辦法記進品項庫')
+      // 沒填位置的，每一次各算一筆：同一批貨盤兩次就會重複算
+      const noPlace = list.filter((s) => !s.place).length
+      if (!confirm(`把 ${list.length} 次盤點記進品項庫？${noPlace ? `\n\n其中 ${noPlace} 次沒填位置：沒填位置的每一次都會各算一筆，同一批貨盤過兩次會重複算。測試用的請先刪掉。` : ''}`)) return
+      t.disabled = true
+      let created = 0
+      let failed = 0
+      for (const s of list) {
+        try {
+          created += (await linkSession(s)).created
+        } catch {
+          failed += 1
+        }
+      }
+      state.selecting = false
+      toast(`已記進品項庫：${list.length - failed} 次盤點${created ? `（新的品項 ${created} 種，到「品項」確認名稱）` : ''}${failed ? `；${failed} 次沒成功，請打開那次再按完成` : ''}`)
+      render()
+      if (syncReady()) syncNow().catch((err) => toast(`同步沒成功：${err.message}；有網路時會再自動試`))
+      if (ls.get(LS.sheet) && ls.get(LS.autoSync, '1') === '1') syncToSheet(list).catch((err) => toast(`試算表同步沒成功：${err.message}`))
+      return
+    }
+    case 'bulk-delete': {
+      const list = (await db.all()).filter((s) => state.selected.has(s.id))
+      if (!list.length || !confirm(`刪除 ${list.length} 次盤點？照片和結果都會刪掉，記在品項庫的數量也會拿掉。刪掉的找不回來。`)) return
+      t.disabled = true
+      for (const s of list) {
+        await db.del(s.id)
+        tombstone(`session:${s.id}`)
+        await unlinkSession(s.id)
+      }
+      state.selecting = false
+      toast(`已刪除 ${list.length} 次盤點`)
+      render()
+      if (syncReady()) syncNow().catch(() => {})
+      return
+    }
     case 'save-key': {
       const v = document.getElementById('apikey').value.trim()
       ls.set(LS.key, v)
