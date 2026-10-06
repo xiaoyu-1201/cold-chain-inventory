@@ -65,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.6（10/6・AI 準不準、標準答案、盲盤、複盤）'
+const VERSION = '3.7（10/6・點邀請連結就加入）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1599,7 +1599,8 @@ async function viewSettings() {
         ? ''
         : `<details class="steps" ${ls.get(LS.sheet) ? '' : 'open'}><summary>我收到連結碼了（被邀請的人用）</summary>
       <div class="stack" style="margin-top:8px">
-        <input class="field" id="link-code" placeholder="貼上連結碼（https://script.google.com/…#k=…）" autocomplete="off" spellcheck="false">
+        <p class="footnote" style="margin:0">最簡單：在 LINE 直接<b>點邀請連結</b>就會自動加入。點了沒反應，再把整段連結貼在這裡。</p>
+        <input class="field" id="link-code" placeholder="貼上收到的邀請連結" autocomplete="off" spellcheck="false">
         <button class="btn small" data-action="sync-link">加入</button>
       </div>
     </details>`
@@ -3189,9 +3190,95 @@ async function syncNow(onProgress = () => {}) {
 }
 /** 連結碼＝網址＋同步密碼（給另一台貼上） */
 const linkCode = () => `${ls.get(LS.sheet)}#k=${ls.get(LS.syncKey)}`
+/** 連結碼兩種寫法都認：舊的（試算表網址#k=密碼）、一鍵加入連結（App 網址#join=試算表代號~密碼） */
 function parseLinkCode(text) {
-  const m = /^(https:\/\/script\.google\.com\/macros\/s\/[^#\s]+\/exec)#k=([\w-]{12,})$/.exec(String(text).trim())
-  return m ? { url: m[1], key: m[2] } : null
+  const s = String(text).trim()
+  const m = /^(https:\/\/script\.google\.com\/macros\/s\/[^#\s]+\/exec)#k=([\w-]{12,})$/.exec(s)
+  if (m) return { url: m[1], key: m[2] }
+  const j = /#join=([\w-]{20,})~([\w-]{12,})$/.exec(s)
+  return j ? { url: `https://script.google.com/macros/s/${j[1]}/exec`, key: j[2] } : null
+}
+/**
+ * 一鍵加入的連結：同事在 LINE 點一下就打開 App、按「加入」就好（不用複製貼上）。
+ * openExternalBrowser=1：LINE 會改用手機的 Safari／Chrome 打開（在 LINE 內建瀏覽器加入，之後從桌面打開會變成沒加入）。
+ * 密碼放在 # 後面：不會送到 GitHub 的伺服器。
+ */
+function joinLinkOf(code, appUrl) {
+  const c = parseLinkCode(code)
+  const id = c && /\/macros\/s\/([^/]+)\/exec$/.exec(c.url)?.[1]
+  return id ? `${appUrl}?openExternalBrowser=1#join=${id}~${c.key}` : code
+}
+/** 加入共用：連到雲端、從頭下載一次 */
+async function joinWith(code) {
+  const before = { url: ls.get(LS.sheet), key: ls.get(LS.syncKey) }
+  ls.set(LS.sheet, code.url)
+  ls.set(LS.syncKey, code.key)
+  try {
+    await postSync({ action: 'hello' })
+  } catch (err) {
+    ls.set(LS.sheet, before.url)
+    ls.set(LS.syncKey, before.key)
+    throw err
+  }
+  ls.set(LS.pulled, '0') // 新連結：從頭下載一次
+  render()
+  syncNow((m) => toast(m))
+    .then((r) => toast(`同步完成：下載 ${r.pulled} 筆、上傳 ${r.pushed} 筆`))
+    .catch((err) => toast(`同步沒成功：${err.message}`))
+    .finally(() => render())
+}
+const inLineApp = () => /\bLine\//i.test(navigator.userAgent)
+const standalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true
+/** 點了邀請連結打開 App：跳出「加入」（不用到設定裡貼） */
+function joinSheet(code) {
+  const clean = () => history.replaceState(null, '', location.pathname) // 網址列不要留著密碼
+  if (ls.get(LS.syncKey) === code.key && ls.get(LS.sheet) === code.url) {
+    clean()
+    return toast('這台已經加入了，不用再加一次')
+  }
+  if (inLineApp())
+    return sheet(
+      `<h2 class="sheet-title">請用 ${/iPhone|iPad/.test(navigator.userAgent) ? 'Safari' : 'Chrome'} 打開</h2>
+       <p class="sheet-sub">現在是在 LINE 裡面打開的。在這裡加入的話，之後從手機桌面打開會變成沒加入。</p>
+       <ol class="steps-list"><li>按右上角的「⋯」（或右下角的 <b>⤴︎</b>）。</li><li>選「用預設瀏覽器開啟」（或「在 Safari 中打開」）。</li><li>打開後按「加入」就好。</li></ol>`,
+    )
+  if (ls.get(LS.syncKey)) {
+    clean()
+    return sheet(`<h2 class="sheet-title">這台已經加入別的共用</h2><p class="sheet-sub">要換的話，先到「設定 → 這台退出並清除資料」，再點一次邀請連結。</p>`)
+  }
+  clean()
+  sheet(
+    `<h2 class="sheet-title">加入公司的拍照盤點</h2>
+     <p class="sheet-sub">你被邀請一起用拍照盤點。加入後，大家盤點的資料會自動同步到這支手機。</p>
+     <button class="btn block" id="j-go" style="margin-top:8px">加入</button>
+     <p class="footnote" style="margin-top:10px">這個邀請只給你一個人用，請不要轉傳。</p>`,
+    (el, close) => {
+      el.querySelector('#j-go').onclick = async (ev) => {
+        ev.currentTarget.disabled = true
+        ev.currentTarget.textContent = '加入中…'
+        try {
+          await joinWith(code)
+        } catch (err) {
+          close()
+          return toast(err.message)
+        }
+        close()
+        const ios = /iPhone|iPad/.test(navigator.userAgent)
+        sheet(
+          `<h2 class="sheet-title">加入好了</h2>
+           <p class="sheet-sub">${esc(ls.get(LS.memberName) || '')}${ls.get(LS.memberName) ? '，' : ''}資料正在下載，等一下就會出現。</p>
+           ${
+             standalone()
+               ? ''
+               : `<p class="section-title" style="margin-top:14px">把 App 放到手機桌面，之後比較好找</p>
+                  <ol class="steps-list">${ios ? '<li>按畫面下方的分享鍵（方框加箭頭 ⬆︎）。</li><li>往下滑，按「加入主畫面」→「新增」。</li>' : '<li>按右上角的「⋮」。</li><li>按「加到主畫面」或「安裝應用程式」。</li>'}<li>之後點桌面上的「拍照盤點」就能打開。</li></ol>`
+           }
+           <button class="btn block" id="j-ok" style="margin-top:12px">知道了</button>`,
+          (el2, close2) => (el2.querySelector('#j-ok').onclick = close2),
+        )
+      }
+    },
+  )
 }
 const newSyncKey = () => {
   const a = new Uint8Array(18)
@@ -3319,26 +3406,28 @@ function counterSheet(currentId, title, sub, onPick) {
 }
 /** 邀請完：顯示只給這個人的連結碼（關掉就看不到了，雲端只存雜湊值） */
 function linkSheet(name, role, code, appUrl) {
-  const text = `拍照盤點的連結碼（只給你用，不要轉傳）：\n${code}\n\n打開 ${appUrl} → 右上「設定」→「我收到連結碼了」→ 貼上 → 加入`
+  // 一鍵加入：同事在 LINE 點連結 → 自動打開 App → 按「加入」（不用自己複製、貼到設定）
+  const link = joinLinkOf(code, appUrl)
+  const text = `${name}你好：這是公司「拍照盤點」的邀請，只給你一個人用，請不要轉傳。\n\n點這個連結就會自動加入：\n${link}\n\n打開後按「加入」就好。`
   sheet(
-    `<h2 class="sheet-title">給「${esc(name)}」的連結碼</h2>
+    `<h2 class="sheet-title">邀請「${esc(name)}」</h2>
      <p class="sheet-sub">${ROLE_LABEL[role]}：${ROLE_DESC[role]}</p>
-     <textarea class="field code" readonly rows="3">${esc(code)}</textarea>
-     <div class="row-actions" style="margin-top:10px"><button class="btn" id="lk-copy" style="flex:1">複製</button>${navigator.share ? '<button class="btn secondary" id="lk-share" style="flex:1">傳給他…</button>' : ''}</div>
+     <textarea class="field code" readonly rows="4">${esc(text)}</textarea>
+     <div class="row-actions" style="margin-top:10px">${navigator.share ? '<button class="btn" id="lk-share" style="flex:1">傳給他（LINE）</button>' : ''}<button class="btn ${navigator.share ? 'secondary' : ''}" id="lk-copy" style="flex:1">複製</button></div>
      <ol class="steps-list">
        <li>私訊給「${esc(name)}」（不要貼在群組）。</li>
-       <li>他打開拍照盤點 →「設定」→「我收到連結碼了」→ 貼上 →「加入」。</li>
+       <li>他在 LINE <b>點那個連結</b>，App 會自己打開，按「加入」就好。不用複製、不用到設定裡貼。</li>
        <li>這組只給他一個人用。他離職時，在「共用設定」移除權限就好，其他人不用改。</li>
      </ol>
-     <p class="footnote">關掉之後就看不到這組連結碼了（雲端只存雜湊值，比較安全）；忘了可以「重新產生連結碼」。</p>`,
+     <p class="footnote">關掉之後就看不到這個邀請了（雲端只存雜湊值，比較安全）；忘了可以「重新產生連結碼」。</p>`,
     (el) => {
       el.querySelector('#lk-copy').onclick = async () => {
         try {
           await navigator.clipboard.writeText(text)
-          toast('已複製（含使用說明）：私訊給他')
+          toast('已複製：私訊給他')
         } catch {
           el.querySelector('textarea').select()
-          toast('請長按上面的連結碼複製')
+          toast('請長按上面的文字複製')
         }
       }
       el.querySelector('#lk-share')?.addEventListener('click', () => navigator.share({ text }).catch(() => {}))
@@ -4161,24 +4250,14 @@ $app.addEventListener('click', async (e) => {
         }
         return toast('這是試算表網址（擁有者用），不是連結碼：請按上面「開啟多人同步（我是擁有者）」。連結碼是同事收到的，後面會有 #k=…')
       }
-      if (!code) return toast('連結碼不對：要整段貼上（https://script.google.com/…/exec#k=…）')
-      const before = { url: ls.get(LS.sheet), key: ls.get(LS.syncKey) }
-      ls.set(LS.sheet, code.url)
-      ls.set(LS.syncKey, code.key)
+      if (!code) return toast('連結碼不對：要整段貼上（收到的那一整段網址）')
       try {
-        await postSync({ action: 'hello' })
+        await joinWith(code)
+        toast('連結成功，下載資料中…')
       } catch (err) {
-        ls.set(LS.sheet, before.url)
-        ls.set(LS.syncKey, before.key)
-        return toast(err.message)
+        toast(err.message)
       }
-      ls.set(LS.pulled, '0') // 新連結：從頭下載一次
-      toast('連結成功，下載資料中…')
-      render()
-      return syncNow((m) => toast(m))
-        .then((r) => toast(`同步完成：下載 ${r.pulled} 筆、上傳 ${r.pushed} 筆`))
-        .catch((err) => toast(`同步沒成功：${err.message}`))
-        .finally(() => render())
+      return
     }
     case 'share-open':
       return shareSheet()
@@ -4577,5 +4656,10 @@ async function forceUpdate() {
 }
 
 render()
+// 點邀請連結打開的（#join=…）：直接跳出「加入」
+{
+  const code = location.hash.startsWith('#join=') ? parseLinkCode(location.hash) : null
+  if (code) setTimeout(() => joinSheet(code), 300)
+}
 // 打開 App：有開同步就先跟大家對一次
 if (syncReady()) setTimeout(() => syncNow().catch(() => {}), 1200)
