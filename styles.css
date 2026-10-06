@@ -1679,6 +1679,29 @@ a.row {
   width: 100%;
   height: 100%;
 }
+/* 照片在這台不見了（iPhone 的問題）：灰色底照原比例，框還是畫在上面 */
+.photo-ph {
+  width: 100%;
+  aspect-ratio: var(--ar, 1.333);
+  background: repeating-linear-gradient(-45deg, var(--card-2) 0 14px, transparent 14px 28px);
+}
+.lost-card {
+  margin-bottom: 12px;
+}
+.photo-strip button.lost,
+.thumb-lost {
+  background: repeating-linear-gradient(-45deg, var(--card-2) 0 8px, var(--line) 8px 10px);
+}
+.thumb-lost {
+  flex: none;
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+}
+.lost-card .btn {
+  display: flex;
+  margin-top: 10px;
+}
 /* 點到的那一列：先變色、打勾，再換畫面 */
 button.row.chosen {
   background: var(--tint-soft);
