@@ -1650,3 +1650,19 @@ a.row {
   flex: 1;
   padding-inline: 8px;
 }
+/* 提示旁邊的「復原」 */
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.toast-action {
+  flex: none;
+  border: 0;
+  background: none;
+  color: #6cb4ff;
+  font-weight: 700;
+  font-size: 15px;
+  padding: 4px 2px;
+  cursor: pointer;
+}

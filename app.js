@@ -65,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.0.1（10/6・選取按鈕不黏到清單）'
+const VERSION = '4.0.2（10/6・改一個框不會改到別的、可以復原）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -130,15 +130,27 @@ const cleanLabel = (label) => {
 }
 
 let toastTimer = 0
-function toast(msg) {
+/** action：提示旁邊的按鈕（例如「復原」），{ label, run }；有按鈕的提示留久一點 */
+function toast(msg, action) {
   document.querySelector('.toast')?.remove()
   const el = document.createElement('div')
   el.className = 'toast'
   el.setAttribute('role', 'status')
   el.textContent = msg
+  if (action) {
+    const b = document.createElement('button')
+    b.className = 'toast-action'
+    b.type = 'button'
+    b.textContent = action.label
+    b.onclick = () => {
+      el.remove()
+      action.run()
+    }
+    el.append(b)
+  }
   document.body.appendChild(el)
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => el.remove(), 2800)
+  toastTimer = setTimeout(() => el.remove(), action ? 6000 : 2800)
 }
 
 // ───────────────────────── 存檔（IndexedDB，照片也存在手機） ─────────────────────────
@@ -1727,7 +1739,7 @@ async function viewItems() {
                  ? `<div class="hint-card stack" style="margin-top:12px">
                       <div><b>還沒有要叫貨的。</b></div>
                       <div>先告訴 App 每一種「<b>剩幾個就要叫貨</b>」：數量剩這麼多（或更少）時，就會出現在這裡。${items.some((it) => it.safety != null) ? '' : '<br>目前每一種都還沒設定。'}</div>
-                      <button class="btn small edit-only" data-action="safety-pick">設定「剩幾個就要叫貨」</button>
+                      <button class="btn small edit-only" data-action="safety-pick">設定「剩幾個就要叫貨」（安全庫存）</button><button class="btn small secondary edit-only" data-action="import">很多種一次設：貼上 Excel</button>
                     </div>`
                  : `<div class="empty"><p>${f.id === 'diff' ? '實盤跟帳面都一樣。<br>（要先在品項裡設定「帳面數」才會比對）' : '沒有新的品項，都確認過了。'}</p></div>`
            }
@@ -1736,7 +1748,7 @@ async function viewItems() {
              <ol>
                <li><b>記進來：</b>盤點完按「完成・記進品項庫」，數到的東西會自動記進來。也可以按右上「＋ 新增」，或到「查型號」拍標籤加入。</li>
                <li><b>確認名稱：</b>標「新的」是 AI 自動建立的，點進去看名稱對不對，對就按「確認」。</li>
-               <li><b>叫貨提醒：</b>點進一個品項，設「剩幾個就要叫貨」；數量少於這個數字，就會出現在上面的「叫貨」。</li>
+               <li><b>叫貨提醒（安全庫存）：</b>點進一個品項，設「剩幾個就要叫貨」；數量少於這個數字，就會出現在上面的「叫貨」。<b>很多種一次設：</b>右上「⋯」→「貼上 Excel 清單」，表格有「安全庫存」這一欄就會一起設好，不用一個一個打。</li>
                <li><b>帳面數：</b>點進品項按「設定帳面數 → 用實盤數」當起點；之後進貨按「＋ 進貨」、賣掉按「－ 賣出」。下次盤點數量跟帳面不一樣，就會出現在「差異」。</li>
                <li><b>複盤：</b>盤到的跟帳面不一樣，會出現在「複盤」：請另一個人再數一次，兩次一樣才算確定，再選原因；擁有者或管理員決定要不要調整帳面。</li>
              </ol>
@@ -1787,7 +1799,7 @@ async function viewItem() {
     </section>
     ${recountSection(it)}
     <p class="section-title">叫貨提醒</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">剩幾個就要叫貨</span><br><span class="meta">${needsOrder(it) ? `⚠️ 現在大概剩 ${expected(it)} 個，該叫貨了` : it.safety == null ? '按 ＋ 設一個數字，例如 3：剩 3 個以下就會出現在「叫貨」' : `剩 ${it.safety} 個以下，就會出現在「叫貨」`}</span></span><span class="stepper edit-only"><button data-safety="-1" aria-label="減一">−</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="剩幾個就要叫貨"><button data-safety="1" aria-label="加一">＋</button></span><span class="qty view-only"><b>${it.safety ?? '—'}</b></span></div></div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">剩幾個就要叫貨（安全庫存）</span><br><span class="meta">${needsOrder(it) ? `⚠️ 現在大概剩 ${expected(it)} 個，該叫貨了` : it.safety == null ? '按 ＋ 設一個數字，例如 3：剩 3 個以下就會出現在「叫貨」' : `剩 ${it.safety} 個以下，就會出現在「叫貨」`}</span></span><span class="stepper edit-only"><button data-safety="-1" aria-label="減一">−</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="剩幾個就要叫貨"><button data-safety="1" aria-label="加一">＋</button></span><span class="qty view-only"><b>${it.safety ?? '—'}</b></span></div></div>
     <p class="section-title">在哪裡（${stock.length} 個位置）</p>
     ${
       stock.length
@@ -2047,7 +2059,7 @@ async function editSheet(key) {
   if (!g) return
   const sug = await suggestions()
   sheet(
-    `<h2 class="sheet-title">修改品項</h2>
+    `<h2 class="sheet-title">${g.manual ? "修改品項" : `修改「${esc(g.label)}」這一種（${g.boxes} 個一起改）`}</h2>
      <p class="sheet-sub">${g.manual ? '手動新增的品項' : `照片裡 ${g.boxes} 個框會一起改；只有其中幾個不一樣，請在照片上點那個框`}</p>
      ${fieldsHtml(g, sug)}
      <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="e-save">儲存</button><button class="btn danger" id="e-del">刪掉</button></div>
@@ -2183,18 +2195,46 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
       formOpen = false
       draw()
     }
+    // 換到下一個框後 0.6 秒內不接受點擊：連點兩下才不會把下一個（本來是對的）也改掉
+    let guardUntil = 0
+    const guarded = () => Date.now() < guardUntil
+    const advance = () => {
+      guardUntil = Date.now() + 600
+      go(cur + 1)
+    }
     const assign = async (fields) => {
+      if (guarded()) return
       const { pi, o } = order[cur]
       const oi = s.photos[pi].objects.indexOf(o)
       if (oi < 0) return go(cur + 1)
+      // 記住改之前的樣子，給「復原」用
+      const before = { label: o.label, brand: o.brand, model: o.model, spec: o.spec, edited: o.edited, checked: o.checked }
+      const counts = { ...(s.counts || {}) }
       moveObjects(s, [{ pi, oi }], fields)
       await save()
       render()
-      if (cur + 1 >= order.length) {
-        toast(doubt ? '要確認的都看完了' : '已經是最後一個了')
+      const name = `${fields.label}${fields.spec ? `・${fields.spec}` : ''}`
+      const undo = {
+        label: '復原',
+        run: async () => {
+          Object.assign(o, before)
+          s.counts = counts
+          await save()
+          render()
+          toast('已復原')
+        },
+      }
+      // 點一個框來改：改好就關掉（不要自動跳到下一個，才不會改到本來就對的）
+      if (!doubt) {
+        toast(`已改成「${name}」`, undo)
         return finish()
       }
-      go(cur + 1)
+      if (cur + 1 >= order.length) {
+        toast(`已改成「${name}」；要確認的都看完了`, undo)
+        return finish()
+      }
+      toast(`已改成「${name}」，換下一個`, undo)
+      advance()
     }
     const draw = async () => {
       const { pi, o, reason } = order[cur]
@@ -2233,10 +2273,11 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
         <button class="btn plain block" id="q-more" style="margin-top:8px">改品牌、型號，或存成樣品照…</button>
         <button class="btn danger block" id="q-del" style="margin-top:8px">這不是商品，刪掉這個框</button>`
       body.querySelector('#q-same')?.addEventListener('click', async () => {
+        if (guarded()) return
         o.checked = true
         await save()
         render()
-        go(cur + 1)
+        advance()
       })
       cropBox(photo, o.box)
         .then((blob) => {
@@ -2248,12 +2289,13 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
         .catch(() => {})
       body.querySelectorAll('[data-q]').forEach((b) =>
         b.addEventListener('click', async () => {
+          if (guarded()) return
           const g = groups[Number(b.dataset.q)]
           if (g === mine) {
-            // 選了目前這一種＝確認一樣
+            // 選了目前這一種＝確認一樣（點一個框來看的：直接關掉）
             o.checked = true
             await save()
-            return go(cur + 1)
+            return doubt ? advance() : finish()
           }
           assign({ label: g.label, brand: g.brand, model: g.model, spec: g.spec })
         }),
