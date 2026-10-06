@@ -30,15 +30,23 @@ const LS = {
   memberId: 'inventory:memberId',
   roster: 'inventory:roster',
   counterId: 'inventory:counterId',
+  // 盤點規則（跟著共用設定同步）＋ 標準答案考試紀錄（只存這台）
+  blind: 'inventory:blind',
+  recount: 'inventory:recountOn',
+  goldenRuns: 'inventory:goldenRuns',
 }
 /** 檢視者不能用的動作 */
-const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick'])
+const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run'])
 /** 權限（跟 Google 雲端硬碟的「共用」一樣） */
 const ROLE_LABEL = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 const ROLE_DESC = { owner: '全部都可以；不能被移除', manager: '可以盤點、修改，也可以邀請、移除人', editor: '可以盤點、修改', viewer: '只能看（可以下載 Excel）' }
 const myRole = () => (ls.get(LS.syncKey) ? ls.get(LS.memberRole) || 'editor' : 'owner')
 const canEdit = () => myRole() !== 'viewer'
 const canManage = () => ['owner', 'manager'].includes(myRole())
+/** 盲盤：盤點的人看不到帳面數、差異（擁有者、管理員看得到）。看得到帳面數，盤點就變成「對答案」，抓不到錯 */
+const blindMe = () => ls.get(LS.blind, '1') === '1' && !canManage()
+/** 有差異先複盤：請另一個人再數一次，兩次一樣才確定，再選原因、由管理員調整帳面 */
+const recountOn = () => ls.get(LS.recount, '1') === '1'
 /** 共用名單（只有名字）：顯示「誰盤的」用；名字改了，以前的紀錄也顯示新名字 */
 const roster = () => {
   try {
@@ -57,7 +65,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '3.5（10/5・試算表：總覽、庫存、儲位庫存、盤差報告）'
+const VERSION = '3.6（10/6・AI 準不準、標準答案、盲盤、複盤）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -829,32 +837,133 @@ function groupsOf(session) {
  */
 function doubtsOf(session) {
   const out = []
-  session.photos.forEach((photo, pi) => {
-    if (!photo.w || !photo.h) return
-    const byKey = new Map()
-    photo.objects.forEach((o) => {
-      const k = keyOf(o)
-      if (!byKey.has(k)) byKey.set(k, [])
-      byKey.get(k).push(o)
-    })
-    for (const objs of byKey.values()) {
-      const sizes = objs.map((o) => boxPx(photo, o).long)
-      const med = [...sizes].sort((a, b) => a - b)[Math.floor(sizes.length / 2)] || 1
-      const pairGap = objs.length === 2 ? Math.max(...sizes) / Math.max(1, Math.min(...sizes)) : 1
-      objs.forEach((o, i) => {
-        if (o.checked || o.edited) return
-        const diff = sizes[i] / med - 1
-        let reason = ''
-        if (o.odd) reason = o.oddReason ? `AI 說這一個${o.oddReason}` : 'AI 覺得跟同一種的其他個不太一樣'
-        else if (objs.length >= 3 && Math.abs(diff) > 0.3) reason = `比同一種的其他個${diff > 0 ? '大' : '小'}約 ${Math.round(Math.abs(diff) * 100)}%`
-        else if (pairGap > 1.35) reason = '這一種只有 2 個，但大小差很多'
-        else if (o.confidence < 0.6) reason = 'AI 不太確定這是什麼'
-        if (reason) out.push({ pi, o, reason })
-      })
-    }
-  })
+  session.photos.forEach((photo, pi) => photoDoubts(photo, (o) => o.checked || o.edited).forEach((d) => out.push({ pi, ...d })))
   return out
 }
+/** 一張照片裡要確認的框（skip＝不用再列的，例如你確認過、改過的） */
+function photoDoubts(photo, skip = () => false) {
+  const out = []
+  if (!photo.w || !photo.h) return out
+  const byKey = new Map()
+  photo.objects.forEach((o) => {
+    const k = keyOf(o)
+    if (!byKey.has(k)) byKey.set(k, [])
+    byKey.get(k).push(o)
+  })
+  for (const objs of byKey.values()) {
+    const sizes = objs.map((o) => boxPx(photo, o).long)
+    const med = [...sizes].sort((a, b) => a - b)[Math.floor(sizes.length / 2)] || 1
+    const pairGap = objs.length === 2 ? Math.max(...sizes) / Math.max(1, Math.min(...sizes)) : 1
+    objs.forEach((o, i) => {
+      if (skip(o)) return
+      const diff = sizes[i] / med - 1
+      let reason = ''
+      if (o.odd) reason = o.oddReason ? `AI 說這一個${o.oddReason}` : 'AI 覺得跟同一種的其他個不太一樣'
+      else if (objs.length >= 3 && Math.abs(diff) > 0.3) reason = `比同一種的其他個${diff > 0 ? '大' : '小'}約 ${Math.round(Math.abs(diff) * 100)}%`
+      else if (pairGap > 1.35) reason = '這一種只有 2 個，但大小差很多'
+      else if (o.confidence < 0.6) reason = 'AI 不太確定這是什麼'
+      if (reason) out.push({ o, reason })
+    })
+  }
+  return out
+}
+
+// ───────────────────────── AI 準不準：記下 AI 原本的答案，人工修改後就知道對不對 ─────────────────────────
+/**
+ * 辨識（和背景的相似品比對）一好，就把 AI 的答案記在每個框上：o.ai＝AI 說的種類、o.aiFlag＝AI 有沒有標成「要確認」。
+ * 之後你補框（o.added）、刪框（記在 photo.aiGone）、改種類、改數量，按「完成」時就能算出 AI 原本對不對。
+ */
+function markAi(photo, objs = photo.objects) {
+  const flagged = new Set(photoDoubts(photo).map((d) => d.o))
+  for (const o of objs) {
+    if (o.added) continue
+    o.ai = keyOf(o)
+    o.aiFlag = flagged.has(o)
+  }
+}
+
+/**
+ * 這次盤點 AI 準不準（按「完成」時算，存在 session.eval）：
+ * - 每一種：AI 數幾個 vs 你確認後幾個。AI 的一種，對到「它的框最後大多變成的那一種」，所以整組改名不算錯，數量對就算對。
+ * - 拆開看：漏數（你補的框＋你把數量加上去的）、多數（刪掉的框＋你把數量減下來的）、分錯（框改成別的種類）。
+ * - 要確認抓到幾個：AI 錯的框（刪掉、分錯）裡，有幾個事先被標成「要確認」。越高，代表只看要確認的就夠。
+ * 手動新增的種類（沒有框）不算；舊版本的盤點沒有記 AI 答案，回傳 null。
+ */
+function evalSession(s) {
+  const done = s.photos.filter((p) => p.status === 'done')
+  const objs = done.flatMap((p) => p.objects)
+  const gone = done.flatMap((p) => p.aiGone || [])
+  if (!objs.some((o) => o.ai) && !gone.length) return null
+  const bump = (m, k, n = 1) => m.set(k, (m.get(k) || 0) + n)
+  const aiCount = new Map()
+  for (const o of objs) if (o.ai) bump(aiCount, o.ai)
+  for (const x of gone) bump(aiCount, x.ai)
+  const votes = new Map()
+  for (const o of objs) {
+    if (!o.ai) continue
+    if (!votes.has(o.ai)) votes.set(o.ai, new Map())
+    bump(votes.get(o.ai), keyOf(o))
+  }
+  const mapTo = new Map([...votes].map(([a, v]) => [a, [...v].sort((x, y) => y[1] - x[1])[0][0]]))
+  const aiOf = new Map()
+  const types = []
+  for (const [a, n] of aiCount) {
+    const f = mapTo.get(a)
+    if (f) bump(aiOf, f, n)
+    else {
+      const [label, , , spec] = a.split('|')
+      types.push({ label, spec, ai: n, final: 0, item: '' }) // AI 說有、其實沒有的一種（框全被刪掉）
+    }
+  }
+  const groups = groupsOf(s).filter((g) => !g.manual)
+  for (const g of groups) types.unshift({ label: g.label, spec: g.spec, ai: aiOf.get(g.key) || 0, final: Number(g.count) || 0, item: s.itemOf?.[g.key] || '' })
+  let missed = objs.filter((o) => o.added).length
+  let extra = gone.length
+  for (const g of groups) {
+    const d = (Number(g.count) || 0) - g.boxes
+    if (d > 0) missed += d
+    else extra -= d
+  }
+  const wrongObjs = objs.filter((o) => o.ai && keyOf(o) !== mapTo.get(o.ai))
+  const wrong = wrongObjs.length + gone.length
+  const caught = wrongObjs.filter((o) => o.aiFlag).length + gone.filter((x) => x.flag).length
+  return {
+    at: Date.now(),
+    model: s.model || '',
+    boxes: objs.filter((o) => o.ai).length + gone.length,
+    types,
+    missed,
+    extra,
+    misclass: wrongObjs.length,
+    renamed: [...mapTo].filter(([a, f]) => a !== f).length,
+    wrong,
+    caught,
+    flagged: objs.filter((o) => o.aiFlag).length + gone.filter((x) => x.flag).length,
+  }
+}
+
+/** 很多次盤點合起來算：完全正確率、平均差幾個、漏數／多數／分錯、要確認抓到幾成 */
+function qualityStats(sessions) {
+  const types = sessions.flatMap((s) => s.eval.types)
+  const n = types.length
+  const exact = types.filter((t) => t.ai === t.final).length
+  const sum = (k) => sessions.reduce((a, s) => a + (s.eval[k] || 0), 0)
+  return {
+    sessions: sessions.length,
+    n,
+    exact,
+    rate: n ? exact / n : null,
+    mae: n ? types.reduce((a, t) => a + Math.abs(t.ai - t.final), 0) / n : null,
+    boxes: sum('boxes'),
+    missed: sum('missed'),
+    extra: sum('extra'),
+    misclass: sum('misclass'),
+    wrong: sum('wrong'),
+    caught: sum('caught'),
+    flagged: sum('flagged'),
+  }
+}
+const pct = (x) => (x == null ? '—' : `${Math.round(x * 100)}%`)
 
 /** 改數量（手動新增的存在品項上；AI 的存成覆寫值） */
 function setCount(session, g, n) {
@@ -890,6 +999,12 @@ function moveObjects(session, refs, fields) {
 function removeObjects(session, refs) {
   const counts = session.counts ?? {}
   const key = keyOf(session.photos[refs[0].pi].objects[refs[0].oi])
+  // AI 框被刪掉＝AI 多數了（記下來算準確率）
+  for (const r of refs) {
+    const photo = session.photos[r.pi]
+    const o = photo.objects[r.oi]
+    if (o?.ai) (photo.aiGone ??= []).push({ ai: o.ai, flag: !!o.aiFlag })
+  }
   ;[...refs].sort((a, b) => b.oi - a.oi).forEach((r) => session.photos[r.pi].objects.splice(r.oi, 1))
   if (counts[key] !== undefined) {
     const left = groupsOf(session).find((x) => x.key === key)
@@ -1013,6 +1128,45 @@ function bookFromMoves(moves) {
 const expected = (it) => (it.book != null ? it.book : onHand(it))
 const needsOrder = (it) => it.safety != null && expected(it) <= it.safety
 const placeKeyOf = (s) => (s.place ? `p:${canon(s.place)}` : `s:${s.id}`)
+
+/**
+ * 複盤：按「完成」後，這次數到的跟帳面不一樣 → 開一張複盤單（it.recounts[盤點ID]）。
+ * 另一個人再數一次（看不到第一次的數字）：兩次一樣＝差異確定 → 選原因 → 管理員決定要不要調整帳面；
+ * 不一樣＝以新數字為準、請再數一次；改完跟帳面一樣＝第一次數錯，自動更正。
+ */
+const REASONS = ['數錯了（第一次數錯）', '放錯格', '漏記進貨', '漏記賣出、出貨', '損壞、報廢', '借出、當樣品', '單位、包裝算錯', '其他']
+const RC_TEXT = { pending: '待複盤', confirmed: '差異確定', fixed: '數錯，已更正', adjusted: '已調整帳面', kept: '保留，不調整' }
+const rcOpen = (rc) => !!rc && !rc.gone && (rc.status === 'pending' || rc.status === 'confirmed')
+const recountsOf = (it) =>
+  Object.entries(it.recounts || {})
+    .filter(([, rc]) => !rc.gone)
+    .sort((a, b) => rcOpen(b[1]) - rcOpen(a[1]) || b[1].at - a[1].at)
+const needsRecount = (it) => recountsOf(it).some(([, rc]) => rcOpen(rc))
+/** 試算表、Excel 用：最需要處理的那一張（沒有就是最近的） */
+const latestRecount = (it) => recountsOf(it)[0]?.[1] || null
+function planRecount(it, s) {
+  const pk = placeKeyOf(s)
+  const st = it.stock?.[pk]
+  const rcs = (it.recounts ??= {})
+  const cur = rcs[s.id]
+  const now = Date.now()
+  // 同一格之前沒處理完的單：被這次盤點取代
+  for (const [sid, rc] of Object.entries(rcs)) if (sid !== s.id && rc.pk === pk && rcOpen(rc)) rcs[sid] = { ...rc, gone: true, v: now }
+  const d = diffOf(it)
+  if (!st || st.removed || st.sid !== s.id || !d) {
+    // 改完再按完成，已經沒有差異：還沒複盤的單拿掉
+    if (cur && cur.status === 'pending' && !cur.gone) rcs[s.id] = { ...cur, gone: true, v: now }
+    return
+  }
+  if (cur && !cur.gone && cur.first.count === st.count) return // 重按完成、數字沒變：照舊
+  rcs[s.id] = { pk, place: s.place || '', at: s.createdAt, first: { count: st.count, by: byName(s), byId: s.byId || '' }, counts: [], status: 'pending', v: now }
+}
+/** 兩台同時改複盤單：每一張比寫入時間，新的贏 */
+function mergeRecounts(a = {}, b = {}) {
+  const out = {}
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) out[k] = (a[k]?.v || 0) >= (b[k]?.v || 0) ? a[k] || b[k] : b[k]
+  return out
+}
 const stockPlace = (st) => (st.place ? placeLabel(st.place) : `沒填位置・${fmtTime(st.at)}`)
 const itemTitle = (it) => `${it.label}${it.spec ? `・${it.spec}` : ''}`
 const itemUrls = new Map()
@@ -1058,17 +1212,19 @@ async function linkSession(s) {
   // 同一格以這次為準：這次沒數到的（以前記在這一格、或這次盤點改成別的）→ 從這一格拿掉
   for (const it of items) {
     const st = it.stock?.[pk]
-    if (st && !st.removed && !sums.has(it) && (st.sid === s.id || st.at <= s.createdAt)) {
+    if (st && !st.removed && !sums.has(it) && ((st.sid === s.id && !st.rc) || st.at <= s.createdAt)) {
       it.stock[pk] = removedEntry(st, s.createdAt)
       await putItem(it)
     }
   }
   for (const [it, count] of sums) {
     const st = it.stock[pk]
-    if (!st || st.sid === s.id || st.at <= s.createdAt) it.stock[pk] = { count, at: s.createdAt, sid: s.id, place: s.place || '', v: Date.now() }
+    if (!st || (st.sid === s.id && !st.rc) || st.at <= s.createdAt) it.stock[pk] = { count, at: s.createdAt, sid: s.id, place: s.place || '', v: Date.now() }
+    if (recountOn() && !it.stock[pk]?.rc) planRecount(it, s)
     await putItem(it)
   }
   s.linkedAt = Date.now()
+  s.eval = evalSession(s) // AI 準不準（AI 原本的答案 vs 你確認後的）
   await db.put(s)
   return { created, linked: sums.size }
 }
@@ -1153,6 +1309,7 @@ const tabBar = (active) =>
 async function viewHome() {
   const sessions = await db.all()
   const hasKey = !!ls.get(LS.key)
+  const toRecount = canEdit() ? (await itemsAll()).filter(needsRecount) : []
   return `
   <main class="app">
     <div class="nav">${syncReady() ? `<button class="btn small plain sync-pill ${state.syncState || ''}" data-action="sync-now">☁︎ ${esc(syncLabel())}</button>` : '<span></span>'}<button class="icon-btn" data-go="settings" aria-label="設定"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.6 7.6 0 0 0-1.68-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.61-.25 1.17-.58 1.68-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.1-1.65Z"/></svg></button></div>
@@ -1164,6 +1321,11 @@ async function viewHome() {
         : hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">📷</span><span class="grow"><b>新盤點</b><br><span class="meta">拍一格貨架；有貼儲位標籤會自動填位置</span></span>${chev}</button>`
         : `<div class="hint-card stack"><div><b>要拍照辨識：</b>先到「設定」貼上你的免費 Gemini API Key（只會存在這台裝置）。<br>只想看手機盤點的結果（例如在電腦上）：到「設定 → 多人、多台同步」貼上連結碼就好，不用 Key。</div><button class="btn small" data-go="settings">去設定</button></div>`
+    }
+    ${
+      toRecount.length
+        ? `<button class="sum-doubt tip" data-recount-list style="margin-top:12px"><span class="sum-dot" aria-hidden="true">!</span><span class="grow"><b>${toRecount.length} 項要複盤</b><br><span class="meta">盤到的跟帳面不一樣：請另一個人再數一次（${esc(toRecount.slice(0, 2).map(itemTitle).join('、'))}${toRecount.length > 2 ? ' 等' : ''}）</span></span>${chev}</button>`
+        : ''
     }
     ${(() => {
       if (!sessions.length) return ''
@@ -1293,6 +1455,11 @@ function viewReview() {
                 ? `<button class="sum-doubt edit-only" data-action="review-doubts"><span class="sum-dot" aria-hidden="true">?</span><span class="grow"><b>${doubts.length} 個要確認</b><br><span class="meta">可能尺寸不同或 AI 沒把握；只看這幾個就好</span></span>${chev}</button>`
                 : `<div class="sum-ok"><span aria-hidden="true">✓</span> 沒有需要確認的${state.refining && state.refining.session === s.id ? '（相似品還在比對）' : ''}</div>`
             }
+            ${
+              s.eval?.types.length
+                ? `<button class="sum-eval" data-go="quality"><span class="grow">AI 這次：${s.eval.types.length} 種裡 <b>${s.eval.types.filter((t) => t.ai === t.final).length}</b> 種數量一個不差${s.eval.missed || s.eval.extra || s.eval.misclass ? `<br><span class="meta">${[s.eval.missed && `漏數 ${s.eval.missed}`, s.eval.extra && `多數 ${s.eval.extra}`, s.eval.misclass && `分錯 ${s.eval.misclass}`].filter(Boolean).join('・')}</span>` : ''}</span>${chev}</button>`
+                : ''
+            }
           </section>`
         : ''
     }
@@ -1343,6 +1510,11 @@ function viewReview() {
             .join('')}</div>`
         : `<div class="empty"><p>這次沒有找到商品。<br>可以重拍，或按右上「手動新增」。</p></div>`
     }
+    ${
+      groups.length
+        ? `<label class="row golden-row edit-only"><span class="grow"><span class="title">當成標準答案</span><br><span class="meta">兩個人各自數過、數字一樣才勾。之後在「AI 準不準」可以拿來考 AI（換模型、改設定時看有沒有變差）。</span></span><input type="checkbox" id="golden" ${s.golden ? 'checked' : ''} style="width:22px;height:22px"></label>`
+        : ''
+    }
     <div class="row-actions edit-only" style="margin-top:22px">
       <button class="btn danger small" data-action="delete-session">刪除這次盤點</button>
     </div>
@@ -1365,7 +1537,8 @@ async function viewSettings() {
       <p class="footnote" style="margin:0">沒有 Key？到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style="color:var(--tint)">Google AI Studio</a> 免費建立。Key 只存在這支手機，照片只會送到 Google Gemini 分析。</p>
     </div>
     <p class="section-title">辨識模型</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model || '自動挑選')}</span><br><span class="meta">自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro</span></span><button class="btn small secondary" data-action="pick-model">重新挑選</button></div></div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model || '自動挑選')}</span><br><span class="meta">自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro</span></span><button class="btn small secondary" data-action="pick-model">重新挑選</button></div>
+      <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">AI 原本數的跟你確認後的比；也可以用標準答案考 AI</span></span>${chev}</button></div>
     <div id="models"></div>
     <p class="section-title">店內品項清單</p>
     <textarea class="field" id="catalog" spellcheck="false">${esc(catalogLines().join('\n'))}</textarea>
@@ -1424,13 +1597,19 @@ async function viewSettings() {
     ${
       syncReady()
         ? ''
-        : `<details class="steps" open><summary>我收到連結碼了</summary>
+        : `<details class="steps" ${ls.get(LS.sheet) ? '' : 'open'}><summary>我收到連結碼了（被邀請的人用）</summary>
       <div class="stack" style="margin-top:8px">
         <input class="field" id="link-code" placeholder="貼上連結碼（https://script.google.com/…#k=…）" autocomplete="off" spellcheck="false">
         <button class="btn small" data-action="sync-link">加入</button>
       </div>
     </details>`
     }
+    <p class="section-title">盤點規則</p>
+    <div class="group">
+      <label class="row"><span class="grow"><span class="title">盲盤</span><br><span class="meta">盤點的人看不到帳面數、差異（擁有者、管理員看得到）。看得到帳面數，盤點就會變成「對答案」，抓不到錯。</span></span><input type="checkbox" id="rule-blind" ${ls.get(LS.blind, '1') === '1' ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
+      <label class="row"><span class="grow"><span class="title">有差異先複盤</span><br><span class="meta">盤到的跟帳面不一樣：請另一個人再數一次，兩次一樣才確定，再選原因，由擁有者或管理員決定要不要調整帳面。</span></span><input type="checkbox" id="rule-recount" ${recountOn() ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
+    </div>
+    <p class="footnote">${canManage() ? '改了會同步給大家。' : '由擁有者或管理員設定。'}</p>
     <details class="steps"><summary>資料安全嗎？（公司資產）</summary>
       <ol>
         <li><b>資料放在哪：</b>只在擁有者的 Google 雲端硬碟「拍照盤點同步資料」資料夾和試算表。可以先用個人帳號，之後在「共用設定 → 搬到另一個 Google 帳號」搬到公司帳號（大家自動跟過去）。GitHub 上只有程式，沒有任何盤點資料。</li>
@@ -1457,12 +1636,14 @@ async function viewSettings() {
 const ITEM_FILTERS = [
   { id: 'all', label: '全部', test: () => true },
   { id: 'order', label: '叫貨', test: needsOrder },
-  { id: 'diff', label: '差異', test: (it) => (diffOf(it) ?? 0) !== 0 },
+  { id: 'recount', label: '複盤', test: needsRecount },
+  { id: 'diff', label: '差異', test: (it) => (diffOf(it) ?? 0) !== 0, hidden: blindMe },
   { id: 'new', label: '新的', test: (it) => it.status === 'new' },
 ]
 const itemBadges = (it) => {
-  const d = diffOf(it)
-  return `${it.status === 'new' ? '<span class="badge ok">新的</span>' : ''}${needsOrder(it) ? '<span class="badge low">該叫貨</span>' : ''}${d ? `<span class="badge ${d < 0 ? 'bad' : 'edit'}">${d > 0 ? '+' : ''}${d}</span>` : ''}`
+  const d = blindMe() ? null : diffOf(it)
+  const rc = recountsOf(it).find(([, x]) => rcOpen(x))?.[1]
+  return `${it.status === 'new' ? '<span class="badge ok">新的</span>' : ''}${needsOrder(it) ? '<span class="badge low">該叫貨</span>' : ''}${rc ? `<span class="badge low">${rc.status === 'pending' ? '待複盤' : '差異待處理'}</span>` : ''}${d ? `<span class="badge ${d < 0 ? 'bad' : 'edit'}">${d > 0 ? '+' : ''}${d}</span>` : ''}`
 }
 const itemRow = (it) => {
   const live = liveStock(it).map(([, st]) => st)
@@ -1474,12 +1655,13 @@ const itemRow = (it) => {
   return `<button class="row item-row" data-item-open="${it.id}" data-search="${esc(search)}">
     ${itemThumb(it)}
     <span class="grow"><span class="title">${esc(itemTitle(it))}</span>${itemBadges(it)}<br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}${places ? `<br>${esc(places)}` : ''}</span></span>
-    <span class="qty"><b>${onHand(it)}</b>${it.book != null ? `<small>帳面 ${it.book}</small>` : ''}</span>${chev}</button>`
+    <span class="qty"><b>${onHand(it)}</b>${it.book != null && !blindMe() ? `<small>帳面 ${it.book}</small>` : ''}</span>${chev}</button>`
 }
 
 async function viewItems() {
   const items = await itemsAll(true)
-  const f = ITEM_FILTERS.find((x) => x.id === state.itemFilter) || ITEM_FILTERS[0]
+  const filters = ITEM_FILTERS.filter((x) => !x.hidden?.() && (x.id !== 'recount' || items.some(needsRecount)))
+  const f = filters.find((x) => x.id === state.itemFilter) || filters[0]
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
   const list = items.filter(f.test).sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.model, b.model))
   const byLabel = new Map()
@@ -1491,7 +1673,8 @@ async function viewItems() {
     <p class="subtitle">${items.length ? `${items.length} 種商品・${locations().length} 個儲位。盤點按「完成」就會自動更新。` : '盤點按「完成」，數到的東西就會自動記進來。'}</p>
     ${
       items.length
-        ? `<div class="seg" role="tablist" aria-label="篩選">${ITEM_FILTERS.map((x) => `<button role="tab" aria-selected="${x.id === f.id}" data-item-filter="${x.id}">${x.label} ${items.filter(x.test).length}</button>`).join('')}</div>
+        ? `<div class="seg" role="tablist" aria-label="篩選">${filters.map((x) => `<button role="tab" aria-selected="${x.id === f.id}" data-item-filter="${x.id}">${x.label} ${items.filter(x.test).length}</button>`).join('')}</div>
+           ${f.id === 'recount' ? `<p class="footnote" style="margin:4px 2px 10px">這些品項盤到的數量跟帳面不一樣。請<b>另一個人</b>到那一格再數一次，點進去按「我來複盤」；複盤時看不到第一次的數字，才不會受影響。</p>` : ''}
            ${f.id === 'all' && items.some((it) => it.status === 'new') ? `<button class="sum-doubt tip edit-only" data-item-filter="new"><span class="sum-dot" aria-hidden="true">!</span><span class="grow"><b>${items.filter((it) => it.status === 'new').length} 個新的品項，請確認名稱</b><br><span class="meta">盤點時 AI 自動建立的；名稱對就按「確認」，重複的就合併</span></span>${chev}</button>` : ''}
            ${f.id === 'order' && list.length ? `<button class="btn secondary block" data-action="order-copy" style="margin-bottom:6px">複製叫貨清單（貼到 LINE）</button>` : ''}
            ${f.id === 'order' && !list.length ? '' : '<input class="field search" id="item-search" type="search" placeholder="搜尋品名、型號、料號、儲位" autocomplete="off" enterkeyhint="search">'}
@@ -1515,6 +1698,7 @@ async function viewItems() {
                <li><b>確認名稱：</b>標「新的」是 AI 自動建立的，點進去看名稱對不對，對就按「確認」。</li>
                <li><b>叫貨提醒：</b>點進一個品項，設「剩幾個就要叫貨」；數量少於這個數字，就會出現在上面的「叫貨」。</li>
                <li><b>帳面數：</b>點進品項按「設定帳面數 → 用實盤數」當起點；之後進貨按「＋ 進貨」、賣掉按「－ 賣出」。下次盤點數量跟帳面不一樣，就會出現在「差異」。</li>
+               <li><b>複盤：</b>盤到的跟帳面不一樣，會出現在「複盤」：請另一個人再數一次，兩次一樣才算確定，再選原因；擁有者或管理員決定要不要調整帳面。</li>
              </ol>
            </details>`
         : `<div class="hint-card stack">
@@ -1548,13 +1732,19 @@ async function viewItem() {
         : ''
     }
     <section class="summary">
-      <div class="stock-nums">
+      ${
+        blindMe()
+          ? `<div class="stock-nums"><div><span class="stock-label">實盤</span><span class="stock-big">${total}</span><span class="stock-sub">${last ? `最近 ${fmtTime(last)}` : '還沒盤過'}</span></div></div>
+             <p class="footnote" style="margin:10px 0 0">盲盤中：帳面數和差異只有擁有者、管理員看得到。這樣盤點時只會照實際數，不會被帳面數影響。</p>`
+          : `<div class="stock-nums">
         <div><span class="stock-label">實盤</span><span class="stock-big">${total}</span><span class="stock-sub">${last ? `最近 ${fmtTime(last)}` : '還沒盤過'}</span></div>
         <div><span class="stock-label">帳面</span><span class="stock-big">${it.book ?? '—'}</span><span class="stock-sub">${it.book == null ? '還沒設定' : '進貨加、賣出減'}</span></div>
         <div><span class="stock-label">差異</span><span class="stock-big ${d < 0 ? 'neg' : d > 0 ? 'pos' : ''}">${d == null ? '—' : `${d > 0 ? '+' : ''}${d}`}</span><span class="stock-sub">${d == null ? '設定帳面數才比' : d > 0 ? '盤盈（多了）' : d < 0 ? '盤虧（少了）' : '一樣'}</span></div>
-      </div>
-      <div class="row-actions edit-only" style="margin-top:14px"><button class="btn small secondary" data-action="move-in">＋ 進貨</button><button class="btn small secondary" data-action="move-out">－ 賣出</button><button class="btn small secondary" data-action="book-set">設定帳面數</button></div>
+      </div>`
+      }
+      <div class="row-actions edit-only" style="margin-top:14px"><button class="btn small secondary" data-action="move-in">＋ 進貨</button><button class="btn small secondary" data-action="move-out">－ 賣出</button>${blindMe() ? '' : '<button class="btn small secondary" data-action="book-set">設定帳面數</button>'}</div>
     </section>
+    ${recountSection(it)}
     <p class="section-title">叫貨提醒</p>
     <div class="group"><div class="row"><span class="grow"><span class="title">剩幾個就要叫貨</span><br><span class="meta">${needsOrder(it) ? `⚠️ 現在大概剩 ${expected(it)} 個，該叫貨了` : it.safety == null ? '按 ＋ 設一個數字，例如 3：剩 3 個以下就會出現在「叫貨」' : `剩 ${it.safety} 個以下，就會出現在「叫貨」`}</span></span><span class="stepper edit-only"><button data-safety="-1" aria-label="減一">−</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="剩幾個就要叫貨"><button data-safety="1" aria-label="加一">＋</button></span><span class="qty view-only"><b>${it.safety ?? '—'}</b></span></div></div>
     <p class="section-title">在哪裡（${stock.length} 個位置）</p>
@@ -1581,7 +1771,7 @@ async function viewItem() {
         ? `<p class="section-title">進出紀錄</p><div class="group">${[...it.moves]
             .reverse()
             .slice(0, 20)
-            .map((m) => `<div class="row"><span class="grow">${m.kind === 'in' ? '進貨' : m.kind === 'out' ? '賣出' : '設定帳面數'}<br><span class="meta">${fmtTime(m.at)}</span></span><span class="qty"><b>${m.kind === 'in' ? '+' : m.kind === 'out' ? '−' : '＝'}${m.qty}</b></span></div>`)
+            .map((m) => `<div class="row"><span class="grow">${m.kind === 'in' ? '進貨' : m.kind === 'out' ? '賣出' : m.why ? '複盤後調整帳面' : '設定帳面數'}<br><span class="meta">${fmtTime(m.at)}${m.why ? `・${esc(m.why)}` : ''}</span></span>${m.kind === 'set' && blindMe() ? '' : `<span class="qty"><b>${m.kind === 'in' ? '+' : m.kind === 'out' ? '−' : '＝'}${m.qty}</b></span>`}</div>`)
             .join('')}</div>`
         : ''
     }
@@ -1589,6 +1779,29 @@ async function viewItem() {
     <p class="footnote">以前的寫法（AI 認過的名稱）：${esc((it.aliases || []).length)} 種，以後辨識到都會算進這一項。</p>
   </main>`
 }
+/** 品項頁的「複盤」：每一張單的狀態、誰數的、原因；照權限顯示能按的按鈕 */
+function recountSection(it) {
+  const list = recountsOf(it).slice(0, 4)
+  if (!list.length) return ''
+  const blind = blindMe()
+  const who = (c) => [c.by || '沒有記錄盤點人', c.at ? fmtTime(c.at) : ''].filter(Boolean).join('・')
+  const rows = list
+    .map(([sid, rc]) => {
+      const counts = [`第一次：${esc(who({ ...rc.first, at: rc.at }))}${blind ? '' : `，${rc.first.count} 個`}`, ...rc.counts.map((c, i) => `複盤${rc.counts.length > 1 ? ` ${i + 1}` : ''}：${esc(who(c))}${blind ? '' : `，${c.count} 個`}`)]
+      const reason = rc.reason ? `原因：${esc(rc.reason)}${rc.note ? `（${esc(rc.note)}）` : ''}` : ''
+      const btns = []
+      if (rc.status === 'pending') btns.push(`<button class="btn small edit-only" data-action="recount" data-sid="${esc(sid)}">我來複盤</button>`)
+      if (rc.status === 'confirmed') {
+        btns.push(`<button class="btn small secondary edit-only" data-action="recount-reason" data-sid="${esc(sid)}">${rc.reason ? '改原因' : '選原因'}</button>`)
+        if (canManage()) btns.push(`<button class="btn small edit-only" data-action="recount-adjust" data-sid="${esc(sid)}">調整帳面</button><button class="btn small plain edit-only" data-action="recount-keep" data-sid="${esc(sid)}">不調整</button>`)
+      }
+      const tag = rcOpen(rc) ? 'low' : rc.status === 'fixed' ? 'ok' : 'edit'
+      return `<div class="row" style="flex-wrap:wrap"><span class="grow"><span class="title">${esc(rc.place ? placeLabel(rc.place) : '沒填位置')}</span><span class="badge ${tag}">${RC_TEXT[rc.status]}</span><br><span class="meta">${counts.join('<br>')}${reason ? `<br>${reason}` : ''}${rc.status === 'pending' && rc.counts.length ? '<br>兩次數字不一樣：請再找一個人數一次' : ''}${rc.status === 'confirmed' && !canManage() ? '<br>等擁有者或管理員決定要不要調整帳面' : ''}</span></span>${btns.length ? `<span class="row-actions" style="width:100%;margin-top:8px">${btns.join('')}</span>` : ''}</div>`
+    })
+    .join('')
+  return `<p class="section-title">複盤</p><div class="group">${rows}</div>`
+}
+
 function equivRow(e) {
   const x = e.item
   return x
@@ -1706,7 +1919,9 @@ async function render() {
                     ? await viewLookup()
                     : state.view === 'locations'
                       ? await viewLocations()
-                      : await viewSettings()
+                      : state.view === 'quality'
+                        ? await viewQuality()
+                        : await viewSettings()
   // 放大看照片時，重畫畫面不要讓位置跳回左上角
   const vs = document.querySelector('.viewer-scroll')
   const keep = vs ? { x: vs.scrollLeft / Math.max(1, vs.scrollWidth), y: vs.scrollTop / Math.max(1, vs.scrollHeight) } : null
@@ -2089,7 +2304,9 @@ async function objectSheet(pi, oi) {
 
 // ───────────────────────── 樣品照 ─────────────────────────
 async function saveSample(fields, blob) {
-  await idb.samples.put({ id: uid(), ...fields, blob, createdAt: Date.now() })
+  // sid：從哪次盤點切出來的（用標準答案考 AI 時，那幾次的樣品照不送，不然等於先看答案）
+  const sid = state.view === 'review' ? state.session?.id : undefined
+  await idb.samples.put({ id: uid(), ...fields, blob, createdAt: Date.now(), ...(sid ? { sid } : {}) })
   toast('已存成樣品照：下次辨識會拿來比對')
 }
 const sampleUrls = new Map()
@@ -2211,6 +2428,34 @@ function numberSheet({ title, sub, value = '', action = '儲存', quick = [] }, 
 }
 const currentItem = async () => (await itemsAll()).find((x) => x.id === state.itemId)
 
+/** 複盤後選原因（選一個＋可以補一句說明）；會寫進試算表「盤差報告」的原因欄 */
+function reasonSheet(it, sid) {
+  const rc = it.recounts[sid]
+  let pick = rc.reason || ''
+  sheet(
+    `<h2 class="sheet-title">差異的原因</h2><p class="sheet-sub">${esc(itemTitle(it))}・${esc(rc.place ? placeLabel(rc.place) : '沒填位置')}。選最有可能的一個；不確定就選「其他」，寫一句說明。</p>
+     <div class="chips" id="r-chips">${REASONS.map((r) => `<button class="chip" data-r="${esc(r)}" aria-pressed="${r === pick}">${esc(r)}</button>`).join('')}</div>
+     <input class="field" id="r-note" placeholder="補充說明（選填），例如：上週借給客人兩個" value="${esc(rc.note || '')}" style="margin-top:12px">
+     <button class="btn block" id="r-save" style="margin-top:14px">儲存原因</button>`,
+    (el, close) => {
+      el.querySelectorAll('[data-r]').forEach((b) =>
+        b.addEventListener('click', () => {
+          pick = b.dataset.r
+          el.querySelectorAll('[data-r]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)))
+        }),
+      )
+      el.querySelector('#r-save').onclick = async () => {
+        if (!pick) return toast('先選一個原因')
+        Object.assign(rc, { reason: pick, note: el.querySelector('#r-note').value.trim(), reasonBy: ls.get(LS.memberName) || '', v: Date.now() })
+        close()
+        await putItem(it)
+        toast(canManage() ? '原因已存：可以按「調整帳面」或「不調整」' : '原因已存：等擁有者或管理員決定要不要調整帳面')
+        render()
+      }
+    },
+  )
+}
+
 /** 新增／編輯品項：品名、品牌、型號、規格 */
 async function itemEditSheet(it) {
   const sug = await suggestions()
@@ -2306,20 +2551,21 @@ const orderText = (list) =>
   [`叫貨清單 ${ymd(Date.now())}`, ...list.map((it) => `・${itemTitle(it)}${it.brand || it.model ? `（${[it.brand, it.model].filter(Boolean).join(' ')}）` : ''}：剩 ${expected(it)} 個（設定剩 ${it.safety} 個以下要叫貨）`)].join('\n')
 
 /** 品項庫的表格（Excel、Google 試算表共用） */
-const ITEM_HEAD = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '剩幾個要叫貨（安全庫存）', '狀態', '在哪裡（位置 數量）', '最近盤點', '盤點人']
+const ITEM_HEAD = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '剩幾個要叫貨（安全庫存）', '狀態', '在哪裡（位置 數量）', '最近盤點', '盤點人', '複盤', '差異原因']
 /** 每一格「誰盤的」：從那次盤點找盤點人 */
 async function whoOfStock() {
   const byId = new Map((await db.all()).map((s) => [s.id, s]))
   return (st) => (byId.get(st.sid) ? byName(byId.get(st.sid)) : '')
 }
 const timeText = (ms) => (ms ? `${ymd(ms)} ${hm(ms)}` : '')
-/** time：時間怎麼寫（Excel 用文字；Google 試算表送 {$t} 讓那邊轉成真的日期） */
-function itemRows(items, whoOf = () => '', time = timeText) {
+/** time：時間怎麼寫（Excel 用文字；Google 試算表送 {$t} 讓那邊轉成真的日期）；hide：盲盤的人下載時，帳面、差異留空 */
+function itemRows(items, whoOf = () => '', time = timeText, hide = false) {
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
   return [...items]
     .sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.no, b.no))
     .map((it) => {
-      const d = diffOf(it)
+      const d = hide ? null : diffOf(it)
+      const rc = latestRecount(it)
       const latest = liveStock(it)
         .map(([, st]) => st)
         .sort((a, b) => b.at - a.at)[0]
@@ -2331,7 +2577,7 @@ function itemRows(items, whoOf = () => '', time = timeText) {
         it.model,
         it.spec,
         onHand(it),
-        it.book ?? '',
+        hide ? '' : (it.book ?? ''),
         d ?? '',
         it.safety ?? '',
         [it.status === 'new' ? '新的（待確認）' : '', needsOrder(it) ? '該叫貨' : '', d > 0 ? '盤盈' : d < 0 ? '盤虧' : ''].filter(Boolean).join('、'),
@@ -2340,6 +2586,8 @@ function itemRows(items, whoOf = () => '', time = timeText) {
           .join('、'),
         last ? time(last) : '',
         latest ? whoOf(latest) : '',
+        rc ? RC_TEXT[rc.status] : '',
+        rc?.reason ? `${rc.reason}${rc.note ? `：${rc.note}` : ''}` : '',
       ]
     })
 }
@@ -2370,7 +2618,7 @@ function locationRows(items, whoOf = () => '', time = timeText) {
 }
 const LOC_HEAD = ['儲位', '說明', '品項數', '件數', '最近盤點', '盤點人', '狀態']
 const itemSheets = (items, whoOf) => [
-  { name: '品項庫', rows: [ITEM_HEAD, ...itemRows(items, whoOf)] },
+  { name: '品項庫', rows: [ITEM_HEAD, ...itemRows(items, whoOf, timeText, blindMe())] },
   { name: '儲位庫存', rows: [STOCK_HEAD, ...stockRows(items, whoOf)] },
   { name: '叫貨清單', rows: [['料號', '品名', '品牌', '型號', '尺寸／規格', '現在大概有', '剩幾個要叫貨（安全庫存）'], ...items.filter(needsOrder).map((it) => [it.no, it.label, it.brand, it.model, it.spec, expected(it), it.safety])] },
 ]
@@ -2765,6 +3013,7 @@ function mergeItemData(local, remote) {
     book,
     aliases: [...new Set([...(local.aliases || []), ...(remote.aliases || [])])],
     equiv: [...new Set([...(local.equiv || []), ...(remote.equiv || [])])],
+    recounts: mergeRecounts(local.recounts, remote.recounts),
     photo: base.photo || local.photo || remote.photo,
   }
 }
@@ -2783,6 +3032,9 @@ const itemSig = (it) =>
     [...(it.aliases || [])].sort(),
     (it.moves || []).map((m) => `${m.at}|${m.kind}|${m.qty}`),
     [...(it.equiv || [])].sort(),
+    Object.entries(it.recounts || {})
+      .map(([k, rc]) => `${k}|${rc.v}`)
+      .sort(),
   ])
 /** 套用一筆別台的資料；回傳本機有沒有變 */
 async function applyRemote(rec) {
@@ -2790,6 +3042,8 @@ async function applyRemote(rec) {
     if (!rec.d || rec.t <= Number(ls.get(LS.settingsAt, '0'))) return false
     ls.set(LS.locations, JSON.stringify(rec.d.locations || []))
     if (rec.d.catalog != null) ls.set(LS.catalog, rec.d.catalog)
+    if (rec.d.blind != null) ls.set(LS.blind, rec.d.blind)
+    if (rec.d.recount != null) ls.set(LS.recount, rec.d.recount)
     ls.set(LS.settingsAt, String(rec.t))
     ls.set(LS.settingsSyncT, String(rec.t))
     return true
@@ -2897,7 +3151,7 @@ async function syncNow(onProgress = () => {}) {
         if (kind === 'session' && state.session?.id === v.id && tOf(state.session) === t) state.session._syncT = t
       })
     }
-    if (settingsDirty && !viewer) await add({ k: 'settings', t: settingsAt, d: { locations: locations(), catalog: ls.get(LS.catalog) } }, async () => ls.set(LS.settingsSyncT, String(settingsAt)))
+    if (settingsDirty && !viewer) await add({ k: 'settings', t: settingsAt, d: { locations: locations(), catalog: ls.get(LS.catalog), blind: ls.get(LS.blind, '1'), recount: ls.get(LS.recount, '1') } }, async () => ls.set(LS.settingsSyncT, String(settingsAt)))
     for (const d of deleted)
       await add({ k: d.k, t: d.t, del: true }, async () => {
         ls.set(LS.deleted, JSON.stringify(readJson(LS.deleted, []).filter((x) => !(x.k === d.k && x.t === d.t))))
@@ -3318,6 +3572,7 @@ async function viewReport() {
               : `<button class="btn plain block" data-go="settings">連結 Google 試算表…</button><p class="footnote" style="margin-top:6px">連結後，每次盤點完會自動寫進你的試算表。</p>`
           }
           <p class="footnote">Excel 有：總表、明細（每次盤點每一種一列）、盤點清單，還有品項庫（實盤、帳面、差異）和叫貨清單。「複製表格」後，在 Google 試算表點一格貼上，就會自動分好欄。</p>
+          <div class="group" style="margin-top:12px"><button class="row" data-go="quality"><span class="grow"><span class="title">AI 準不準</span><br><span class="meta">AI 原本數的跟你確認後的比：數量一個不差的比例、錯在哪</span></span>${chev}</button></div>
           <p class="section-title">品項（${r.list.length}）</p>
           <div class="group">${r.list
             .map(
@@ -3327,6 +3582,171 @@ async function viewReport() {
         : `<div class="empty"><p>${range === 'today' ? '今天還沒有盤點。' : '這段時間沒有盤點紀錄。'}<br>換一個時間範圍看看。</p></div>`
     }
   </main>`
+}
+
+// ───────────────────────── AI 準不準 ─────────────────────────
+/**
+ * 每次按「完成」自動算（AI 原本的數字 vs 你確認後的）；不用另外做。
+ * 標準答案：兩個人各自數過、數字一樣的盤點，勾「當成標準答案」；之後可以拿那些照片重新考 AI（換模型、改設定時看有沒有變差）。
+ */
+async function viewQuality() {
+  const all = await db.all()
+  const range = state.qRange || 'all'
+  const sessions = all.filter((s) => s.eval && inRange(s, range))
+  const q = qualityStats(sessions)
+  const items = await itemsAll()
+  const golden = all.filter((s) => s.golden)
+  const goldenPhotos = golden.reduce((n, s) => n + s.photos.filter((p) => p.status === 'done').length, 0)
+  const runs = readJson(LS.goldenRuns, [])
+  const tone = (x, good, ok) => (x == null ? '' : x >= good ? 'good' : x >= ok ? 'ok' : 'bad')
+  // 最常錯的品項：同一個品項（或同名）合起來看
+  const byItem = new Map()
+  for (const t of sessions.flatMap((s) => s.eval.types)) {
+    const k = t.item || `${t.label}|${t.spec || ''}`
+    const cur = byItem.get(k) || { label: items.find((x) => x.id === t.item) ? itemTitle(items.find((x) => x.id === t.item)) : `${t.label}${t.spec ? `・${t.spec}` : ''}`, n: 0, exact: 0, err: 0 }
+    cur.n += 1
+    cur.exact += t.ai === t.final ? 1 : 0
+    cur.err += Math.abs(t.ai - t.final)
+    byItem.set(k, cur)
+  }
+  const worst = [...byItem.values()].filter((x) => x.exact < x.n).sort((a, b) => b.n - b.exact - (a.n - a.exact) || b.err - a.err).slice(0, 6)
+  const byModel = new Map()
+  for (const s of sessions) byModel.set(s.eval.model || '沒有記錄', [...(byModel.get(s.eval.model || '沒有記錄') || []), s])
+  const run = state.golden
+  return `
+  <main class="app">
+    <div class="nav">${backBtn(state.qBack || 'report', { settings: '設定', review: '盤點結果' }[state.qBack] || '總表')}</div>
+    <h1 class="large-title">AI 準不準</h1>
+    <p class="subtitle">拿 AI 原本數的，跟你確認後的數字比。每次按「完成」自動算，不用另外做。</p>
+    <div class="seg" role="tablist" aria-label="時間範圍">${RANGES.map((x) => `<button role="tab" aria-selected="${x.id === range}" data-qrange="${x.id}">${x.label}</button>`).join('')}</div>
+    ${
+      q.n
+        ? `<div class="stats q">
+            <div class="stat ${tone(q.rate, 0.95, 0.85)}"><span class="stat-num">${pct(q.rate)}</span><span class="stat-label">數量一個不差</span></div>
+            <div class="stat"><span class="stat-num">${q.mae.toFixed(1)}</span><span class="stat-label">平均差幾個</span></div>
+            <div class="stat ${tone(q.wrong ? q.caught / q.wrong : null, 0.9, 0.7)}"><span class="stat-num">${q.wrong ? pct(q.caught / q.wrong) : '—'}</span><span class="stat-label">錯的有標出來</span></div>
+            <div class="stat"><span class="stat-num">${q.sessions}</span><span class="stat-label">次盤點・${q.n} 種</span></div>
+          </div>
+          <p class="footnote" style="margin-top:8px">目標：數量一個不差 95% 以上（盤點實務的常見標準）；「錯的有標出來」越高，代表你只看「要確認」的就夠。</p>
+          <p class="section-title">AI 錯在哪</p>
+          <div class="group">
+            <div class="row"><span class="grow"><span class="title">漏數</span><br><span class="meta">你補了框，或把數量加上去（例如疊在後面看不到）</span></span><span class="qty"><b>${q.missed}</b></span></div>
+            <div class="row"><span class="grow"><span class="title">多數</span><br><span class="meta">你刪掉的框，或把數量減下來（重複框、不是商品）</span></span><span class="qty"><b>${q.extra}</b></span></div>
+            <div class="row"><span class="grow"><span class="title">分錯種類</span><br><span class="meta">框改成別的一種（例如 2分 看成 3分）</span></span><span class="qty"><b>${q.misclass}</b></span></div>
+            <div class="row"><span class="grow"><span class="title">AI 一共框了</span><br><span class="meta">標成「要確認」的 ${q.flagged} 個，其中真的有錯 ${q.caught} 個</span></span><span class="qty"><b>${q.boxes}</b></span></div>
+          </div>
+          ${
+            worst.length
+              ? `<p class="section-title">最常數錯的</p><div class="group">${worst.map((w) => `<div class="row"><span class="grow"><span class="title">${esc(w.label)}</span><br><span class="meta">${w.n} 次裡 ${w.n - w.exact} 次數量不對，一共差 ${w.err} 個</span></span></div>`).join('')}</div>
+                 <p class="footnote">常錯的那一種，拍一張清楚的樣品照（設定 → 樣品照），名稱和尺寸寫清楚，AI 下次就會拿來比。</p>`
+              : ''
+          }
+          ${
+            byModel.size > 1
+              ? `<p class="section-title">各模型</p><div class="group">${[...byModel]
+                  .map(([m, ss]) => {
+                    const x = qualityStats(ss)
+                    return `<div class="row"><span class="grow"><span class="title">${esc(m)}</span><br><span class="meta">${x.sessions} 次盤點・${x.n} 種・平均差 ${x.mae.toFixed(1)} 個</span></span><span class="qty"><b>${pct(x.rate)}</b></span></div>`
+                  })
+                  .join('')}</div>`
+              : ''
+          }`
+        : `<div class="empty"><p>${range === 'all' ? '還沒有資料。' : '這段時間沒有資料。'}<br>從這一版開始，盤點完按「完成・記進品項庫」，就會開始累積。</p>${canEdit() && ls.get(LS.key) && range === 'all' ? '<button class="btn small" data-action="new">開始盤點</button>' : ''}</div>`
+    }
+    <p class="section-title">標準答案考 AI</p>
+    <div class="group">
+      <div class="row"><span class="grow"><span class="title">標準答案：${golden.length} 次盤點、${goldenPhotos} 張照片</span><br><span class="meta">兩個人各自數過、數字一樣的盤點，在那次盤點最下面勾「當成標準答案」。建議湊到 30～50 張，要有難的：光線暗、疊在一起、2分和 3分 混在一起。</span></span></div>
+      ${
+        run
+          ? `<div class="row" role="status"><span class="grow"><span class="title">AI 考試中…</span><br><span class="meta">${run.done} / ${run.total} 張照片</span></span></div>`
+          : `<button class="row edit-only" data-action="golden-run" ${goldenPhotos ? '' : 'disabled'}><span class="grow"><span class="title" style="color:var(--tint)">用標準答案考 AI</span><br><span class="meta">${goldenPhotos ? `重新辨識 ${goldenPhotos} 張照片，跟標準答案比（會用到 API 額度）` : '先勾幾次「當成標準答案」才能考'}</span></span>${chev}</button>`
+      }
+      ${runs
+        .slice(0, 6)
+        .map((r) => `<div class="row"><span class="grow"><span class="title">${fmtTime(r.at)}・${esc(r.model || '')}</span><br><span class="meta">${r.photos} 張照片、${r.types} 種・平均差 ${Number(r.mae).toFixed(1)} 個${r.failed ? `・${r.failed} 張沒辨識成功` : ''}${r.worst?.length ? `<br>差最多：${esc(r.worst.join('、'))}` : ''}</span></span><span class="qty"><b>${pct(r.rate)}</b></span></div>`)
+        .join('')}
+    </div>
+    <p class="footnote">考試時，從標準答案那幾次盤點存的樣品照不會送給 AI（不然等於先看答案）。換了模型或改了設定，考一次就知道有沒有變差。</p>
+    <details class="steps"><summary>這些數字怎麼算？</summary>
+      <ol>
+        <li><b>數量一個不差：</b>每一種商品，AI 原本數的跟你確認後的一樣，就算一個不差。整組改名不算錯，數量對就算對。</li>
+        <li><b>平均差幾個：</b>每一種差幾個（多或少都算），平均起來。</li>
+        <li><b>錯的有標出來：</b>AI 錯的框（被你刪掉、改種類的）裡，有幾成事先被標成「要確認」。</li>
+        <li>手動新增的種類（沒有框）不算；這一版以前的盤點沒有記 AI 原本的答案，所以不算。</li>
+      </ol>
+    </details>
+  </main>`
+}
+
+/** 用標準答案考 AI：那些照片重新辨識一次（不看你改過的），每一種比數量 */
+async function runGolden() {
+  if (state.golden) return
+  if (!ls.get(LS.key)) return toast('要先在設定貼上 Gemini API Key')
+  const sessions = (await db.all()).filter((s) => s.golden)
+  const photos = sessions.flatMap((s) => s.photos.filter((p) => p.status === 'done').map((p) => ({ s, p })))
+  if (!photos.length) return toast('先勾幾次「當成標準答案」才能考')
+  if (!confirm(`要用 AI 重新辨識 ${photos.length} 張照片（大約 ${Math.max(1, Math.round((photos.length * 15) / 60))} 分鐘），跟標準答案比。會用到 API 額度。開始嗎？`)) return
+  const ids = new Set(sessions.map((s) => s.id))
+  // 從標準答案那幾次存的樣品照不送（不然等於先看答案）
+  const samples = (await idb.samples.all().catch(() => [])).filter((x) => !ids.has(x.sid)).slice(0, MAX_SAMPLES)
+  const refs = await Promise.all(samples.map(async (x) => ({ label: x.label, brand: x.brand, model: x.model, spec: x.spec, data: await blobToBase64(x.blob) })))
+  const items = await itemsAll()
+  const idOf = (f) => findItem(items, f)?.id || `k:${looseKey(f)}`
+  const nameOf = new Map()
+  state.golden = { done: 0, total: photos.length }
+  keepAwake()
+  render()
+  const types = []
+  let model = ''
+  let failed = 0
+  try {
+    for (const s of sessions) {
+      const truth = new Map()
+      for (const g of groupsOf(s).filter((x) => !x.manual)) {
+        const id = s.itemOf?.[g.key] || idOf(g)
+        truth.set(id, (truth.get(id) || 0) + (Number(g.count) || 0))
+        if (!nameOf.has(id)) nameOf.set(id, `${g.label}${g.spec ? `・${g.spec}` : ''}`)
+      }
+      const guess = new Map()
+      for (const p of s.photos.filter((x) => x.status === 'done')) {
+        try {
+          const r = await analyze({ ...p, objects: [] }, () => {}, refs)
+          model = r.model || model
+          for (const o of r.objects) {
+            const id = idOf(o)
+            guess.set(id, (guess.get(id) || 0) + 1)
+            if (!nameOf.has(id)) nameOf.set(id, `${o.label}${o.spec ? `・${o.spec}` : ''}`)
+          }
+        } catch {
+          failed += 1
+        }
+        state.golden.done += 1
+        if (state.view === 'quality') render()
+      }
+      for (const id of new Set([...truth.keys(), ...guess.keys()])) types.push({ label: nameOf.get(id) || '', ai: guess.get(id) || 0, final: truth.get(id) || 0 })
+    }
+  } finally {
+    state.golden = null
+    releaseWakeLock()
+  }
+  const exact = types.filter((t) => t.ai === t.final).length
+  const result = {
+    at: Date.now(),
+    model,
+    photos: photos.length,
+    types: types.length,
+    rate: types.length ? exact / types.length : null,
+    mae: types.length ? types.reduce((a, t) => a + Math.abs(t.ai - t.final), 0) / types.length : 0,
+    failed,
+    worst: types
+      .filter((t) => t.ai !== t.final)
+      .sort((a, b) => Math.abs(b.ai - b.final) - Math.abs(a.ai - a.final))
+      .slice(0, 3)
+      .map((t) => `${t.label}（AI ${t.ai}、答案 ${t.final}）`),
+  }
+  ls.set(LS.goldenRuns, JSON.stringify([result, ...readJson(LS.goldenRuns, [])].slice(0, 12)))
+  if (state.view === 'quality') render()
+  toast(`考完了：數量一個不差 ${pct(result.rate)}（${types.length} 種）`)
 }
 
 // ───────────────────────── 匯出 ─────────────────────────
@@ -3411,7 +3831,8 @@ async function runAnalysis(indices) {
       }
       try {
         const r = await analyze(photo, log, refs)
-        Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '' })
+        Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '', aiGone: [] })
+        markAi(photo) // 記下 AI 原本的答案（算準確率用）
         s.model = r.model
         // 拍到儲位標籤：沒填位置就自動填（有建立過的儲位用那個寫法）
         if (r.location && !s.place) {
@@ -3460,6 +3881,8 @@ async function backgroundRefine(s, indices, refs) {
     const log = (msg) => (photo.trace ??= []).push(`比對 ${Math.round((Date.now() - t0) / 100) / 10} 秒｜${msg}`)
     try {
       const rr = await refineObjects(photo, free, free.map((_, k) => k), refs, log)
+      // 比對也是 AI 的答案：還沒被你改過的框，更新成比對後的種類
+      markAi(photo, free.filter((o) => !o.edited && photo.objects.includes(o)))
       groups += rr.groups || 0
       if (rr.model && !/比對/.test(s.model || '')) s.model = rr.model === s.model ? `${s.model}（含相似品比對）` : `${s.model} ＋ ${rr.model} 比對`
     } catch (e) {
@@ -3508,7 +3931,7 @@ $app.addEventListener('click', async (e) => {
   // 補框模式：點照片哪裡，就在那裡加一個框（大小跟這張照片的其他框差不多），再選它是哪一種
   const wrap = e.target.closest('[data-photo]')
   if (state.addMode && wrap && !e.target.closest('[data-action]')) return addBoxAt(wrap, e)
-  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example]')
+  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-qrange],[data-recount-list],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example]')
   if (!t) {
     // 點空白處取消標示（不捲回頂端）
     if (state.focus && !e.target.closest('.photo-wrap,.item')) {
@@ -3524,10 +3947,19 @@ $app.addEventListener('click', async (e) => {
     state.focus = state.focus === d.focus ? null : d.focus
     return render()
   }
+  if (d.go === 'quality' && state.view !== 'quality') state.qBack = ['settings', 'review'].includes(state.view) ? state.view : 'report'
   if (d.go) return go(d.go)
   if (d.range) {
     state.range = d.range
     return render()
+  }
+  if (d.qrange) {
+    state.qRange = d.qrange
+    return render()
+  }
+  if ('recountList' in d) {
+    state.itemFilter = 'recount'
+    return go('items')
   }
   if (d.open) {
     state.session = await db.get(d.open)
@@ -3719,7 +4151,16 @@ $app.addEventListener('click', async (e) => {
       return nameSheet('owner', '你的名字？', '大家會在盤點紀錄看到是誰盤的（例如：小宇、店長）。')
     }
     case 'sync-link': {
-      const code = parseLinkCode(document.getElementById('link-code').value)
+      const raw = document.getElementById('link-code').value.trim()
+      const code = parseLinkCode(raw)
+      // 擁有者常把自己的試算表網址貼到這格（沒有 #k=…）：直接告訴他該按哪裡
+      if (!code && /^https:\/\/script\.google\.com\/macros\/s\/[^#\s]+\/exec$/.test(raw)) {
+        if (!ls.get(LS.sheet)) {
+          ls.set(LS.sheet, raw)
+          render()
+        }
+        return toast('這是試算表網址（擁有者用），不是連結碼：請按上面「開啟多人同步（我是擁有者）」。連結碼是同事收到的，後面會有 #k=…')
+      }
       if (!code) return toast('連結碼不對：要整段貼上（https://script.google.com/…/exec#k=…）')
       const before = { url: ls.get(LS.sheet), key: ls.get(LS.syncKey) }
       ls.set(LS.sheet, code.url)
@@ -3790,6 +4231,12 @@ $app.addEventListener('click', async (e) => {
       }
       return
     }
+    case 'golden-run':
+      return runGolden().catch((err) => {
+        state.golden = null
+        toast(`考試沒有完成：${err.message || err}`)
+        render()
+      })
     case 'report-xlsx': {
       const sessions = (await db.all()).filter((s) => inRange(s, state.range || 'today'))
       downloadBlob(reportXlsx(sessions, await itemsAll(true), await whoOfStock()), `盤點總表_${ymd(Date.now())}.xlsx`)
@@ -3911,15 +4358,62 @@ $app.addEventListener('click', async (e) => {
       const it = await currentItem()
       if (!it) return
       const inbound = d.action === 'move-in'
-      return numberSheet({ title: inbound ? '進貨幾個？' : '賣出幾個？', sub: `${esc(itemTitle(it))}：帳面數${inbound ? '加' : '減'}這麼多。${it.book == null ? `還沒有帳面數，會從實盤 ${onHand(it)} 開始算。` : `目前帳面 ${it.book}。`}`, value: '1', action: inbound ? '記進貨' : '記賣出' }, async (n) => {
+      return numberSheet({ title: inbound ? '進貨幾個？' : '賣出幾個？', sub: `${esc(itemTitle(it))}：帳面數${inbound ? '加' : '減'}這麼多。${blindMe() ? '' : it.book == null ? `還沒有帳面數，會從實盤 ${onHand(it)} 開始算。` : `目前帳面 ${it.book}。`}`, value: '1', action: inbound ? '記進貨' : '記賣出' }, async (n) => {
         const now = Date.now()
         // 還沒有帳面數：先記一筆「從實盤開始」，帳面數才算得回來（多人同步時用進出紀錄重算）
         if (it.book == null) it.moves.push({ at: now - 1, kind: 'set', qty: onHand(it) })
         it.moves.push({ at: now, kind: inbound ? 'in' : 'out', qty: n })
         it.book = bookFromMoves(it.moves)
         await putItem(it)
-        toast(`帳面數變成 ${it.book}`)
+        toast(blindMe() ? (inbound ? `已記進貨 ${n} 個` : `已記賣出 ${n} 個`) : `帳面數變成 ${it.book}`)
       })
+    }
+    case 'recount': {
+      const it = await currentItem()
+      const rc = it?.recounts?.[d.sid]
+      if (!rc || rc.status !== 'pending') return render()
+      const me = currentCounter() || { id: ls.get(LS.memberId) || '', name: ls.get(LS.memberName) || '' }
+      const same = me.id && me.id === rc.first.byId && roster().length > 1
+      // 複盤一律看不到第一次的數字（不然會照著數）
+      return numberSheet({ title: `${rc.place ? placeLabel(rc.place) : '這一格'}有幾個？`, sub: `${esc(itemTitle(it))}：到那一格自己數一次。${same ? '<br><b>這一格是你第一次盤的，最好請另一個人複盤。</b>' : ''}`, value: '', action: '記下複盤數字' }, async (n) => {
+        const now = Date.now()
+        const earlier = [rc.first.count, ...rc.counts.map((c) => c.count)]
+        rc.counts.push({ count: n, by: me.name, byId: me.id, at: now })
+        // 這一格改成複盤的數字（同一次盤點，時間記成現在）
+        const st = it.stock?.[rc.pk]
+        // rc：這一格是複盤的數字（重按那次盤點的「完成」不會蓋回第一次的數字；之後新的盤點才會取代）
+        if (st && !st.removed) it.stock[rc.pk] = { ...st, count: n, at: Math.max(st.at || 0, now), v: now, rc: true }
+        if (!diffOf(it)) Object.assign(rc, { status: 'fixed', reason: REASONS[0] })
+        else rc.status = earlier.includes(n) ? 'confirmed' : 'pending'
+        rc.v = now
+        await putItem(it)
+        if (rc.status === 'fixed') return toast('跟帳面一樣了：第一次數錯，已經更正')
+        if (rc.status === 'pending') return toast('跟前一次數的不一樣：已改成這次的數字，請再找一個人數一次')
+        toast('兩次數字一樣，差異確定：請選原因')
+        reasonSheet(it, d.sid)
+      })
+    }
+    case 'recount-reason': {
+      const it = await currentItem()
+      if (it?.recounts?.[d.sid]) reasonSheet(it, d.sid)
+      return
+    }
+    case 'recount-adjust':
+    case 'recount-keep': {
+      if (!canManage()) return toast('只有擁有者或管理員可以決定要不要調整帳面')
+      const it = await currentItem()
+      const rc = it?.recounts?.[d.sid]
+      if (!rc || rc.status !== 'confirmed') return render()
+      const now = Date.now()
+      if (d.action === 'recount-adjust') {
+        if (!confirm(`帳面數改成實盤 ${onHand(it)} 個？${rc.reason ? `（原因：${rc.reason}）` : ''}`)) return
+        it.moves.push({ at: now, kind: 'set', qty: onHand(it), why: rc.reason || '複盤確定' })
+        it.book = bookFromMoves(it.moves)
+      }
+      Object.assign(rc, { status: d.action === 'recount-adjust' ? 'adjusted' : 'kept', doneBy: ls.get(LS.memberName) || '', doneAt: now, v: now })
+      await putItem(it)
+      toast(d.action === 'recount-adjust' ? `帳面數改成 ${it.book}` : '保留帳面數，不調整')
+      return render()
     }
     case 'book-set': {
       const it = await currentItem()
@@ -3995,6 +4489,23 @@ function bindInputs() {
   document.getElementById('pick')?.addEventListener('change', (e) => addFiles([...e.target.files]))
   document.getElementById('sample-cam')?.addEventListener('change', (e) => e.target.files[0] && newSampleSheet(e.target.files[0]))
   document.getElementById('auto-sync')?.addEventListener('change', (e) => ls.set(LS.autoSync, e.target.checked ? '1' : '0'))
+  document.getElementById('golden')?.addEventListener('change', async (e) => {
+    const s = state.session
+    s.golden = e.target.checked ? { at: Date.now(), by: currentCounter()?.name || ls.get(LS.memberName) || '' } : null
+    await save()
+    toast(e.target.checked ? '已當成標準答案：到「AI 準不準」可以拿來考 AI' : '已取消標準答案')
+  })
+  for (const [id, k] of [
+    ['rule-blind', LS.blind],
+    ['rule-recount', LS.recount],
+  ])
+    document.getElementById(id)?.addEventListener('change', (e) => {
+      if (!canManage()) return render()
+      ls.set(k, e.target.checked ? '1' : '0')
+      touchSettings() // 跟著共用設定同步給大家
+      toast(e.target.checked ? '已開啟，會同步給大家' : '已關閉，會同步給大家')
+      render()
+    })
   document.getElementById('place')?.addEventListener('input', (e) => (state.session.place = e.target.value))
   document.getElementById('item-search')?.addEventListener('input', (e) => filterRows($app, e.target.value))
   document.getElementById('lookup-q')?.addEventListener('input', (e) => {

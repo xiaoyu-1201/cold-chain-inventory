@@ -1344,3 +1344,46 @@ a.row {
     color: #666;
   }
 }
+
+/* AI 準不準：達標綠、接近橘、差紅（數字變色，卡片不變） */
+.stat.good .stat-num {
+  color: var(--green);
+}
+.stat.ok .stat-num {
+  color: var(--amber);
+}
+.stat.bad .stat-num {
+  color: var(--red);
+}
+/* 盤點結果：AI 這次準不準（點進去看全部） */
+.sum-eval {
+  margin-top: 10px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--card-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  cursor: pointer;
+}
+.sum-eval .meta {
+  color: var(--text-2);
+  font-size: 13px;
+}
+.golden-row {
+  margin-top: 18px;
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}/* AI 準不準：手機上兩欄兩列，說明字才不會斷成好幾行 */
+@media (max-width: 520px) {
+  .stats.q {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

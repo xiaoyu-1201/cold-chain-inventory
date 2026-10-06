@@ -12,7 +12,7 @@
  * - 總覽：數字卡片（品項、件數、該叫貨、盤虧、盤盈、儲位已盤）、該叫貨／盤差最大前 10、儲位盤點進度、圖表
  * - 庫存：每個品項的實盤、帳面、差異、叫貨點、在哪裡、最近盤點、盤點人（盤虧紅、該叫貨橘）
  * - 儲位庫存：每一格放了什麼、幾個、誰什麼時候盤的
- * - 盤差報告：實盤≠帳面的品項；後三欄「原因說明、處理方式、主管確認」給主管填，重新同步會保留
+ * - 盤差報告：實盤≠帳面的品項＋複盤狀態；後三欄「原因說明、處理方式、主管確認」給主管填，重新同步會保留（原因沒填時，帶入 App 複盤時選的原因）
  * - 盤點紀錄：每一次、每一種商品一列（原始資料，不要手動改欄位順序）
  *
  * 多人同步（手機、電腦、同事看到同一份資料）：
@@ -424,18 +424,27 @@ function writeDiff(ss, items) {
   const col = function (h) {
     return H.indexOf(h)
   }
-  const BASE = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '差異比例', '在哪裡（位置 數量）', '最近盤點', '盤點人']
+  const BASE = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '差異比例', '在哪裡（位置 數量）', '最近盤點', '盤點人', '複盤']
   const NOTE = ['原因說明（請填）', '處理方式（請填）', '主管確認']
   const sh = sheetAt(ss, '盤差報告', 3)
-  // 先把主管填過的留下來（用料號對）
+  // 先把主管填過的留下來（用料號對；用標題找欄位，以後加欄位也不會錯位）
   const notes = {}
   const last = sh.getLastRow()
-  if (last > 1) {
-    sh.getRange(2, 1, last - 1, BASE.length + NOTE.length)
-      .getValues()
-      .forEach(function (r) {
-        if (r[0]) notes[String(r[0])] = r.slice(BASE.length)
-      })
+  const lastCol = sh.getLastColumn()
+  if (last > 1 && lastCol > 0) {
+    const old = sh.getRange(1, 1, last, lastCol).getValues()
+    const at = NOTE.map(function (h) {
+      return old[0].indexOf(h)
+    })
+    old.slice(1).forEach(function (r) {
+      if (r[0])
+        notes[String(r[0])] = at.map(function (i, k) {
+          return i >= 0 ? r[i] : k === 2 ? false : ''
+        })
+    })
+  }
+  const pick = function (r, h) {
+    return col(h) >= 0 ? r[col(h)] : ''
   }
   if (sh.getFilter()) sh.getFilter().remove()
   sh.clear()
@@ -451,7 +460,10 @@ function writeDiff(ss, items) {
     diffs.map(function (r) {
       const d = Number(r[col('差異')])
       const book = Number(r[col('帳面')])
-      return [r[col('料號')], r[col('品名')], r[col('品牌')], r[col('型號')], r[col('尺寸／規格')], r[col('實盤')], r[col('帳面')], d, book ? d / book : '', r[col('在哪裡（位置 數量）')], cellOf(r[col('最近盤點')]), r[col('盤點人')]].concat(notes[String(r[col('料號')])] || ['', '', false])
+      // 原因說明：主管填過的優先；沒填就帶 App 複盤時選的原因
+      const note = (notes[String(r[col('料號')])] || ['', '', false]).slice()
+      if (!note[0] && pick(r, '差異原因')) note[0] = pick(r, '差異原因')
+      return [r[col('料號')], r[col('品名')], r[col('品牌')], r[col('型號')], r[col('尺寸／規格')], r[col('實盤')], r[col('帳面')], d, book ? d / book : '', r[col('在哪裡（位置 數量）')], cellOf(r[col('最近盤點')]), r[col('盤點人')], pick(r, '複盤')].concat(note)
     }),
   )
   const width = rows[0].length
@@ -477,7 +489,11 @@ function writeDiff(ss, items) {
   }
   sh.setTabColor(COLOR.red)
   sh.autoResizeColumns(1, width)
-  protectWarn(sh, 'M:O')
+  // 後三欄給主管填，不跳警告（欄位字母照欄數算）
+  const letter = function (n) {
+    return String.fromCharCode(64 + n)
+  }
+  protectWarn(sh, letter(BASE.length + 1) + ':' + letter(width))
 }
 
 /** 總覽：給主管一眼看懂（數字卡片、需要處理的事、儲位盤點進度、圖表） */
