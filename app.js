@@ -74,7 +74,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.3（10/7・電腦版選單改右邊、可收合）'
+const VERSION = '4.3.1（10/7・產品總表認得正航的類別名稱、側邊欄名稱不再被切掉）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1945,7 +1945,8 @@ async function erpPut(v) {
   erpCache = v
   await idb.erp.put(v)
 }
-const erpCat = (no) => String(no || '').trim().charAt(0).toUpperCase() || '#'
+/** 產品的類別：正航報表有「產品類別」欄就用它（例如 C-CC），沒有就用產品編號的第一個字母 */
+const erpCat = (p) => (typeof p === 'string' ? p.trim().charAt(0).toUpperCase() : p?.cat || String(p?.no || '').trim().charAt(0).toUpperCase()) || '#'
 const erpCatName = (erp, c) => erp?.cats?.[c] || ERP_CATS_DEFAULT[c] || ''
 const erpCatLabel = (erp, c) => (erpCatName(erp, c) ? `${c}　${erpCatName(erp, c)}` : `${c} 類`)
 /** 這個產品在品項庫裡的那一筆（料號＝產品編號） */
@@ -1985,24 +1986,38 @@ function parseDelimited(text) {
   }
   return rows.filter((r) => r.some((c) => c.trim()))
 }
-/** 正航「產品存量明細表」→ 產品清單（同一個產品在幾個倉庫就有幾列，這裡合併） */
+/**
+ * 正航的報表 → 產品清單。認得兩種：
+ * - 產品存量明細表：產品編號、品名規格、單位、倉庫編號、實際在庫量（同一個產品在幾個倉庫就有幾列，這裡合併）
+ * - 歷史庫存一覽表：多了「產品類別」「類別名稱」（標題列不一定在第一列，上面有公司名稱、報表名稱）
+ * 成本、售價那些欄位一律不讀。回傳 { products, cats }。
+ */
 function parseErp(text) {
-  const rows = parseDelimited(text)
-  if (rows.length < 2) throw new Error('檔案裡沒有資料（至少要有標題列和一列產品）')
+  const all = parseDelimited(text)
+  const hi = all.findIndex((r) => r.some((h) => h.replace(/\s/g, '').includes('產品編號')))
+  if (hi < 0) throw new Error('這不是正航的產品報表：要有「產品編號」這一欄（產品存量明細表、歷史庫存一覽表都可以）')
+  const rows = all.slice(hi)
   const head = rows[0].map((h) => h.replace(/\s/g, ''))
   const col = (...ws) => head.findIndex((h) => ws.some((w) => h.includes(w)))
-  const c = { no: col('產品編號'), name: col('品名規格', '品名'), unit: col('單位'), wh: col('倉庫編號'), qty: col('實際在庫量'), onhand: col('現有庫存') }
-  if (c.no < 0 || c.name < 0) throw new Error('這不是正航的「產品存量明細表」：第一列要有「產品編號」和「品名規格」')
+  const c = { no: col('產品編號'), name: col('品名規格', '品名'), unit: col('計量單位', '單位'), wh: col('倉庫編號'), qty: col('實際在庫'), onhand: col('現有庫存', '現有數量'), cat: col('產品類別'), catName: col('類別名稱') }
+  if (c.no < 0 || c.name < 0) throw new Error('這不是正航的產品報表：要有「產品編號」和「品名規格」')
   const qcol = c.qty >= 0 ? c.qty : c.onhand
   const num = (v) => {
     const n = Number(String(v ?? '').replace(/[,\s]/g, ''))
     return Number.isFinite(n) ? n : 0
   }
   const map = new Map()
+  const cats = {}
   for (const r of rows.slice(1)) {
     const no = String(r[c.no] || '').trim()
     if (!no) continue
     const p = map.get(no) || { no, name: String(r[c.name] || '').trim(), unit: c.unit >= 0 ? String(r[c.unit] || '').trim() : '', qty: 0, wh: {} }
+    const cat = c.cat >= 0 ? String(r[c.cat] || '').trim() : ''
+    if (cat) {
+      p.cat = cat
+      const cn = c.catName >= 0 ? String(r[c.catName] || '').trim() : ''
+      if (cn) cats[cat] = cn
+    }
     const w = c.wh >= 0 ? String(r[c.wh] || '').trim() : ''
     const q = qcol >= 0 ? num(r[qcol]) : 0
     p.qty += q
@@ -2011,7 +2026,7 @@ function parseErp(text) {
   }
   if (!map.size) throw new Error('沒有讀到任何產品編號')
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
-  return [...map.values()].sort((a, b) => cmp(a.no, b.no))
+  return { products: [...map.values()].sort((a, b) => cmp(a.no, b.no)), cats }
 }
 /** 讀檔：Excel 另存的 CSV 可能是 UTF-8 或 Big5（Windows 預設），兩種都認 */
 async function readTextFile(file) {
@@ -2024,9 +2039,16 @@ async function readTextFile(file) {
 }
 /** 匯入：存成一張表；品項庫裡料號對得上的，帳面改成正航的數量 */
 async function importErp(text) {
-  const products = parseErp(text)
+  const parsed = parseErp(text)
   const old = await erpGet()
-  await erpPut({ id: ERP_ID, createdAt: old?.createdAt || Date.now(), at: Date.now(), products, cats: old?.cats || {} })
+  // 兩種報表可以輪流匯：這次沒有的欄位（類別、別的產品）用上次的補
+  const oldBy = new Map((old?.products || []).map((p) => [p.no, p]))
+  const products = parsed.products.map((p) => (p.cat || !oldBy.get(p.no)?.cat ? p : { ...p, cat: oldBy.get(p.no).cat }))
+  const seen = new Set(products.map((p) => p.no))
+  for (const p of old?.products || []) if (!seen.has(p.no)) products.push(p)
+  const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
+  products.sort((a, b) => cmp(a.no, b.no))
+  await erpPut({ id: ERP_ID, createdAt: old?.createdAt || Date.now(), at: Date.now(), products, cats: { ...(old?.cats || {}), ...parsed.cats } })
   const items = await itemsAll(true)
   let booked = 0
   for (const p of products) {
@@ -2040,7 +2062,7 @@ async function importErp(text) {
     }
     await putItem(it)
   }
-  return { products: products.length, stocked: products.filter((p) => p.qty > 0).length, booked }
+  return { products: products.length, stocked: products.filter((p) => p.qty > 0).length, booked, cats: Object.keys(parsed.cats).length }
 }
 /** 從產品表把一個產品記進品項庫（料號＝產品編號、帳面＝正航數量） */
 async function erpLink(no) {
@@ -2078,7 +2100,7 @@ async function viewCatalog() {
   const stockedN = all.filter((p) => p.qty > 0).length
   const pool = st.stocked ? all.filter((p) => p.qty > 0) : all
   const cats = new Map()
-  for (const p of pool) cats.set(erpCat(p.no), (cats.get(erpCat(p.no)) || 0) + 1)
+  for (const p of pool) cats.set(erpCat(p), (cats.get(erpCat(p)) || 0) + 1)
   const catList = [...cats].sort((a, b) => b[1] - a[1])
   return `
   <main class="app">
@@ -2100,17 +2122,17 @@ function erpListHtml(erp, items, catList) {
     const it = erpItemOf(items, p.no)
     const places = it ? liveStock(it).map(([, s]) => s.place).filter(Boolean) : []
     const meta = [p.no, p.unit, blindMe() ? '' : `庫存 ${p.qty}`, places.length ? `在 ${places.slice(0, 2).join('、')}${places.length > 2 ? '…' : ''}` : ''].filter(Boolean).join('・')
-    return `<button class="row" data-erp-no="${esc(p.no)}">${it ? itemThumb(it, 40) : `<span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(erpCat(p.no))}</span>`}<span class="grow"><span class="title">${esc(p.name)}</span><br><span class="meta">${esc(meta)}</span></span>${it ? '<span class="badge ok">品項</span>' : ''}${chev}</button>`
+    return `<button class="row" data-erp-no="${esc(p.no)}">${it ? itemThumb(it, 40) : `<span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(erpCat(p))}</span>`}<span class="grow"><span class="title">${esc(p.name)}</span><br><span class="meta">${esc(meta)}</span></span>${it ? '<span class="badge ok">品項</span>' : ''}${chev}</button>`
   }
   const list = (arr, label) => {
     const shown = arr.slice(0, PAGE + st.more)
     return `<section class="item-sec"><p class="section-title">${esc(label)}（${arr.length}）</p><div class="group">${shown.map(rowOf).join('') || '<div class="row muted">沒有</div>'}</div>${arr.length > shown.length ? `<button class="btn secondary block" data-action="erp-more" style="margin-top:10px">再顯示 ${Math.min(PAGE, arr.length - shown.length)} 種（還有 ${arr.length - shown.length}）</button>` : ''}</section>`
   }
   if (q) return list(pool.filter((p) => erpSearchKey(p).includes(q)), `找到`)
-  if (st.cat) return list(pool.filter((p) => erpCat(p.no) === st.cat), erpCatLabel(erp, st.cat))
+  if (st.cat) return list(pool.filter((p) => erpCat(p) === st.cat), erpCatLabel(erp, st.cat))
   if (!catList) {
     const cats = new Map()
-    for (const p of pool) cats.set(erpCat(p.no), (cats.get(erpCat(p.no)) || 0) + 1)
+    for (const p of pool) cats.set(erpCat(p), (cats.get(erpCat(p)) || 0) + 1)
     catList = [...cats].sort((a, b) => b[1] - a[1])
   }
   const unnamed = catList.filter(([c]) => !erpCatName(erp, c)).length
@@ -2126,7 +2148,7 @@ async function erpProductSheet(no) {
   const stock = it ? liveStock(it) : []
   sheet(
     `<h2 class="sheet-title">${esc(p.name)}</h2>
-     <p class="sheet-sub">${esc(p.no)}・${esc(erpCatLabel(erp, erpCat(p.no)))}${p.unit ? `・單位：${esc(p.unit)}` : ''}</p>
+     <p class="sheet-sub">${esc(p.no)}・${esc(erpCatLabel(erp, erpCat(p)))}${p.unit ? `・單位：${esc(p.unit)}` : ''}</p>
      ${it?.photo ? `<img src="${itemUrl(it)}" alt="" style="display:block;width:100%;max-height:220px;object-fit:contain;border-radius:12px;background:var(--card-2);margin:10px 0">` : ''}
      <div class="group" style="margin-top:10px">
        ${blindMe() ? '' : `<div class="row"><span class="grow"><span class="title">正航庫存</span><br><span class="meta">${Object.entries(p.wh).map(([w, n]) => `倉庫 ${esc(w)}：${n}`).join('・') || '沒有倉庫資料'}</span></span><b>${p.qty}</b></div>`}
@@ -2154,7 +2176,7 @@ async function erpProductSheet(no) {
 async function erpCatsSheet() {
   const erp = await erpGet()
   if (!erp) return toast('先匯入正航產品表')
-  const letters = [...new Set(erp.products.map((p) => erpCat(p.no)))].sort()
+  const letters = [...new Set(erp.products.map((p) => erpCat(p)))].sort()
   const text = letters.map((c) => `${c}=${erpCatName(erp, c)}`).join('\n')
   sheet(
     `<h2 class="sheet-title">類別名稱</h2>
@@ -2181,20 +2203,20 @@ function erpImportSheet() {
   sheet(
     `<h2 class="sheet-title">匯入正航產品表</h2>
      <ol class="steps-list">
-       <li>公司電腦的正航：報表 → 庫存管理 → 存貨狀況報表 → <b>產品存量明細表</b> → 確定 → 存成 Excel。</li>
+       <li>公司電腦的正航：報表 → 庫存管理 → 存貨狀況報表 → <b>產品存量明細表</b>（全部產品）或<b>歷史庫存一覽表</b>（有類別名稱）→ 確定 → 存成 Excel。兩種都匯，資料會合併。</li>
        <li>在 Excel 按「另存新檔」，存檔類型選 <b>CSV</b>（UTF-8 或一般的都可以），傳到這台。</li>
-       <li>按下面「選 CSV 檔」。電腦上也可以直接把整張表（含第一列標題）複製，貼在下面。</li>
+       <li>按下面「選 CSV 檔」。電腦上也可以直接把整張表（含標題列）複製，貼在下面。</li>
      </ol>
      <label class="btn block secondary" style="margin-top:10px">選 CSV 檔<input type="file" accept=".csv,.txt,.tsv,text/csv,text/plain" id="ei-file" class="sr-only"></label>
      <textarea class="field" id="ei-text" rows="4" placeholder="產品編號&#9;品名規格&#9;單位&#9;倉庫編號&#9;…&#9;實際在庫量&#10;C-043&#9;真空幫浦 …&#9;台&#9;02&#9;…&#9;2" style="margin-top:10px"></textarea>
      <button class="btn block" id="ei-go" style="margin-top:12px">匯入貼上的內容</button>
-     <p class="footnote">同一個產品在幾個倉庫會合併成一筆。品項庫裡料號對得上的，帳面會改成正航的數量；安全庫存這裡不會動。</p>`,
+     <p class="footnote">同一個產品在幾個倉庫會合併成一筆。品項庫裡料號對得上的，帳面會改成正航的數量；安全庫存、成本、售價這裡都不會讀。</p>`,
     (el, close) => {
       const run = async (text) => {
         try {
           const r = await importErp(text)
           close()
-          toast(`匯入完成：${r.products} 種（有庫存 ${r.stocked} 種）${r.booked ? `，更新 ${r.booked} 個品項的帳面` : ''}`)
+          toast(`匯入完成：${r.products} 種（有庫存 ${r.stocked} 種）${r.cats ? `、${r.cats} 個類別名稱` : ''}${r.booked ? `，更新 ${r.booked} 個品項的帳面` : ''}`)
           state.erp = { cat: null, q: '', stocked: true, more: 0 }
           go('catalog')
         } catch (e) {
