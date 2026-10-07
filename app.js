@@ -43,7 +43,7 @@ const LS = {
   serverVer: 'inventory:serverVer',
 }
 /** 檢視者不能用的動作 */
-const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete'])
+const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete', 'erp-import', 'erp-cats', 'erp-link'])
 /** 權限（跟 Google 雲端硬碟的「共用」一樣） */
 const ROLE_LABEL = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 const ROLE_DESC = { owner: '全部都可以；不能被移除', manager: '可以盤點、修改，也可以邀請、移除人', editor: '可以盤點、修改', viewer: '只能看（可以下載 Excel）' }
@@ -72,7 +72,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.1（10/7・同步只拿資料、照片打開才抓；新圖示）'
+const VERSION = '4.2（10/7・匯入正航產品表、認識產品）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -241,10 +241,11 @@ const idb = (() => {
   const open = () => (p ??= openRaw().then(async (d) => (await migrate(d), d)))
   const openRaw = () =>
     new Promise((resolve, reject) => {
-      const req = indexedDB.open('inventory', 3)
+      const req = indexedDB.open('inventory', 4)
       req.onupgradeneeded = () => {
         const d = req.result
         if (!d.objectStoreNames.contains('sessions')) d.createObjectStore('sessions', { keyPath: 'id' })
+        if (!d.objectStoreNames.contains('erp')) d.createObjectStore('erp', { keyPath: 'id' }) // 第 4 版：正航產品表（一筆就是整張表）
         if (!d.objectStoreNames.contains('samples')) d.createObjectStore('samples', { keyPath: 'id' })
         if (!d.objectStoreNames.contains('items')) d.createObjectStore('items', { keyPath: 'id' })
       }
@@ -329,7 +330,7 @@ const idb = (() => {
     del: (id) => tx(store, 'readwrite', (s) => s.delete(id)),
     clear: () => tx(store, 'readwrite', (s) => s.clear()),
   })
-  return { sessions: storeOf('sessions'), samples: storeOf('samples'), items: storeOf('items') }
+  return { sessions: storeOf('sessions'), samples: storeOf('samples'), items: storeOf('items'), erp: storeOf('erp') }
 })()
 const db = idb.sessions
 
@@ -1527,7 +1528,7 @@ const TABS = [
 const tabBar = (active, sub = false) =>
   `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt="">聖佳智慧庫存</div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
 /** 子頁面屬於哪一個主頁（側邊欄標哪一個） */
-const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', lookup: 'lookup', settings: 'settings' }
+const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', catalog: 'items', lookup: 'lookup', settings: 'settings' }
 
 async function viewHome() {
   const sessions = await db.all()
@@ -1922,8 +1923,291 @@ const itemRow = (it) => {
     <span class="qty"><b>${onHand(it)}</b>${it.book != null && !blindMe() ? `<small>帳面 ${it.book}</small>` : ''}</span>${chev}</button>`
 }
 
+// ───────────────────────── 正航產品表（認識產品） ─────────────────────────
+/**
+ * 正航「產品存量明細表」匯進來，存成一張表（erp 裡只有一筆 catalog），同步時一次一個檔案；
+ * 不會把 4000 多種一筆一筆塞進品項庫（那會讓同步變慢）。有盤到、或你按「加入品項庫」的，才變成品項。
+ * products：[{ no 產品編號, name 品名規格, unit, qty 各倉合計（實際在庫量）, wh { 倉庫編號: 數量 } }]；cats：{ 類別字母: 名稱 }
+ */
+const ERP_ID = 'catalog'
+const ERP_CATS_DEFAULT = { C: '真空邦浦' } // 在正航看到的；其他請使用者從「產品類別設定」截圖補
+let erpCache
+async function erpGet(force = false) {
+  if (erpCache === undefined || force) erpCache = (await idb.erp.get(ERP_ID).catch(() => null)) || null
+  return erpCache
+}
+async function erpPut(v) {
+  erpCache = v
+  await idb.erp.put(v)
+}
+const erpCat = (no) => String(no || '').trim().charAt(0).toUpperCase() || '#'
+const erpCatName = (erp, c) => erp?.cats?.[c] || ERP_CATS_DEFAULT[c] || ''
+const erpCatLabel = (erp, c) => (erpCatName(erp, c) ? `${c}　${erpCatName(erp, c)}` : `${c} 類`)
+/** 這個產品在品項庫裡的那一筆（料號＝產品編號） */
+const erpItemOf = (items, no) => items.find((it) => it.erpNo === no || canon(it.no) === canon(no)) || null
+/** 讀 CSV／Excel 貼上的表格：逗號或 Tab 分隔，欄位可以用引號包（品名裡有逗號也沒問題） */
+function parseDelimited(text) {
+  const s = String(text).replace(/^﻿/, '')
+  const firstLine = s.split(/\r?\n/)[0] || ''
+  const sep = firstLine.includes('\t') ? '\t' : ','
+  const rows = []
+  let row = []
+  let cell = ''
+  let q = false
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (q) {
+      if (ch === '"' && s[i + 1] === '"') {
+        cell += '"'
+        i++
+      } else if (ch === '"') q = false
+      else cell += ch
+    } else if (ch === '"') q = true
+    else if (ch === sep) {
+      row.push(cell)
+      cell = ''
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && s[i + 1] === '\n') i++
+      row.push(cell)
+      rows.push(row)
+      row = []
+      cell = ''
+    } else cell += ch
+  }
+  if (cell || row.length) {
+    row.push(cell)
+    rows.push(row)
+  }
+  return rows.filter((r) => r.some((c) => c.trim()))
+}
+/** 正航「產品存量明細表」→ 產品清單（同一個產品在幾個倉庫就有幾列，這裡合併） */
+function parseErp(text) {
+  const rows = parseDelimited(text)
+  if (rows.length < 2) throw new Error('檔案裡沒有資料（至少要有標題列和一列產品）')
+  const head = rows[0].map((h) => h.replace(/\s/g, ''))
+  const col = (...ws) => head.findIndex((h) => ws.some((w) => h.includes(w)))
+  const c = { no: col('產品編號'), name: col('品名規格', '品名'), unit: col('單位'), wh: col('倉庫編號'), qty: col('實際在庫量'), onhand: col('現有庫存') }
+  if (c.no < 0 || c.name < 0) throw new Error('這不是正航的「產品存量明細表」：第一列要有「產品編號」和「品名規格」')
+  const qcol = c.qty >= 0 ? c.qty : c.onhand
+  const num = (v) => {
+    const n = Number(String(v ?? '').replace(/[,\s]/g, ''))
+    return Number.isFinite(n) ? n : 0
+  }
+  const map = new Map()
+  for (const r of rows.slice(1)) {
+    const no = String(r[c.no] || '').trim()
+    if (!no) continue
+    const p = map.get(no) || { no, name: String(r[c.name] || '').trim(), unit: c.unit >= 0 ? String(r[c.unit] || '').trim() : '', qty: 0, wh: {} }
+    const w = c.wh >= 0 ? String(r[c.wh] || '').trim() : ''
+    const q = qcol >= 0 ? num(r[qcol]) : 0
+    p.qty += q
+    if (w) p.wh[w] = (p.wh[w] || 0) + q
+    map.set(no, p)
+  }
+  if (!map.size) throw new Error('沒有讀到任何產品編號')
+  const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
+  return [...map.values()].sort((a, b) => cmp(a.no, b.no))
+}
+/** 讀檔：Excel 另存的 CSV 可能是 UTF-8 或 Big5（Windows 預設），兩種都認 */
+async function readTextFile(file) {
+  const buf = await file.arrayBuffer()
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf)
+  } catch {
+    return new TextDecoder('big5').decode(buf)
+  }
+}
+/** 匯入：存成一張表；品項庫裡料號對得上的，帳面改成正航的數量 */
+async function importErp(text) {
+  const products = parseErp(text)
+  const old = await erpGet()
+  await erpPut({ id: ERP_ID, createdAt: old?.createdAt || Date.now(), at: Date.now(), products, cats: old?.cats || {} })
+  const items = await itemsAll(true)
+  let booked = 0
+  for (const p of products) {
+    const it = erpItemOf(items, p.no)
+    if (!it) continue
+    it.erpNo = p.no
+    if (it.book !== p.qty) {
+      it.book = p.qty
+      it.moves.push({ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' })
+      booked++
+    }
+    await putItem(it)
+  }
+  return { products: products.length, stocked: products.filter((p) => p.qty > 0).length, booked }
+}
+/** 從產品表把一個產品記進品項庫（料號＝產品編號、帳面＝正航數量） */
+async function erpLink(no) {
+  const erp = await erpGet()
+  const p = erp?.products.find((x) => x.no === no)
+  if (!p) return null
+  const items = await itemsAll()
+  let it = erpItemOf(items, no)
+  if (!it) {
+    it = newItem(items, { label: p.name, brand: '', model: '', spec: '' }, { no: p.no, erpNo: p.no, unit: p.unit, status: 'ok', book: p.qty, moves: [{ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' }] })
+    items.unshift(it)
+  } else it.erpNo = p.no
+  await putItem(it)
+  return it
+}
+const erpSearchKey = (p) => canon(`${p.no} ${p.name}`)
+/** 認識產品：先看類別、再看那一類的東西；可以搜尋編號或名字 */
+async function viewCatalog() {
+  const erp = await erpGet()
+  const st = (state.erp ??= { cat: null, q: '', stocked: true, more: 0 })
+  const items = await itemsAll()
+  const back = backBtn('items', '品項')
+  if (!erp)
+    return `
+  <main class="app">
+    <div class="nav">${back}</div>
+    <h1 class="large-title">認識產品</h1>
+    <p class="subtitle">把正航的產品表匯進來，就能照類別看公司有哪些東西、放在哪裡、長什麼樣子。</p>
+    <div class="hint-card stack">
+      <div><b>還沒匯入正航產品表。</b>在公司電腦的正航：報表 → 庫存管理 → 存貨狀況報表 → <b>產品存量明細表</b> → 確定 → 存成 Excel；再另存成 CSV 檔，或整張複製貼上。</div>
+      <button class="btn small edit-only" data-action="erp-import">匯入正航產品表</button>
+    </div>
+  </main>`
+  const all = erp.products
+  const stockedN = all.filter((p) => p.qty > 0).length
+  const pool = st.stocked ? all.filter((p) => p.qty > 0) : all
+  const cats = new Map()
+  for (const p of pool) cats.set(erpCat(p.no), (cats.get(erpCat(p.no)) || 0) + 1)
+  const catList = [...cats].sort((a, b) => b[1] - a[1])
+  return `
+  <main class="app">
+    <div class="nav">${back}<span class="nav-right"><button class="btn small plain edit-only" data-action="erp-cats">類別名稱</button><button class="btn small plain edit-only" data-action="erp-import">重新匯入</button></span></div>
+    <h1 class="large-title">認識產品</h1>
+    <p class="subtitle">正航 ${all.length} 種・有庫存 ${stockedN} 種・${fmtTime(erp.at)} 匯入。先認類別，再認類別裡的東西。</p>
+    <input class="field search" id="erp-q" type="search" placeholder="搜尋產品編號、品名（全部 ${all.length} 種）" autocomplete="off" enterkeyhint="search" value="${esc(st.q)}">
+    <div class="chips"><button class="chip ${st.stocked ? 'on' : ''}" data-action="erp-stocked" aria-pressed="${st.stocked}">${st.stocked ? '✓ ' : ''}只看有庫存的 <small>${stockedN}</small></button>${st.cat ? `<button class="chip" data-erp-cat="">‹ 所有類別</button>` : ''}</div>
+    <div id="erp-list">${erpListHtml(erp, items, catList)}</div>
+  </main>`
+}
+/** 清單那一塊（搜尋時只重畫這裡，打字的框不會跳掉） */
+function erpListHtml(erp, items, catList) {
+  const st = state.erp
+  const pool = st.stocked ? erp.products.filter((p) => p.qty > 0) : erp.products
+  const q = canon(st.q)
+  const PAGE = 150
+  const rowOf = (p) => {
+    const it = erpItemOf(items, p.no)
+    const places = it ? liveStock(it).map(([, s]) => s.place).filter(Boolean) : []
+    const meta = [p.no, p.unit, blindMe() ? '' : `庫存 ${p.qty}`, places.length ? `在 ${places.slice(0, 2).join('、')}${places.length > 2 ? '…' : ''}` : ''].filter(Boolean).join('・')
+    return `<button class="row" data-erp-no="${esc(p.no)}">${it ? itemThumb(it, 40) : `<span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(erpCat(p.no))}</span>`}<span class="grow"><span class="title">${esc(p.name)}</span><br><span class="meta">${esc(meta)}</span></span>${it ? '<span class="badge ok">品項</span>' : ''}${chev}</button>`
+  }
+  const list = (arr, label) => {
+    const shown = arr.slice(0, PAGE + st.more)
+    return `<section class="item-sec"><p class="section-title">${esc(label)}（${arr.length}）</p><div class="group">${shown.map(rowOf).join('') || '<div class="row muted">沒有</div>'}</div>${arr.length > shown.length ? `<button class="btn secondary block" data-action="erp-more" style="margin-top:10px">再顯示 ${Math.min(PAGE, arr.length - shown.length)} 種（還有 ${arr.length - shown.length}）</button>` : ''}</section>`
+  }
+  if (q) return list(pool.filter((p) => erpSearchKey(p).includes(q)), `找到`)
+  if (st.cat) return list(pool.filter((p) => erpCat(p.no) === st.cat), erpCatLabel(erp, st.cat))
+  if (!catList) {
+    const cats = new Map()
+    for (const p of pool) cats.set(erpCat(p.no), (cats.get(erpCat(p.no)) || 0) + 1)
+    catList = [...cats].sort((a, b) => b[1] - a[1])
+  }
+  const unnamed = catList.filter(([c]) => !erpCatName(erp, c)).length
+  return `<div class="group">${catList.map(([c, n]) => `<button class="row" data-erp-cat="${esc(c)}"><span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(c)}</span><span class="grow"><span class="title">${esc(erpCatLabel(erp, c))}</span><br><span class="meta">${n} 種</span></span>${chev}</button>`).join('')}</div>${unnamed ? `<p class="footnote">${unnamed} 個類別只有字母、還沒有名稱：到正航「產品類別設定」看代號對應什麼，按右上「類別名稱」填進來。</p>` : ''}`
+}
+/** 一個產品：編號、名稱、單位、各倉庫數量、放哪裡、照片；可以加入品項庫 */
+async function erpProductSheet(no) {
+  const erp = await erpGet()
+  const p = erp?.products.find((x) => x.no === no)
+  if (!p) return toast('找不到這個產品')
+  const items = await itemsAll()
+  const it = erpItemOf(items, no)
+  const stock = it ? liveStock(it) : []
+  sheet(
+    `<h2 class="sheet-title">${esc(p.name)}</h2>
+     <p class="sheet-sub">${esc(p.no)}・${esc(erpCatLabel(erp, erpCat(p.no)))}${p.unit ? `・單位：${esc(p.unit)}` : ''}</p>
+     ${it?.photo ? `<img src="${itemUrl(it)}" alt="" style="display:block;width:100%;max-height:220px;object-fit:contain;border-radius:12px;background:var(--card-2);margin:10px 0">` : ''}
+     <div class="group" style="margin-top:10px">
+       ${blindMe() ? '' : `<div class="row"><span class="grow"><span class="title">正航庫存</span><br><span class="meta">${Object.entries(p.wh).map(([w, n]) => `倉庫 ${esc(w)}：${n}`).join('・') || '沒有倉庫資料'}</span></span><b>${p.qty}</b></div>`}
+       <div class="row"><span class="grow"><span class="title">放在哪裡</span><br><span class="meta">${stock.length ? stock.map(([, s]) => `${esc(s.place || '沒填位置')} ${s.count} 個`).join('・') : it ? '還沒盤點到' : '還沒記進品項庫，盤點到才知道'}</span></span></div>
+     </div>
+     ${it ? `<button class="btn block" id="e-open" style="margin-top:12px">打開品項（照片、盤點紀錄）</button>` : `<button class="btn block edit-only" id="e-link" style="margin-top:12px">加入品項庫</button><p class="footnote">加入後：盤點到會記位置、可以放樣品照、看差異。</p>`}`,
+    (el, close) => {
+      el.querySelector('#e-open')?.addEventListener('click', () => {
+        close()
+        state.itemId = it.id
+        go('item')
+      })
+      el.querySelector('#e-link')?.addEventListener('click', async () => {
+        const made = await erpLink(no)
+        close()
+        if (!made) return toast('加不進去，請再試一次')
+        toast(`已記進品項庫：${made.label}`)
+        state.itemId = made.id
+        go('item')
+      })
+    },
+  )
+}
+/** 類別名稱：一行一個「字母=名稱」，跟著產品表一起同步 */
+async function erpCatsSheet() {
+  const erp = await erpGet()
+  if (!erp) return toast('先匯入正航產品表')
+  const letters = [...new Set(erp.products.map((p) => erpCat(p.no)))].sort()
+  const text = letters.map((c) => `${c}=${erpCatName(erp, c)}`).join('\n')
+  sheet(
+    `<h2 class="sheet-title">類別名稱</h2>
+     <p class="sheet-sub">產品編號開頭的字母是正航的「產品類別」。到正航「系統 → 共用資料 → 產品資料設定 → 產品類別設定」看代號對應的名稱，填在等號後面（例如 C=真空邦浦）。</p>
+     <textarea class="field" id="ec-text" rows="${Math.min(14, letters.length + 1)}">${esc(text)}</textarea>
+     <button class="btn block" id="ec-save" style="margin-top:12px">儲存</button>`,
+    (el, close) => {
+      el.querySelector('#ec-save').onclick = async () => {
+        const cats = {}
+        for (const line of el.querySelector('#ec-text').value.split('\n')) {
+          const m = /^\s*([A-Za-z0-9#])\s*[=＝:：]\s*(.*?)\s*$/.exec(line)
+          if (m && m[2]) cats[m[1].toUpperCase()] = m[2]
+        }
+        await erpPut({ ...erp, cats })
+        close()
+        toast('類別名稱存好了')
+        render()
+      }
+    },
+  )
+}
+/** 匯入正航產品表：選 CSV 檔，或整張複製貼上 */
+function erpImportSheet() {
+  sheet(
+    `<h2 class="sheet-title">匯入正航產品表</h2>
+     <ol class="steps-list">
+       <li>公司電腦的正航：報表 → 庫存管理 → 存貨狀況報表 → <b>產品存量明細表</b> → 確定 → 存成 Excel。</li>
+       <li>在 Excel 按「另存新檔」，存檔類型選 <b>CSV</b>（UTF-8 或一般的都可以），傳到這台。</li>
+       <li>按下面「選 CSV 檔」。電腦上也可以直接把整張表（含第一列標題）複製，貼在下面。</li>
+     </ol>
+     <label class="btn block secondary" style="margin-top:10px">選 CSV 檔<input type="file" accept=".csv,.txt,.tsv,text/csv,text/plain" id="ei-file" class="sr-only"></label>
+     <textarea class="field" id="ei-text" rows="4" placeholder="產品編號&#9;品名規格&#9;單位&#9;倉庫編號&#9;…&#9;實際在庫量&#10;C-043&#9;真空幫浦 …&#9;台&#9;02&#9;…&#9;2" style="margin-top:10px"></textarea>
+     <button class="btn block" id="ei-go" style="margin-top:12px">匯入貼上的內容</button>
+     <p class="footnote">同一個產品在幾個倉庫會合併成一筆。品項庫裡料號對得上的，帳面會改成正航的數量；安全庫存這裡不會動。</p>`,
+    (el, close) => {
+      const run = async (text) => {
+        try {
+          const r = await importErp(text)
+          close()
+          toast(`匯入完成：${r.products} 種（有庫存 ${r.stocked} 種）${r.booked ? `，更新 ${r.booked} 個品項的帳面` : ''}`)
+          state.erp = { cat: null, q: '', stocked: true, more: 0 }
+          go('catalog')
+        } catch (e) {
+          toast(e.message)
+        }
+      }
+      el.querySelector('#ei-file').onchange = async (e) => {
+        const f = e.target.files?.[0]
+        if (f) run(await readTextFile(f))
+      }
+      el.querySelector('#ei-go').onclick = () => run(el.querySelector('#ei-text').value)
+    },
+  )
+}
+
 async function viewItems() {
   const items = await itemsAll(true)
+  const erp = await erpGet()
   const filters = ITEM_FILTERS.filter((x) => !x.hidden?.() && (x.id !== 'recount' || items.some(needsRecount)))
   const f = filters.find((x) => x.id === state.itemFilter) || filters[0]
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
@@ -1935,6 +2219,7 @@ async function viewItems() {
     <div class="nav"><button class="btn small plain" data-go="locations">儲位</button><span class="nav-right"><button class="icon-btn" data-action="items-more" aria-label="匯入、匯出、備份">⋯</button><button class="btn small edit-only" data-action="item-add">＋ 新增</button></span></div>
     <h1 class="large-title">品項庫</h1>
     <p class="subtitle">${items.length ? `${items.length} 種商品・${locations().length} 個儲位。盤點按「完成」就會自動更新。` : '盤點按「完成」，數到的東西就會自動記進來。'}</p>
+    <button class="report-card" data-go="catalog" style="margin-bottom:12px"><span class="grow"><span class="report-card-kicker">認識產品</span><span class="report-card-nums">${erp ? `正航 <b>${erp.products.length}</b> 種・有庫存 <b>${erp.products.filter((p) => p.qty > 0).length}</b> 種` : '匯入正航產品表'}</span><span class="meta">${erp ? '照類別認東西、放在哪裡、長什麼樣子' : '照類別看公司有哪些產品，點貨對單不會錯'}</span></span>${chev}</button>
     ${
       items.length
         ? `<div class="seg" role="tablist" aria-label="篩選">${filters.map((x) => `<button role="tab" aria-selected="${x.id === f.id}" data-item-filter="${x.id}">${x.label} ${items.filter(x.test).length}</button>`).join('')}</div>
@@ -2186,9 +2471,11 @@ async function render() {
                     ? await viewLookup()
                     : state.view === 'locations'
                       ? await viewLocations()
-                      : state.view === 'quality'
-                        ? await viewQuality()
-                        : await viewSettings()
+                      : state.view === 'catalog'
+                        ? await viewCatalog()
+                        : state.view === 'quality'
+                          ? await viewQuality()
+                          : await viewSettings()
   // 放大看照片時，重畫畫面不要讓位置跳回左上角
   const vs = document.querySelector('.viewer-scroll')
   const keep = vs ? { x: vs.scrollLeft / Math.max(1, vs.scrollWidth), y: vs.scrollTop / Math.max(1, vs.scrollHeight) } : null
@@ -2871,6 +3158,7 @@ function itemsMoreSheet() {
   sheet(
     `<h2 class="sheet-title">品項庫</h2>
      <div class="group">
+       <button class="row edit-only" id="m-erp"><span class="grow"><span class="title">匯入正航產品表</span><br><span class="meta">產品存量明細表（CSV 或貼上）：認識產品、帳面數</span></span>${chev}</button>
        <button class="row edit-only" id="m-import"><span class="grow"><span class="title">貼上 Excel 清單</span><br><span class="meta">一次匯入品名、型號、帳面數、剩幾個要叫貨</span></span>${chev}</button>
        <button class="row" id="m-xlsx"><span class="grow"><span class="title">下載品項庫 Excel</span><br><span class="meta">實盤、帳面、差異、叫貨清單</span></span>${chev}</button>
        <button class="row" id="m-order"><span class="grow"><span class="title">複製叫貨清單</span><br><span class="meta">貼到 LINE 給廠商或老闆</span></span>${chev}</button>
@@ -2885,6 +3173,10 @@ function itemsMoreSheet() {
       el.querySelector('#m-import').onclick = () => {
         close()
         importSheet()
+      }
+      el.querySelector('#m-erp').onclick = () => {
+        close()
+        erpImportSheet()
       }
       el.querySelector('#m-xlsx').onclick = async () => {
         close()
@@ -3482,7 +3774,7 @@ async function wipeLocal(msg) {
   toast(msg)
   go('home')
 }
-const SYNC_STORES = { session: idb.sessions, item: idb.items, sample: idb.samples }
+const SYNC_STORES = { session: idb.sessions, item: idb.items, sample: idb.samples, erp: idb.erp }
 const tOf = (v) => v.updatedAt || v.createdAt || 0
 /**
  * 盤點紀錄（第 2 版格式，v:2）：只傳資料，照片另外一筆一張（photo:盤點ID:照片ID），下載時先拿資料、打開那次盤點才抓照片。
@@ -3494,6 +3786,7 @@ async function encodeRecord(kind, v, { full = false } = {}) {
   if (kind === 'session' && full) return { ...v, photos: await Promise.all(v.photos.map(async ({ lost, pending, up, ...p }) => ({ ...p, blob: undefined, b64: p.blob ? await blobToBase64(p.blob) : '' }))) }
   if (kind === 'session') return { ...v, v: 2, photos: v.photos.map(({ blob, lost, pending, up, ...p }) => p) }
   if (kind === 'item') return { ...v, photo: undefined, photoB64: v.photo ? await blobToBase64(v.photo) : '' }
+  if (kind === 'erp') return { ...v, blob: undefined } // 正航產品表：純資料
   return { ...v, blob: undefined, b64: await blobToBase64(v.blob) }
 }
 function decodeRecord(kind, d) {
@@ -3505,6 +3798,10 @@ function decodeRecord(kind, d) {
   if (kind === 'item') {
     const { photoB64, ...rest } = d
     return { ...rest, photo: photoB64 ? b64ToBlob(photoB64) : undefined }
+  }
+  if (kind === 'erp') {
+    const { blob, b64, ...rest } = d
+    return rest
   }
   const { b64, ...rest } = d
   return { ...rest, blob: b64ToBlob(b64 || '') }
@@ -3636,6 +3933,7 @@ async function syncNow(report = () => {}) {
     for (const s of await db.all()) if (tOf(s) !== s._syncT && s.photos.some((p) => p.status === 'done')) jobs.push(['session', s])
     for (const it of await itemsAll(true)) if (tOf(it) !== it._syncT) jobs.push(['item', it])
     for (const sm of await idb.samples.all().catch(() => [])) if (tOf(sm) !== sm._syncT) jobs.push(['sample', sm])
+    for (const e of await idb.erp.all().catch(() => [])) if (tOf(e) !== e._syncT) jobs.push(['erp', e])
     const settingsAt = Number(ls.get(LS.settingsAt, '0'))
     const settingsDirty = settingsAt && String(settingsAt) !== ls.get(LS.settingsSyncT)
     const deleted = readJson(LS.deleted, [])
@@ -4589,7 +4887,7 @@ $app.addEventListener('click', async (e) => {
   // 補框模式：點照片哪裡，就在那裡加一個框（大小跟這張照片的其他框差不多），再選它是哪一種
   const wrap = e.target.closest('[data-photo]')
   if (state.addMode && wrap && !e.target.closest('[data-action]')) return addBoxAt(wrap, e)
-  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-qrange],[data-recount-list],[data-pick],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example]')
+  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-qrange],[data-recount-list],[data-pick],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example],[data-erp-cat],[data-erp-no]')
   if (!t) {
     // 點空白處取消標示（不捲回頂端）
     if (state.focus && !e.target.closest('.photo-wrap,.item')) {
@@ -4607,6 +4905,12 @@ $app.addEventListener('click', async (e) => {
   }
   if (d.go === 'quality' && state.view !== 'quality') state.qBack = ['settings', 'review'].includes(state.view) ? state.view : 'report'
   if (d.go) return go(d.go)
+  // 認識產品：點類別、點產品
+  if (d.erpCat !== undefined) {
+    state.erp = { ...(state.erp || {}), cat: d.erpCat || null, q: '', more: 0 }
+    return render()
+  }
+  if (d.erpNo) return erpProductSheet(d.erpNo)
   if (d.range) {
     state.range = d.range
     return render()
@@ -5051,6 +5355,17 @@ $app.addEventListener('click', async (e) => {
       return itemEditSheet(null)
     case 'items-more':
       return itemsMoreSheet()
+    case 'erp-import':
+      return erpImportSheet()
+    case 'erp-cats':
+      return erpCatsSheet()
+    case 'erp-stocked':
+      state.erp.stocked = !state.erp.stocked
+      state.erp.more = 0
+      return render()
+    case 'erp-more':
+      state.erp.more += 150
+      return render()
     case 'import':
       return importSheet()
     case 'item-edit':
@@ -5236,6 +5551,13 @@ function bindInputs() {
     })
   document.getElementById('place')?.addEventListener('input', (e) => (state.session.place = e.target.value))
   document.getElementById('item-search')?.addEventListener('input', (e) => filterRows($app, e.target.value))
+  // 認識產品的搜尋：只重畫清單，打字的框不會跳掉
+  document.getElementById('erp-q')?.addEventListener('input', async (e) => {
+    state.erp.q = e.target.value
+    state.erp.more = 0
+    const list = document.getElementById('erp-list')
+    if (list) list.innerHTML = erpListHtml(await erpGet(), await itemsAll())
+  })
   document.getElementById('lookup-q')?.addEventListener('input', (e) => {
     // 只更新結果區，輸入框不重畫（打字、選字不會被打斷）
     if (state.lookup.read?.url) URL.revokeObjectURL(state.lookup.read.url)

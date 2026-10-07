@@ -1153,6 +1153,13 @@ body.read-only .view-only {
   font-weight: 400;
   font-size: 13px;
 }
+.chip.on {
+  background: var(--tint-soft);
+  color: var(--tint);
+}
+.chip.on small {
+  color: var(--tint);
+}
 .chip[aria-pressed='true'] {
   background: var(--tint);
   color: #fff;
