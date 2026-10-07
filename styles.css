@@ -548,6 +548,27 @@ body.no-scroll {
   border-radius: 999px;
   font-size: 15px;
 }
+/* 首頁左上的同步狀態：雲朵用 SVG（iPhone 的 ☁︎ 字會畫得很小） */
+.sync-pill {
+  gap: 6px;
+  padding-left: 12px;
+}
+.sync-pill .cloud {
+  flex: none;
+}
+.sync-pill.syncing .cloud {
+  animation: cloud-pulse 1.2s ease-in-out infinite;
+}
+@keyframes cloud-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sync-pill.syncing .cloud {
+    animation: none;
+  }
+}
 .icon-btn {
   display: inline-flex;
   align-items: center;

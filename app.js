@@ -70,7 +70,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.0.7（10/6・手機少了的紀錄自動從雲端補回）'
+const VERSION = '4.0.8（10/7・加入不再下載兩次、同步看得到進度、雲朵圖示修正）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1523,7 +1523,7 @@ async function viewHome() {
   const unfinished = sessions.filter((s) => !s.linkedAt).length
   return `
   <main class="app">
-    <div class="nav">${syncReady() ? `<button class="btn small plain sync-pill ${state.syncState || ''}" data-action="sync-now">☁︎ ${esc(syncLabel())}</button>` : '<span></span>'}<button class="icon-btn" data-go="settings" aria-label="設定"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.6 7.6 0 0 0-1.68-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.61-.25 1.17-.58 1.68-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.1-1.65Z"/></svg></button></div>
+    <div class="nav">${syncReady() ? `<button class="btn small plain sync-pill ${state.syncState || ''}" data-action="sync-now"><svg class="cloud" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4 4 0 0 1-.6-7.95A5.5 5.5 0 0 1 17 8.5a4.75 4.75 0 0 1 .5 9.5H7Z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></svg><span class="sync-text">${esc(syncLabel())}</span></button>` : '<span></span>'}<button class="icon-btn" data-go="settings" aria-label="設定"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.6 7.6 0 0 0-1.68-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.61-.25 1.17-.58 1.68-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.1-1.65Z"/></svg></button></div>
     <h1 class="large-title brand"><img class="brand-logo" src="logo.svg" alt="聖佳 LOGO">聖佳智慧庫存</h1>
     <p class="subtitle">拍貨架，AI 數品項；跟原圖對照，再用 ＋／－ 修正。</p>
     <div class="home-cards">
@@ -1817,7 +1817,7 @@ async function viewSettings() {
     ${
       syncReady()
         ? `<div class="group">
-            <div class="row"><span class="avatar" aria-hidden="true">${esc((ls.get(LS.memberName) || '我').slice(0, 1))}</span><span class="grow"><span class="title">${esc(ls.get(LS.memberName) || '我')}（這台）</span><br><span class="meta">${ROLE_LABEL[myRole()]}・${state.syncState === 'error' && state.syncError ? esc(state.syncError) : esc(syncLabel())}</span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
+            <div class="row"><span class="avatar" aria-hidden="true">${esc((ls.get(LS.memberName) || '我').slice(0, 1))}</span><span class="grow"><span class="title">${esc(ls.get(LS.memberName) || '我')}（這台）</span><br><span class="meta">${ROLE_LABEL[myRole()]}・<span class="sync-text">${state.syncState === 'error' && state.syncError ? esc(state.syncError) : esc(syncLabel())}</span></span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
             <div class="row"><span class="grow"><span class="title">這台的盤點人</span><br><span class="meta">新盤點會自動記成這個人，不用每次選${canManage() ? '' : '；由擁有者或管理員設定'}</span></span>${
               canManage() ? `<button class="btn small secondary" data-action="counter-device">${esc(currentCounter()?.name || '選擇')}</button>` : `<b>${esc(currentCounter()?.name || '—')}</b>`
             }</div>
@@ -3510,11 +3510,21 @@ async function applyRemote(rec) {
   return true
 }
 /** 同步一次（同時只跑一個）：先上傳、再下載 */
-async function syncNow(onProgress = () => {}) {
+/** 同步進度：首頁左上的雲朵、設定頁都看得到（不用整頁重畫） */
+function syncProgress(msg) {
+  state.syncMsg = msg
+  document.querySelectorAll('.sync-text').forEach((el) => (el.textContent = msg))
+}
+async function syncNow(report = () => {}) {
   if (!syncReady()) throw new Error('還沒開啟多台同步')
   if (syncing) return syncing
+  const onProgress = (m) => {
+    syncProgress(m)
+    report(m)
+  }
   syncing = (async () => {
     state.syncState = 'syncing'
+    onProgress('連線中…')
     // 1. 上傳：還沒同步過的（檢視者只下載）
     const jobs = []
     const viewer = !canEdit()
@@ -3580,20 +3590,27 @@ async function syncNow(onProgress = () => {}) {
     await flush()
     // 2. 下載：別台送上去、比上次新的
     let cursor = Number(ls.get(LS.pulled, '0'))
+    const fromStart = cursor === 0 // 剛加入、第一次：本來就是從頭拿全部
     let got = 0
     let changed = false
     for (let round = 0; round < 200; round++) {
+      onProgress(got ? `下載了 ${got} 筆，還有…` : fromStart ? '下載中（第一次會比較久，照片都要抓下來）' : '下載中…')
       const r = await postSync({ action: 'pull', since: cursor })
-      for (const rec of r.records) if (await applyRemote(rec)) changed = true
-      got += r.records.length
-      if (r.records.length) onProgress(`下載 ${got} 筆`)
+      for (const rec of r.records) {
+        if (await applyRemote(rec)) changed = true
+        got++
+        onProgress(`下載 ${got} 筆…`)
+      }
       cursor = r.next
       ls.set(LS.pulled, String(cursor))
       if (!r.more) break
     }
     ls.set(LS.lastSync, String(Date.now()))
+    // 剛從頭下載過一次，就不用再「重新下載全部」（不然剛加入的人會下載兩次，等很久）
+    if (fromStart) ls.set(LS.fullPullDone, '1')
     // 自動從雲端重新下載一次全部：這台有照片不見了（轉新存法時發現），或剛更新到 4.0.7（之前同步卡住，這台可能少了資料）
     if (ls.get(LS.needRepair) === '1' || ls.get(LS.fullPullDone) !== '1') {
+      onProgress('檢查有沒有少的紀錄…')
       ls.set(LS.needRepair, '')
       ls.set(LS.fullPullDone, '1')
       const r = await fullPull({ quiet: true }).catch(() => null)
@@ -3943,7 +3960,7 @@ function moveSheet() {
   )
 }
 const syncLabel = () => {
-  if (state.syncState === 'syncing') return '同步中…'
+  if (state.syncState === 'syncing') return state.syncMsg || '同步中…'
   if (state.syncState === 'error') return '同步沒成功'
   const t = Number(ls.get(LS.lastSync, '0'))
   return t ? `已同步 ${fmtTime(t)}` : '還沒同步'
@@ -4777,6 +4794,8 @@ $app.addEventListener('click', async (e) => {
       return wipeLocal('這台已退出同步，資料已清除')
     case 'sync-now':
       if (!syncReady()) return go('settings')
+      // 已經在同步了：不要再開一次，也不要讓人以為壞掉
+      if (syncing) return toast(`已經在同步了，請等一下（${state.syncMsg || '照片多會比較久'}）`)
       toast('同步中…')
       return syncNow((m) => toast(m))
         .then((r) => toast(r.pushed || r.pulled ? `同步完成：上傳 ${r.pushed}、下載 ${r.pulled}` : '已經是最新的'))
