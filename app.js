@@ -72,7 +72,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.2（10/7・匯入正航產品表、認識產品）'
+const VERSION = '4.2.1（10/7・正航產品總表：查庫存、放哪裡、照片）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2062,8 +2062,8 @@ async function viewCatalog() {
     return `
   <main class="app">
     <div class="nav">${back}</div>
-    <h1 class="large-title">認識產品</h1>
-    <p class="subtitle">把正航的產品表匯進來，就能照類別看公司有哪些東西、放在哪裡、長什麼樣子。</p>
+    <h1 class="large-title">產品總表</h1>
+    <p class="subtitle">把正航的產品表匯進來：每一種產品的庫存、放在哪裡、照片，點貨對單用。</p>
     <div class="hint-card stack">
       <div><b>還沒匯入正航產品表。</b>在公司電腦的正航：報表 → 庫存管理 → 存貨狀況報表 → <b>產品存量明細表</b> → 確定 → 存成 Excel；再另存成 CSV 檔，或整張複製貼上。</div>
       <button class="btn small edit-only" data-action="erp-import">匯入正航產品表</button>
@@ -2078,8 +2078,8 @@ async function viewCatalog() {
   return `
   <main class="app">
     <div class="nav">${back}<span class="nav-right"><button class="btn small plain edit-only" data-action="erp-cats">類別名稱</button><button class="btn small plain edit-only" data-action="erp-import">重新匯入</button></span></div>
-    <h1 class="large-title">認識產品</h1>
-    <p class="subtitle">正航 ${all.length} 種・有庫存 ${stockedN} 種・${fmtTime(erp.at)} 匯入。先認類別，再認類別裡的東西。</p>
+    <h1 class="large-title">產品總表</h1>
+    <p class="subtitle">正航 ${all.length} 種・有庫存 ${stockedN} 種・${fmtTime(erp.at)} 匯入。點類別或直接搜尋編號、品名。</p>
     <input class="field search" id="erp-q" type="search" placeholder="搜尋產品編號、品名（全部 ${all.length} 種）" autocomplete="off" enterkeyhint="search" value="${esc(st.q)}">
     <div class="chips"><button class="chip ${st.stocked ? 'on' : ''}" data-action="erp-stocked" aria-pressed="${st.stocked}">${st.stocked ? '✓ ' : ''}只看有庫存的 <small>${stockedN}</small></button>${st.cat ? `<button class="chip" data-erp-cat="">‹ 所有類別</button>` : ''}</div>
     <div id="erp-list">${erpListHtml(erp, items, catList)}</div>
@@ -2219,7 +2219,7 @@ async function viewItems() {
     <div class="nav"><button class="btn small plain" data-go="locations">儲位</button><span class="nav-right"><button class="icon-btn" data-action="items-more" aria-label="匯入、匯出、備份">⋯</button><button class="btn small edit-only" data-action="item-add">＋ 新增</button></span></div>
     <h1 class="large-title">品項庫</h1>
     <p class="subtitle">${items.length ? `${items.length} 種商品・${locations().length} 個儲位。盤點按「完成」就會自動更新。` : '盤點按「完成」，數到的東西就會自動記進來。'}</p>
-    <button class="report-card" data-go="catalog" style="margin-bottom:12px"><span class="grow"><span class="report-card-kicker">認識產品</span><span class="report-card-nums">${erp ? `正航 <b>${erp.products.length}</b> 種・有庫存 <b>${erp.products.filter((p) => p.qty > 0).length}</b> 種` : '匯入正航產品表'}</span><span class="meta">${erp ? '照類別認東西、放在哪裡、長什麼樣子' : '照類別看公司有哪些產品，點貨對單不會錯'}</span></span>${chev}</button>
+    <button class="report-card" data-go="catalog" style="margin-bottom:12px"><span class="grow"><span class="report-card-kicker">產品總表（正航）</span><span class="report-card-nums">${erp ? `<b>${erp.products.length}</b> 種・有庫存 <b>${erp.products.filter((p) => p.qty > 0).length}</b> 種` : '匯入正航產品表'}</span><span class="meta">${erp ? '查庫存、放在哪裡、照片；點貨對單用' : '正航的全部產品：查庫存、放哪裡，點貨對單不會錯'}</span></span>${chev}</button>
     ${
       items.length
         ? `<div class="seg" role="tablist" aria-label="篩選">${filters.map((x) => `<button role="tab" aria-selected="${x.id === f.id}" data-item-filter="${x.id}">${x.label} ${items.filter(x.test).length}</button>`).join('')}</div>
@@ -3158,7 +3158,7 @@ function itemsMoreSheet() {
   sheet(
     `<h2 class="sheet-title">品項庫</h2>
      <div class="group">
-       <button class="row edit-only" id="m-erp"><span class="grow"><span class="title">匯入正航產品表</span><br><span class="meta">產品存量明細表（CSV 或貼上）：認識產品、帳面數</span></span>${chev}</button>
+       <button class="row edit-only" id="m-erp"><span class="grow"><span class="title">匯入正航產品表</span><br><span class="meta">產品存量明細表（CSV 或貼上）：產品總表、帳面數</span></span>${chev}</button>
        <button class="row edit-only" id="m-import"><span class="grow"><span class="title">貼上 Excel 清單</span><br><span class="meta">一次匯入品名、型號、帳面數、剩幾個要叫貨</span></span>${chev}</button>
        <button class="row" id="m-xlsx"><span class="grow"><span class="title">下載品項庫 Excel</span><br><span class="meta">實盤、帳面、差異、叫貨清單</span></span>${chev}</button>
        <button class="row" id="m-order"><span class="grow"><span class="title">複製叫貨清單</span><br><span class="meta">貼到 LINE 給廠商或老闆</span></span>${chev}</button>
