@@ -39,6 +39,8 @@ const LS = {
   needRepair: 'inventory:needRepair',
   // 從雲端重新下載全部：更新後自動跑過一次了沒（4.0.7）
   fullPullDone: 'inventory:fullPullDone',
+  // 雲端 Apps Script 程式碼的版本（2 以上才會把照片分開存）
+  serverVer: 'inventory:serverVer',
 }
 /** 檢視者不能用的動作 */
 const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete'])
@@ -70,7 +72,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.0.8（10/7・加入不再下載兩次、同步看得到進度、雲朵圖示修正）'
+const VERSION = '4.1（10/7・同步只拿資料、照片打開才抓；新圖示）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -173,19 +175,21 @@ async function packBlob(b) {
     return LOST // 這台的照片檔已經不見了
   }
 }
-const unpackBlob = (v) => (v?._buf instanceof ArrayBuffer ? new Blob([v._buf], { type: v._type }) : v?._lost ? undefined : v)
+// 還沒從雲端抓下來的照片（同步只拿資料，照片打開那次盤點才抓）
+const PENDING = { _pending: true }
+const unpackBlob = (v) => (v?._buf instanceof ArrayBuffer ? new Blob([v._buf], { type: v._type }) : v?._lost || v?._pending ? undefined : v)
 async function packRecord(store, v) {
   if (store === 'sessions')
     return {
       ...v,
       photos: await Promise.all(
-        (v.photos || []).map(async ({ lost, ...p }) => ({ ...p, blob: !p.blob && lost ? LOST : await packBlob(p.blob) })),
+        (v.photos || []).map(async ({ lost, pending, ...p }) => ({ ...p, blob: p.blob ? await packBlob(p.blob) : pending ? PENDING : LOST })),
       ),
     }
   if (store === 'items') return v.photo ? { ...v, photo: await packBlob(v.photo) } : v
   return { ...v, blob: await packBlob(v.blob) }
 }
-/** 讀出來：照片變回 Blob；不見的照片 blob 是空的、lost＝true（畫面顯示「從雲端拿回」） */
+/** 讀出來：照片變回 Blob；沒有照片的：pending＝還沒下載（打開會抓）、lost＝這台弄丟了（畫面顯示「從雲端拿回」） */
 function unpackRecord(store, v) {
   if (!v) return v
   if (store === 'sessions')
@@ -193,7 +197,8 @@ function unpackRecord(store, v) {
       ...v,
       photos: (v.photos || []).map((p) => {
         const blob = unpackBlob(p.blob)
-        return blob ? { ...p, blob } : { ...p, blob: undefined, lost: true }
+        if (blob) return { ...p, blob }
+        return p.blob?._pending ? { ...p, blob: undefined, pending: true } : { ...p, blob: undefined, lost: true }
       }),
     }
   if (store === 'items') return v.photo ? { ...v, photo: unpackBlob(v.photo) } : v
@@ -305,6 +310,19 @@ const idb = (() => {
           const v = req.result
           // 還是舊存法（照片是 Blob）的不要原樣再存一次：iPhone 會因此把照片檔弄丟
           if (v && (v.updatedAt || v.createdAt) === t && !hasOldBlob(store, v)) s.put({ ...v, _syncT: t })
+        }
+        return req
+      }),
+    /** 照片傳上雲端了：在存的那筆上記 up＝true（不改修改時間、不觸發同步） */
+    markPhotoUp: (id, pids) =>
+      tx(store, 'readwrite', (s) => {
+        const req = s.get(id)
+        req.onsuccess = () => {
+          const v = req.result
+          if (!v?.photos) return
+          let hit = false
+          for (const p of v.photos) if (pids.includes(p.id)) hit = p.up = true
+          if (hit) s.put(v)
         }
         return req
       }),
@@ -1564,7 +1582,7 @@ async function viewHome() {
               const failed = s.photos.length && s.photos.every((p) => p.status !== 'done')
               const meta = [byName(s) ? `${byName(s)} 盤・${fmtTime(s.createdAt)}` : fmtTime(s.createdAt), s.place && placeLabel(s.place), s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.linkedAt ? '' : '還沒按完成', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
               const on = sel && state.selected.has(s.id)
-              const body = `${s.photos[0]?.blob ? `<img src="${urlOf(s.photos[0])}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)">` : '<span class="thumb-lost" aria-hidden="true"></span>'}<span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>`
+              const body = `${s.photos[0]?.blob ? `<img src="${urlOf(s.photos[0])}" alt="" style="width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--card-2)">` : `<span class="thumb-lost ${s.photos[0]?.pending ? 'pending' : ''}" aria-hidden="true"></span>`}<span class="grow"><span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}</span></span>`
               return sel
                 ? `<button class="row ${on ? 'picked' : ''}" data-pick="${s.id}" aria-pressed="${on}"><span class="pick" aria-hidden="true">${on ? '✓' : ''}</span>${body}</button>`
                 : `<button class="row" data-open="${s.id}">${body}${chev}</button>`
@@ -1698,14 +1716,16 @@ function viewReview() {
     ${
       photo
         ? `${
-            s.photos.some((p) => p.lost)
-              ? `<div class="hint-card lost-card" role="status"><b>${s.photos.filter((p) => p.lost).length} 張照片在這台手機不見了</b>（iPhone 的問題；框和數量都還在）。雲端有備份的話可以拿回來。<button class="btn small" data-action="repair-photos" ${repairing ? 'disabled' : ''}>${repairing ? '正在拿回…' : '從雲端拿回照片'}</button></div>`
+            s.photos.some((p) => p.lost && !fetching.has(s.id))
+              ? `<div class="hint-card lost-card" role="status"><b>${s.photos.filter((p) => p.lost).length} 張照片在這台手機不見了</b>（iPhone 的問題；框和數量都還在）。雲端有備份的話可以拿回來。<button class="btn small" data-action="repair-photos">從雲端拿回照片</button></div>`
               : ''
-          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''}" data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${photo.lost ? '<div class="photo-ph" role="img" aria-label="這張照片不見了"></div>' : `<img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">`}${boxes}
+          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''}" data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
+            photo.blob ? `<img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">` : `<div class="photo-ph ${fetching.has(s.id) || photo.pending ? 'loading' : ''}" role="img" aria-label="${photo.pending ? '照片下載中' : '這張照片不見了'}">${fetching.has(s.id) || photo.pending ? '<span class="photo-ph-text">照片下載中…</span>' : ''}</div>`
+          }${boxes}
              <button class="photo-zoom" data-action="zoom" aria-label="放大看照片">⤢</button>
            </div>
            ${state.addMode ? '<div class="add-hint" role="status"><b>點照片上漏掉的那一個</b>，會在那裡加一個框 <button class="btn small plain" data-action="add-cancel">取消</button></div>' : ''}
-           ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''} ${p.lost ? 'lost' : ''}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張${p.lost ? '（照片不見了）' : ''}">${p.lost ? '' : `<img src="${urlOf(p)}" alt="">`}</button>`).join('')}</div>` : ''}
+           ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''} ${p.blob ? '' : 'lost'}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張${p.pending ? '（下載中）' : p.lost ? '（照片不見了）' : ''}">${p.blob ? `<img src="${urlOf(p)}" alt="">` : ''}</button>`).join('')}</div>` : ''}
            <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>＋ 漏掉的，點照片補一個</button></div>
            <p class="footnote">點照片上的框：直接改成別的種類，改完自動跳下一個。點品項清單：看那一種在哪裡；數量不對按 ＋／－。</p>`
         : ''
@@ -1816,7 +1836,11 @@ async function viewSettings() {
     <p class="section-title">共用（跟 Google 雲端硬碟一樣）</p>
     ${
       syncReady()
-        ? `<div class="group">
+        ? `${
+            serverOld()
+              ? `<div class="hint-card stack" style="margin-bottom:12px"><div><b>Google 那邊的程式碼要更新</b>（新版同步只拿資料、照片打開才抓，快很多）。請<b>擁有者</b>用電腦做一次，約 3 分鐘：<ol class="steps-list" style="margin:8px 0 0"><li>按「複製試算表程式碼」。</li><li>打開當初那個 Google 試算表 → 擴充功能 → Apps Script → 全選、貼上取代 → 存檔。</li><li>右上「部署」→「<b>管理部署作業</b>」→ 鉛筆（編輯）→ 版本選「<b>新版本</b>」→ 部署。<br>（不要用「新增部署作業」，網址會變）</li></ol></div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
+              : ''
+          }<div class="group">
             <div class="row"><span class="avatar" aria-hidden="true">${esc((ls.get(LS.memberName) || '我').slice(0, 1))}</span><span class="grow"><span class="title">${esc(ls.get(LS.memberName) || '我')}（這台）</span><br><span class="meta">${ROLE_LABEL[myRole()]}・<span class="sync-text">${state.syncState === 'error' && state.syncError ? esc(state.syncError) : esc(syncLabel())}</span></span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
             <div class="row"><span class="grow"><span class="title">這台的盤點人</span><br><span class="meta">新盤點會自動記成這個人，不用每次選${canManage() ? '' : '；由擁有者或管理員設定'}</span></span>${
               canManage() ? `<button class="btn small secondary" data-action="counter-device">${esc(currentCounter()?.name || '選擇')}</button>` : `<b>${esc(currentCounter()?.name || '—')}</b>`
@@ -3250,34 +3274,95 @@ function tombstone(k) {
   scheduleSync()
 }
 const syncReady = () => !!(ls.get(LS.sheet) && ls.get(LS.syncKey))
+/** 雲端的程式碼是新版（照片分開存，同步只拿資料）；舊版要請擁有者重新貼程式碼、部署新版本 */
+const serverV2 = () => Number(ls.get(LS.serverVer, '0')) >= 2
+const serverOld = () => syncReady() && !!ls.get(LS.lastSync) && !serverV2()
 let syncTimer = 0
 let syncing = null
 let repairing = null
-/** 雲端那一筆有這台不見的照片：補回來（框、數量用這台的，不會蓋掉）；回傳補了幾張 */
-async function fillLostPhotos(rec) {
-  if (rec.del || !rec.d?.photos || !rec.k.startsWith('session:')) return 0
-  const id = rec.k.slice('session:'.length)
+/** 把雲端送來的照片放進這台的那次盤點（不改修改時間：這台改過、還沒傳的，照常上傳）；回傳補了幾張 */
+async function putPhotos(id, got) {
   const cur = await db.get(id)
-  if (!cur?.photos.some((p) => p.lost)) return 0
+  if (!cur) return 0
   let n = 0
-  for (const p of cur.photos) {
-    const rp = p.lost && rec.d.photos.find((x) => x.id === p.id && x.b64)
-    if (!rp) continue
-    p.blob = b64ToBlob(rp.b64)
+  const fill = (p) => {
+    const b64 = !p.blob && got[p.id]
+    if (!b64) return false
+    p.blob = b64ToBlob(b64)
     delete p.lost
-    n++
+    delete p.pending
+    p.up = true
+    return true
   }
+  for (const p of cur.photos) if (fill(p)) n++
   if (!n) return 0
-  await db.putRaw(cur) // 不改修改時間：這台改過、還沒傳的，照片回來後照常上傳
+  await db.putRaw(cur)
   // 正在看這次盤點：畫面上的那份也補上
-  for (const p of state.session?.id === id ? state.session.photos : []) {
-    const f = cur.photos.find((x) => x.id === p.id)
-    if (p.lost && f?.blob) {
-      p.blob = f.blob
-      delete p.lost
-    }
+  if (state.session?.id === id) {
+    state.session.photos.forEach(fill)
+    if (['review', 'capture'].includes(state.view)) render()
   }
   return n
+}
+/** 雲端那一筆有這台不見的照片（舊格式，照片跟資料綁一起）：補回來；回傳補了幾張 */
+async function fillLostPhotos(rec) {
+  if (rec.del || !rec.d?.photos || !rec.k.startsWith('session:')) return 0
+  const got = {}
+  for (const p of rec.d.photos) if (p.b64) got[p.id] = p.b64
+  return Object.keys(got).length ? putPhotos(rec.k.slice('session:'.length), got) : 0
+}
+/**
+ * 抓一次盤點的照片（還沒下載的、這台弄丟的）：同步平常只拿資料，照片打開那次盤點才抓這一次的。
+ * 一台同時只抓一次；回傳抓到幾張。
+ */
+const fetching = new Map()
+function fetchPhotos(s, { quiet = true } = {}) {
+  const want = s.photos.filter((p) => !p.blob && (p.pending || p.lost)).map((p) => p.id)
+  if (!want.length || !syncReady()) return Promise.resolve(0)
+  if (fetching.has(s.id)) return fetching.get(s.id)
+  const job = (async () => {
+    const got = {}
+    let keys = want.map((pid) => photoKey(s.id, pid))
+    // 一次最多約 8 MB：沒拿完的再要
+    for (let round = 0; round < 20 && keys.length; round++) {
+      const r = await postSync({ action: 'photos', keys })
+      if (!r.ok || !Array.isArray(r.records)) throw new Error(Array.isArray(r.records) ? r.error : '雲端的程式碼是舊版，還不會傳照片：請擁有者更新程式碼（設定 → 複製試算表程式碼）')
+      const back = new Set()
+      for (const rec of r.records || []) {
+        back.add(rec.k)
+        if (rec.d?.b64) got[rec.k.slice(rec.k.lastIndexOf(':') + 1)] = rec.d.b64
+      }
+      keys = keys.filter((k) => !back.has(k))
+      if (!r.more) break
+    }
+    const n = await putPhotos(s.id, got)
+    if (!quiet) toast(n ? `拿回 ${n} 張照片` : '雲端也沒有這幾張照片：請在拍照的那台手機打開 App，按「立即同步」')
+    return n
+  })().finally(() => fetching.delete(s.id))
+  fetching.set(s.id, job)
+  return job
+}
+/** 同步完，趁沒事慢慢把還沒下載的照片抓下來（新的先），首頁縮圖才會慢慢出現；一次一筆、不影響使用 */
+let prefetching = false
+async function prefetchPhotos() {
+  if (prefetching || !syncReady()) return
+  prefetching = true
+  try {
+    for (let i = 0; i < 200; i++) {
+      if (document.visibilityState !== 'visible' || state.view === 'analyzing' || state.busy) break
+      const s = (await db.all()).find((x) => x.photos.some((p) => p.pending))
+      if (!s) break
+      try {
+        await fetchPhotos(s)
+      } catch {
+        break // 連不上就先不要一直試，下次同步再說
+      }
+      if (state.view === 'home') render()
+      await sleep(300)
+    }
+  } finally {
+    prefetching = false
+  }
 }
 /**
  * 從雲端重新下載全部：平常的同步只拿「上次之後的新資料」、而且跳過這台自己傳的；
@@ -3361,6 +3446,8 @@ async function postSync(body) {
     await wipeLocal('這台已經被移除權限，App 裡的資料已清除')
     throw new Error('這台已經被移除權限，App 裡的資料已清除')
   }
+  // 雲端程式碼的版本（2＝會把照片分開存）：決定上傳用哪種格式、要不要提醒更新程式碼
+  if (data.ver) ls.set(LS.serverVer, String(data.ver))
   // 權限隨時可能被管理員改：每次回覆都更新
   if (data.me?.role) {
     const changed = data.me.role !== ls.get(LS.memberRole)
@@ -3397,13 +3484,24 @@ async function wipeLocal(msg) {
 }
 const SYNC_STORES = { session: idb.sessions, item: idb.items, sample: idb.samples }
 const tOf = (v) => v.updatedAt || v.createdAt || 0
-async function encodeRecord(kind, v) {
-  if (kind === 'session') return { ...v, photos: await Promise.all(v.photos.map(async (p) => ({ ...p, blob: undefined, b64: await blobToBase64(p.blob) }))) }
+/**
+ * 盤點紀錄（第 2 版格式，v:2）：只傳資料，照片另外一筆一張（photo:盤點ID:照片ID），下載時先拿資料、打開那次盤點才抓照片。
+ * 舊格式（照片 b64 跟資料綁在一起）下載時還認得。
+ */
+const photoKey = (sid, pid) => `photo:${sid}:${pid}`
+async function encodeRecord(kind, v, { full = false } = {}) {
+  // full：雲端的程式碼還是舊版（還不會收單獨的照片）→ 照片照舊跟資料綁一起傳
+  if (kind === 'session' && full) return { ...v, photos: await Promise.all(v.photos.map(async ({ lost, pending, up, ...p }) => ({ ...p, blob: undefined, b64: p.blob ? await blobToBase64(p.blob) : '' }))) }
+  if (kind === 'session') return { ...v, v: 2, photos: v.photos.map(({ blob, lost, pending, up, ...p }) => p) }
   if (kind === 'item') return { ...v, photo: undefined, photoB64: v.photo ? await blobToBase64(v.photo) : '' }
   return { ...v, blob: undefined, b64: await blobToBase64(v.blob) }
 }
 function decodeRecord(kind, d) {
-  if (kind === 'session') return { ...d, photos: (d.photos || []).map(({ b64, ...p }) => (b64 ? { ...p, blob: b64ToBlob(b64) } : { ...p, blob: undefined, lost: true })) }
+  if (kind === 'session')
+    return {
+      ...d,
+      photos: (d.photos || []).map(({ b64, ...p }) => (b64 ? { ...p, blob: b64ToBlob(b64) } : d.v >= 2 ? { ...p, blob: undefined, pending: true } : { ...p, blob: undefined, lost: true })),
+    }
   if (kind === 'item') {
     const { photoB64, ...rest } = d
     return { ...rest, photo: photoB64 ? b64ToBlob(photoB64) : undefined }
@@ -3464,7 +3562,7 @@ async function applyRemote(rec) {
   const kind = rec.k.slice(0, i)
   const id = rec.k.slice(i + 1)
   const store = SYNC_STORES[kind]
-  if (!store) return false
+  if (!store) return false // photo:… 之類的不在這裡處理（照片是打開那次盤點才抓）
   const cur = await store.get(id)
   if (rec.del) {
     if (!cur || tOf(cur) > rec.t) return false
@@ -3492,6 +3590,13 @@ async function applyRemote(rec) {
   }
   if (cur && tOf(cur) >= rec.t) return false
   const v = { ...decodeRecord(kind, rec.d), updatedAt: rec.t, _syncT: rec.t }
+  // 盤點：雲端那份只有資料，照片這台已經有的就留著（不用再抓一次）
+  if (kind === 'session' && cur) {
+    for (const p of v.photos) {
+      const mine = cur.photos.find((x) => x.id === p.id)
+      if (!p.blob && mine?.blob) Object.assign(p, { blob: mine.blob, pending: undefined, lost: undefined, up: mine.up })
+    }
+  }
   // 兩台同時建立新品項、料號撞號：本機還沒傳上去的那個改用新號碼
   if (kind === 'item') {
     const items = await idb.items.all()
@@ -3528,8 +3633,7 @@ async function syncNow(report = () => {}) {
     // 1. 上傳：還沒同步過的（檢視者只下載）
     const jobs = []
     const viewer = !canEdit()
-    // 照片在這台不見了的先不傳（會把雲端好好的照片蓋掉），等從雲端拿回照片再傳
-    for (const s of await db.all()) if (tOf(s) !== s._syncT && s.photos.some((p) => p.status === 'done') && !s.photos.some((p) => p.lost)) jobs.push(['session', s])
+    for (const s of await db.all()) if (tOf(s) !== s._syncT && s.photos.some((p) => p.status === 'done')) jobs.push(['session', s])
     for (const it of await itemsAll(true)) if (tOf(it) !== it._syncT) jobs.push(['item', it])
     for (const sm of await idb.samples.all().catch(() => [])) if (tOf(sm) !== sm._syncT) jobs.push(['sample', sm])
     const settingsAt = Number(ls.get(LS.settingsAt, '0'))
@@ -3563,15 +3667,33 @@ async function syncNow(report = () => {}) {
       jobs.length = 0
       deleted.length = 0
     }
+    const full = !serverV2() // 雲端程式碼還是舊版：照片跟資料綁一起傳（舊方式）
     for (const [kind, v] of jobs) {
       const t = tOf(v)
       // 某一筆的照片讀不出來：跳過那一筆，其他照樣同步（以前會整個同步失敗）
       let d
       try {
-        d = await encodeRecord(kind, v)
+        d = await encodeRecord(kind, v, { full })
       } catch (e) {
         console.error('encode', kind, v.id, e)
         continue
+      }
+      // 盤點的照片：還沒傳過的，一張一筆先傳（照片不會改，傳過一次就好）
+      if (kind === 'session' && !full) {
+        for (const p of v.photos) {
+          if (p.up || !p.blob) continue
+          let b64
+          try {
+            b64 = await blobToBase64(p.blob)
+          } catch {
+            continue
+          }
+          const pid = p.id
+          await add({ k: photoKey(v.id, pid), t, d: { b64, type: p.blob.type || 'image/jpeg' } }, async () => {
+            await db.markPhotoUp(v.id, [pid])
+            if (state.session?.id === v.id) for (const x of state.session.photos) if (x.id === pid) x.up = true
+          })
+        }
       }
       await add({ k: `${kind}:${v.id}`, t, d }, async () => {
         await SYNC_STORES[kind].markSynced(v.id, t)
@@ -3594,7 +3716,7 @@ async function syncNow(report = () => {}) {
     let got = 0
     let changed = false
     for (let round = 0; round < 200; round++) {
-      onProgress(got ? `下載了 ${got} 筆，還有…` : fromStart ? '下載中（第一次會比較久，照片都要抓下來）' : '下載中…')
+      onProgress(got ? `下載了 ${got} 筆，還有…` : fromStart ? `下載中（第一次會比較久${serverV2() ? '' : '，照片都要抓下來'}）` : '下載中…')
       const r = await postSync({ action: 'pull', since: cursor })
       for (const rec of r.records) {
         if (await applyRemote(rec)) changed = true
@@ -3621,6 +3743,9 @@ async function syncNow(report = () => {}) {
       itemsCache = null
       if (['home', 'items', 'item', 'report', 'locations', 'review'].includes(state.view)) render()
     } else if (state.view === 'home') render()
+    // 正在看的那次盤點先抓照片，其他的在背景慢慢抓
+    if (state.session?.photos.some((p) => p.pending)) fetchPhotos(state.session).catch(() => {})
+    setTimeout(() => prefetchPhotos().catch(() => {}), 1500)
     return { pushed: sent, pulled: got, changed }
   })()
     .catch((e) => {
@@ -4504,7 +4629,10 @@ $app.addEventListener('click', async (e) => {
     state.session = await db.get(d.open)
     delete state.session.edits // 第一版的舊欄位，不再使用
     await itemsAll()
-    return go('review', { photoIndex: 0 })
+    go('review', { photoIndex: 0 })
+    // 照片還沒下載的：現在抓這一次的（畫面先出來，照片到了再補上）
+    fetchPhotos(state.session).catch((e) => toast(`照片下載不了：${e.message}`))
+    return
   }
   if (d.itemOpen) {
     state.itemId = d.itemOpen
@@ -4878,6 +5006,12 @@ $app.addEventListener('click', async (e) => {
     case 'review-doubts':
       return quickSheet(doubtsOf(state.session), 0, { doubt: true })
     case 'repair-photos':
+      if (!syncReady()) return toast('這台沒有開啟多台同步，雲端沒有備份：照片拿不回來')
+      toast('正在從雲端拿照片…')
+      // 新存法先抓；沒有的話（舊格式、照片跟資料綁一起）再從頭下載一次
+      return fetchPhotos(state.session, { quiet: true })
+        .then((n) => (n ? toast(`拿回 ${n} 張照片`) : fullPull()))
+        .catch((e) => toast(`照片沒拿回來：${e.message}`))
     case 'full-pull':
       return fullPull().catch((e) => toast(`沒有下載成功：${e.message}`))
     case 'add-box':

@@ -1709,6 +1709,20 @@ a.row {
 .lost-card {
   margin-bottom: 12px;
 }
+/* 照片還沒下載：灰底＋「照片下載中…」 */
+.photo-ph {
+  display: grid;
+  place-items: center;
+}
+.photo-ph.loading {
+  background: var(--card-2);
+}
+.photo-ph-text {
+  color: var(--text-2);
+  font-size: 15px;
+  font-weight: 600;
+  animation: cloud-pulse 1.2s ease-in-out infinite;
+}
 .photo-strip button.lost,
 .thumb-lost {
   background: repeating-linear-gradient(-45deg, var(--card-2) 0 8px, var(--line) 8px 10px);
@@ -1718,6 +1732,9 @@ a.row {
   width: 52px;
   height: 52px;
   border-radius: 10px;
+}
+.thumb-lost.pending {
+  background: var(--card-2);
 }
 .lost-card .btn {
   display: flex;

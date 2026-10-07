@@ -23,7 +23,11 @@
  */
 const RAW = '盤點紀錄'
 const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID', '盤點人']
-const SYNC_ACTIONS = ['push', 'pull', 'members', 'invite', 'remove', 'setRole', 'rename', 'reissue']
+const SYNC_ACTIONS = ['push', 'pull', 'photos', 'members', 'invite', 'remove', 'setRole', 'rename', 'reissue']
+const SYNC_VER = 2 // 同步格式版本：2＝照片分開存
+const isPhotoKey = function (k) {
+  return String(k).indexOf('photo:') === 0
+}
 const ROLE_NAME = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 
 function doPost(e) {
@@ -69,9 +73,11 @@ function doPost(e) {
         }),
       )
     : []
-  if (data.action === 'hello') return json({ ok: true, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster })
-  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { me: me, roster: roster }))
-  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P), { me: me }) : { ok: false, viewer: true, me: me, error: '你是檢視者，只能看' })
+  // ver 2：盤點的照片分開存（photo:盤點ID:照片ID），下載只拿資料，照片用 photos 另外要；App 看到 ver 才改用新格式上傳
+  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster })
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, me: me, roster: roster }))
+  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, me: me }))
+  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P), { ver: SYNC_VER, me: me }) : { ok: false, viewer: true, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
   if (!canEdit) return json({ ok: false, viewer: true, error: '你是檢視者，只能看' })
   const lock = LockService.getScriptLock()
@@ -263,22 +269,38 @@ function syncPush(data, props, P) {
     let seq = Math.max(Date.now(), Number(props.getProperty('SYNC_SEQ') || 0) + 1)
     let n = 0
     const skipped = []
+    const trash = function (e) {
+      if (!e || !e.f) return
+      try {
+        DriveApp.getFileById(e.f).setTrashed(true)
+      } catch (err) {
+        /* 檔案已經不在了 */
+      }
+    }
     ;(data.records || []).forEach(function (r) {
       const cur = idx.map[r.k]
+      // 照片不會改：雲端已經有這張就不用再存一次（算成功，App 才會記成「傳過了」）
+      if (isPhotoKey(r.k) && !r.del && cur && cur.f && !cur.del) {
+        n++
+        return
+      }
       if (cur && cur.t > r.t) {
         skipped.push(r.k) // 雲端已經有比較新的（別台改的）
         return
       }
-      if (cur && cur.f) {
-        try {
-          DriveApp.getFileById(cur.f).setTrashed(true)
-        } catch (e) {
-          /* 檔案已經不在了 */
-        }
-      }
+      trash(cur)
       let f = ''
       if (!r.del) f = folder.createFile(Utilities.newBlob(JSON.stringify(r.d), 'application/json', r.k.replace(/[^\w-]/g, '_') + '.json')).getId()
       idx.map[r.k] = { t: r.t, s: seq++, d: String(data.dev || ''), f: f, del: !!r.del }
+      // 刪掉一次盤點：它的照片也一起丟掉
+      if (r.del && String(r.k).indexOf('session:') === 0) {
+        const prefix = 'photo:' + String(r.k).slice('session:'.length) + ':'
+        Object.keys(idx.map).forEach(function (k) {
+          if (k.indexOf(prefix) !== 0 || idx.map[k].del) return
+          trash(idx.map[k])
+          idx.map[k] = { t: r.t, s: seq++, d: String(data.dev || ''), f: '', del: true }
+        })
+      }
       n++
     })
     writeIndex(folder, idx)
@@ -300,7 +322,7 @@ function syncPull(data, P) {
       return { k: k, e: idx.map[k] }
     })
     .filter(function (x) {
-      return x.e.s > since
+      return x.e.s > since && !isPhotoKey(x.k) // 照片不在這裡給（App 打開那次盤點才用 photos 要）
     })
     .sort(function (a, b) {
       return a.e.s - b.e.s
@@ -327,6 +349,34 @@ function syncPull(data, P) {
     records.push({ k: x.k, t: x.e.t, del: !!x.e.del, d: d })
   }
   return { ok: true, records: records, next: next, more: i < all.length }
+}
+
+/** 要照片：給一串 photo:盤點ID:照片ID，回傳有的那些（一次最多約 8 MB，more＝還有沒給的） */
+function syncPhotos(data, P) {
+  const folder = syncFolder(P)
+  const idx = readIndex(folder)
+  const keys = (data.keys || []).filter(isPhotoKey).slice(0, 200)
+  const records = []
+  let size = 0
+  let i = 0
+  for (; i < keys.length; i++) {
+    if (records.length && size > 8e6) break
+    const e = idx.map[keys[i]]
+    if (!e || e.del || !e.f) {
+      records.push({ k: keys[i], d: null }) // 雲端沒有這張（App 不用再要）
+      continue
+    }
+    let d = null
+    try {
+      const text = DriveApp.getFileById(e.f).getBlob().getDataAsString()
+      size += text.length
+      d = JSON.parse(text)
+    } catch (err) {
+      d = null
+    }
+    records.push({ k: keys[i], d: d })
+  }
+  return { ok: true, records: records, more: i < keys.length }
 }
 
 function ensureRaw(ss) {
