@@ -41,6 +41,8 @@ const LS = {
   fullPullDone: 'inventory:fullPullDone',
   // 雲端 Apps Script 程式碼的版本（2 以上才會把照片分開存）
   serverVer: 'inventory:serverVer',
+  // 電腦、平板的側邊選單收起來了沒
+  sideCollapsed: 'inventory:sideCollapsed',
 }
 /** 檢視者不能用的動作 */
 const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete', 'erp-import', 'erp-cats', 'erp-link'])
@@ -72,7 +74,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.2.1（10/7・正航產品總表：查庫存、放哪裡、照片）'
+const VERSION = '4.3（10/7・電腦版選單改右邊、可收合）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1526,7 +1528,10 @@ const TABS = [
  * 手機：底部分頁列（只在三個主頁）。平板、電腦（≥768px）：同一個元素變成左邊側邊欄，每一頁都有（sub＝子頁面，手機不顯示）。
  */
 const tabBar = (active, sub = false) =>
-  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt="">聖佳智慧庫存</div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''}><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
+  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt=""><span class="side-name">聖佳智慧庫存</span><button class="side-toggle" data-action="side-toggle" aria-label="${sideCollapsed() ? '展開選單' : '收合選單'}" title="${sideCollapsed() ? '展開選單' : '收合選單'}"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''} title="${t.label}"><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">${ICON[t.id]}</svg><span>${t.label}</span></button>`).join('')}</div></nav>`
+/** 電腦、平板的右側選單收合（只剩圖示）；記在這台 */
+const sideCollapsed = () => ls.get(LS.sideCollapsed) === '1'
+document.body.classList.toggle('side-collapsed', sideCollapsed())
 /** 子頁面屬於哪一個主頁（側邊欄標哪一個） */
 const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', catalog: 'items', lookup: 'lookup', settings: 'settings' }
 
@@ -5355,6 +5360,10 @@ $app.addEventListener('click', async (e) => {
       return itemEditSheet(null)
     case 'items-more':
       return itemsMoreSheet()
+    case 'side-toggle':
+      ls.set(LS.sideCollapsed, sideCollapsed() ? '0' : '1')
+      document.body.classList.toggle('side-collapsed', sideCollapsed())
+      return render()
     case 'erp-import':
       return erpImportSheet()
     case 'erp-cats':

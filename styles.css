@@ -1426,20 +1426,24 @@ a.row {
     --side: 248px;
     --content: 960px;
   }
-  /* 底部分頁列 → 左邊側邊欄（每一頁都有） */
+  /* 底部分頁列 → 右邊側邊欄（每一頁都有；可以收合成只剩圖示） */
+  body.side-collapsed {
+    --side: 84px;
+  }
   .tabbar,
   .tabbar.sub {
     display: block;
     top: 0;
     bottom: 0;
-    left: 0;
-    right: auto;
+    left: auto;
+    right: 0;
     width: var(--side);
     padding: calc(var(--safe-t) + 22px) 12px 20px;
     border-top: 0;
-    border-right: 0.5px solid var(--line);
+    border-left: 0.5px solid var(--line);
     background: color-mix(in srgb, var(--card-2) 70%, var(--bg));
     overflow-y: auto;
+    transition: width 0.25s ease;
   }
   .tabbar .wide-only {
     display: flex;
@@ -1448,7 +1452,53 @@ a.row {
     font-size: 24px;
     font-weight: 800;
     letter-spacing: -0.01em;
-    padding: 2px 12px 18px;
+    padding: 2px 4px 18px 12px;
+  }
+  .side-name {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .side-toggle {
+    flex: none;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 10px;
+    background: none;
+    color: var(--text-2);
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+  }
+  .side-toggle:hover {
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    color: var(--text);
+  }
+  .side-toggle svg {
+    transition: transform 0.25s ease;
+  }
+  body.side-collapsed .side-toggle svg {
+    transform: rotate(180deg);
+  }
+  /* 收起來：只剩圖示，名稱、文字藏起來 */
+  body.side-collapsed .tabbar {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  body.side-collapsed .side-head {
+    flex-direction: column;
+    gap: 6px;
+    padding: 0 0 14px;
+  }
+  body.side-collapsed .side-name,
+  body.side-collapsed .tabbar button span {
+    display: none;
+  }
+  body.side-collapsed .tabbar button {
+    justify-content: center;
+    padding: 10px 0;
   }
   .tabbar .inner {
     flex-direction: column;
@@ -1496,21 +1546,23 @@ a.row {
   }
   .app {
     max-width: none;
-    margin: 0 0 0 var(--side);
+    margin: 0 var(--side) 0 0;
     padding: calc(var(--safe-t) + 20px) max(28px, calc((100vw - var(--side) - var(--content)) / 2)) 64px;
+    transition: margin 0.25s ease;
   }
   body[data-view='review'] .app,
   body[data-view='capture'] .app {
     padding-bottom: 110px;
   }
   .toolbar {
-    left: var(--side);
+    left: 0;
+    right: var(--side);
   }
   .toolbar .inner {
     max-width: var(--content);
   }
   .toast {
-    left: calc(50% + var(--side) / 2);
+    left: calc(50% - var(--side) / 2);
     bottom: 32px;
   }
   /* 首頁右上的設定：側邊欄已經有了 */
