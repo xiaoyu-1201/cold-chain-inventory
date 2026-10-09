@@ -516,34 +516,11 @@ button.row[aria-current='true'] {
 body.no-scroll {
   overflow: hidden;
 }
-/* 底部面板：從下面滑上來、背景淡入（Apple 的 sheet） */
-.sheet-backdrop {
-  animation: fade-in 0.2s ease;
-}
-.sheet {
-  animation: sheet-up 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-@keyframes fade-in {
-  from {
-    opacity: 0;
-  }
-}
-@keyframes sheet-up {
-  from {
-    transform: translateY(100%);
-  }
-}
 /* 按下去有回饋 */
 .btn:active:not(:disabled),
 .sum-doubt:active,
 .photo-zoom:active {
   transform: scale(0.97);
-}
-@media (prefers-reduced-motion: reduce) {
-  .sheet,
-  .sheet-backdrop {
-    animation: none;
-  }
 }
 
 /* 結果頁「辨識過程」：小字，平常收起來，有問題時展開截圖 */
@@ -677,6 +654,8 @@ body.no-scroll {
   border-radius: 999px;
   background: var(--card);
   color: var(--tint);
+  font-size: 22px;
+  font-weight: 600;
 }
 
 /* 底部主要動作列（像 iOS 的 toolbar） */
@@ -1072,9 +1051,13 @@ button.swatch::after {
   font-size: 15px;
   box-shadow: var(--shadow);
   z-index: 50;
+  /* 旁邊可以放「復原」按鈕 */
+  display: flex;
+  align-items: center;
+  gap: 14px;
 }
 
-/* 底部彈出面板（Sheet）：點旁邊暗處就關 */
+/* 底部彈出面板（Sheet）：點旁邊暗處就關；從下面滑上來、背景淡入（Apple 的 sheet） */
 .sheet-backdrop {
   position: fixed;
   inset: 0;
@@ -1083,6 +1066,7 @@ button.swatch::after {
   display: flex;
   align-items: flex-end;
   justify-content: center;
+  animation: fade-in 0.2s ease;
 }
 .sheet {
   width: 100%;
@@ -1093,6 +1077,7 @@ button.swatch::after {
   border-radius: 20px 20px 0 0;
   padding: 8px 16px calc(var(--safe-b) + 20px);
   box-shadow: var(--shadow);
+  animation: sheet-up 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .sheet .grabber {
   width: 40px;
@@ -1101,6 +1086,22 @@ button.swatch::after {
   background: var(--text-3);
   margin: 4px auto 10px;
   opacity: 0.6;
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet,
+  .sheet-backdrop {
+    animation: none;
+  }
 }
 
 .empty {
@@ -1408,10 +1409,6 @@ body.read-only .view-only {
 .nav-right {
   display: flex;
   gap: 8px;
-}
-.icon-btn {
-  font-size: 22px;
-  font-weight: 600;
 }
 .icon-btn.small {
   width: 44px;
@@ -2113,11 +2110,6 @@ a.row {
   padding-inline: 8px;
 }
 /* 提示旁邊的「復原」 */
-.toast {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
 .toast-action {
   flex: none;
   min-height: 44px;
@@ -2195,6 +2187,7 @@ button.row.chosen {
 }
 .q-tick {
   flex: none;
+  display: inline-flex;
   color: var(--tint);
   font-size: 20px;
   font-weight: 800;
@@ -2210,9 +2203,6 @@ button.row.chosen {
   .q-tick {
     animation: none;
   }
-}
-.q-tick {
-  display: inline-flex;
 }
 
 /* ───────── 4.6 首頁：大數字方塊、設定提示、空畫面 ───────── */
@@ -2341,16 +2331,16 @@ button.tile:active {
   font-size: 17px;
 }
 /* 狀態小字：綠色打勾、橘色警告、測試連線的結果 */
-.ok-line,
+.ok-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--green);
+}
 .warn-line {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-.ok-line {
-  color: var(--green);
-}
-.warn-line {
   color: var(--amber);
   font-weight: 600;
 }
@@ -2389,5 +2379,141 @@ button.tile:active {
   }
   .hero-btn {
     box-shadow: none;
+  }
+}
+
+/* ───────── 4.6.1 修正（QA 找到的排版問題） ───────── */
+/* 一個字單獨掉到下一行：段落用 pretty（最後一行不會只剩一兩個字）、標題用 balance（兩行差不多長） */
+p,
+li,
+.meta,
+.footnote,
+.subtitle,
+.sheet-sub,
+.hint-card,
+.setup-card p {
+  text-wrap: pretty;
+}
+h1,
+h2,
+.large-title,
+.sheet-title,
+.setup-card b {
+  text-wrap: balance;
+}
+/* 一串不能拆開的字（「3分」「目前 6 個」「同步試算表」） */
+.nb {
+  white-space: nowrap;
+}
+/* 「這一個一樣嗎？」：標題一行、第幾個在下一行（以前擠在同一行，標題被擠成兩行、「片」掉下去） */
+.q-head .sheet-title {
+  margin: 0;
+}
+.q-count {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: 15px;
+}
+/* 品項顏色方塊、照片上框的編號：白字要看得清楚（對比 4.5 以上）→ 底色加深一點，框線照原本的顏色 */
+.swatch,
+.box .tag {
+  background: color-mix(in srgb, var(--c, var(--tint)) 70%, #000);
+}
+/* 數量、叫貨數量的輸入框：手指按得到（44px） */
+.stepper input {
+  width: 44px;
+  height: 44px;
+}
+.place-input {
+  min-height: 44px;
+}
+/* 「Google AI Studio」連結：點的範圍放大到 44px 高 */
+.footnote a {
+  display: inline-block;
+  padding: 13px 2px;
+  margin: -13px 0;
+}
+/* 新盤點縮圖的 ×：往縮圖外面移一點，點縮圖本身（放大看）的範圍才不會被吃掉 */
+.cap-strip {
+  gap: 16px;
+  padding-top: 14px;
+  padding-right: 14px;
+}
+.photo-strip .cap-del {
+  top: -14px;
+  right: -14px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+/* 查型號沒有 AI：拍照鈕變淡（按了會說要先設定什麼） */
+.hero-btn.off {
+  opacity: 0.55;
+  box-shadow: none;
+}
+/* 總表：含幾次還沒按完成、同一格只算一次 */
+.report-note {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 14px;
+}
+.report-note .badge {
+  margin-left: 0;
+}
+/* 型號相近、但尺寸不同：橘色一行提醒 */
+.row.near-note {
+  min-height: 0;
+  padding-top: 0;
+  font-size: 14px;
+}
+.row.near-note::before {
+  display: none;
+}
+/* 新手機：「我收到連結碼了」放最前面 */
+.join-first {
+  margin-bottom: 8px;
+}
+@media (max-width: 767px) {
+  /* 查型號頁上面那條空的導覽列（手機上沒東西可放） */
+  .nav.nav-empty {
+    display: none;
+  }
+}
+@media (min-width: 768px) {
+  /* 會捲的頁、不會捲的頁內容一樣寬（換頁時不會左右跳） */
+  html {
+    scrollbar-gutter: stable;
+  }
+  /* 跳出的視窗跟提示一樣：在內容區（側邊欄左邊）的正中間 */
+  .sheet-backdrop {
+    padding-right: calc(var(--side) + 24px);
+  }
+}
+@media (min-width: 1000px) {
+  /* 底部的大按鈕：電腦上靠右、一般寬度（以前「開始辨識」整條 1120px 寬） */
+  .toolbar .inner {
+    justify-content: flex-end;
+  }
+  .toolbar .btn,
+  .toolbar .btn:not(.secondary):not(.plain):not(.danger) {
+    flex: 0 0 auto;
+    min-width: 180px;
+    padding-inline: 28px;
+  }
+  /* 品項、總表的清單：電腦上排兩欄（以前品名在最左、數量在最右，中間空 800px） */
+  .group.cols-2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .group.cols-2 > .row:nth-child(2)::before {
+    display: none;
+  }
+  .group.cols-2 > .row:nth-child(odd) {
+    box-shadow: inset -0.5px 0 0 var(--line);
   }
 }

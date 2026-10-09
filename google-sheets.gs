@@ -24,6 +24,10 @@
  * 共用 AI 金鑰（4.5 起）：擁有者在 App「設定 → 把金鑰放到雲端」→ 金鑰存在這裡的指令碼屬性 GEMINI_KEY。
  * 同事拍照時，請求送到這裡，由這裡拿金鑰去問 Gemini，同事的手機不會有金鑰；移除權限的人就不能再用。
  * 第一次更新到這一版，部署時 Google 會再問一次授權（多了「連到外部網站」，用來連 Gemini），按允許即可。
+ *
+ * 4.6.1：共用金鑰加上費用上限（只准 Flash／Flash-Lite／Pro、每人每天 300 次、一次最多 8 MB）；
+ * 編輯者不能改盲盤／複盤規則、不能匯入正航產品表、不能一次刪光盤點紀錄（雲端也擋）。
+ * 更新方法：整段重新貼上 → 存檔 →「部署」→「管理部署作業」→ 鉛筆 → 版本選「新版本」→ 部署（網址不會變）。
  */
 const RAW = '盤點紀錄'
 const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID', '盤點人']
@@ -86,12 +90,12 @@ function doPost(e) {
     else props.deleteProperty('GEMINI_KEY')
     return json({ ok: true, ai: !!data.aiKey, me: me })
   }
-  if (who && data.action === 'ai') return json(canEdit ? Object.assign(aiProxy(data, P), { ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
+  if (who && data.action === 'ai') return json(canEdit ? Object.assign(aiProxy(data, P, props, who), { ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
   // ver 2：盤點的照片分開存（photo:盤點ID:照片ID），下載只拿資料，照片用 photos 另外要；App 看到 ver 才改用新格式上傳
   if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, ai: ai, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster })
   if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, ai: ai, me: me, roster: roster }))
   if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, ai: ai, me: me }))
-  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P), { ver: SYNC_VER, ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
+  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
   if (!canEdit) return json({ ok: false, viewer: true, error: '你是檢視者，只能看' })
   const lock = LockService.getScriptLock()
@@ -125,19 +129,100 @@ function doPost(e) {
 
 /**
  * 共用 AI 金鑰：幫 App 問 Gemini（金鑰只在這裡）。只准兩種請求：列出模型、看圖回答（generateContent），
- * 不能拿這把金鑰做別的事。
+ * 不能拿這把金鑰做別的事。費用也有上限（擁有者付錢）：
+ * - 模型只准 Gemini 的 Flash／Flash-Lite／Pro（不准畫圖、語音那些比較貴的）
+ * - 不准用工具（Google 搜尋等）、快取；一次最多回 8192 個字詞、只回一個答案
+ * - 一次最多 8 MB（一張照片＋30 張樣品照大約 2～4 MB）
+ * - 每個人每天最多 300 次（可以在「專案設定 → 指令碼屬性」加 AI_DAILY_LIMIT 改次數）
  */
-function aiProxy(data, P) {
-  if (!P.GEMINI_KEY) return { ok: false, status: 0, error: '擁有者還沒把 AI 金鑰放到雲端（或已經停止共用）' }
-  const path = String(data.path || '')
-  if (!/^models(\/[\w.\-]+:generateContent|\?pageSize=\d+)$/.test(path)) return { ok: false, status: 400, error: '不支援的 AI 請求' }
-  const opt = { method: data.body ? 'post' : 'get', headers: { 'x-goog-api-key': P.GEMINI_KEY }, muteHttpExceptions: true }
-  if (data.body) {
+const AI_MAX_BYTES = 8 * 1024 * 1024
+const AI_MAX_OUTPUT = 8192
+const AI_DAILY_LIMIT = 300
+function aiModelOk(name) {
+  const m = String(name || '').replace(/^models\//, '')
+  return /^gemini-(\d+(\.\d+)?-)?(flash|flash-lite|pro)(-[a-z0-9.\-]+)?$/.test(m) && !/image|tts|audio|live|embedding|thinking|8b|computer|robotics/.test(m)
+}
+function aiProxy(data, P, props, who) {
+  if (!P.GEMINI_KEY) return { ok: false, status: 403, error: '擁有者還沒把 AI 金鑰放到雲端（或已經停止共用）' }
+  const path = typeof data.path === 'string' ? data.path : ''
+  const list = /^models\?pageSize=\d+$/.test(path)
+  const gen = /^models\/([\w.\-]+):generateContent$/.exec(path)
+  if (!list && !gen) return { ok: false, status: 400, error: '不支援的 AI 請求' }
+  if (gen && !aiModelOk(gen[1])) return { ok: false, status: 404, error: '共用金鑰不能用這個模型（' + gen[1] + '）：只能用 Gemini 的 Flash、Flash-Lite、Pro' }
+  const opt = { method: 'get', headers: { 'x-goog-api-key': P.GEMINI_KEY }, muteHttpExceptions: true }
+  if (gen) {
+    const raw = typeof data.body === 'string' ? data.body : JSON.stringify(data.body || {})
+    if (raw.length > AI_MAX_BYTES) return { ok: false, status: 400, error: '這次送的照片太大（超過 8 MB）：請少放一些樣品照再試' }
+    let body
+    try {
+      body = JSON.parse(raw)
+    } catch (e) {
+      body = null
+    }
+    if (!body || typeof body !== 'object' || !Array.isArray(body.contents)) return { ok: false, status: 400, error: 'AI 請求的格式不對' }
+    delete body.tools
+    delete body.toolConfig
+    delete body.cachedContent
+    const gc = body.generationConfig && typeof body.generationConfig === 'object' ? body.generationConfig : {}
+    gc.maxOutputTokens = Math.min(Number(gc.maxOutputTokens) || AI_MAX_OUTPUT, AI_MAX_OUTPUT)
+    gc.candidateCount = 1
+    body.generationConfig = gc
+    // 每人每天的次數：先算再問（鎖住只為了加一，不會卡住別人）
+    const used = aiCount(props, P, who)
+    if (used < 0) return { ok: false, status: 429, quota: true, error: '今天用共用 AI 的次數已經到上限（每人每天 ' + aiLimit(P) + ' 次），明天會自動恢復；急用請找擁有者' }
+    opt.method = 'post'
     opt.contentType = 'application/json'
-    opt.payload = typeof data.body === 'string' ? data.body : JSON.stringify(data.body)
+    opt.payload = JSON.stringify(body)
   }
-  const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/' + path, opt)
-  return { ok: true, status: res.getResponseCode(), body: res.getContentText() }
+  let res
+  try {
+    res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/' + path, opt)
+  } catch (e) {
+    // 連不到 Gemini（逾時、Google 這邊的每日上限）：照 Gemini 忙線的格式回，App 會等一下再試，不會顯示看不懂的錯誤頁
+    return { ok: true, status: 503, body: JSON.stringify({ error: { code: 503, status: 'UNAVAILABLE', message: 'Apps Script 連不到 Gemini：' + String((e && e.message) || e).slice(0, 150) } }) }
+  }
+  const status = res.getResponseCode()
+  let text = res.getContentText()
+  // 列模型：只給 App 能用的那些（App 就不會挑到共用金鑰不能用的模型）
+  if (list && status === 200) {
+    try {
+      const all = JSON.parse(text)
+      all.models = (all.models || []).filter(function (m) {
+        return aiModelOk(m.name)
+      })
+      text = JSON.stringify(all)
+    } catch (e) {
+      /* 回覆不是 JSON：原樣給 App */
+    }
+  }
+  return { ok: true, status: status, body: text }
+}
+function aiLimit(P) {
+  return Number(P.AI_DAILY_LIMIT) > 0 ? Number(P.AI_DAILY_LIMIT) : AI_DAILY_LIMIT
+}
+/** 這個人今天第幾次用共用 AI；超過上限回 -1（台灣時間每天 0 點重算） */
+function aiCount(props, P, who) {
+  const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
+  // 用試算表的鎖（跟同步用的鎖分開）：同步上傳照片要鎖比較久，問 AI 不用跟著等
+  const lock = (LockService.getDocumentLock && LockService.getDocumentLock()) || LockService.getScriptLock()
+  if (!lock.tryLock(10000)) return 0 // 一直等不到（很少見）：這次先不算，不要讓人卡住
+  try {
+    let usage = {}
+    try {
+      usage = JSON.parse(props.getProperty('AI_USAGE') || '{}') || {}
+    } catch (e) {
+      usage = {}
+    }
+    if (usage.day !== today) usage = { day: today, n: {} }
+    const id = String(who.id)
+    const n = (usage.n[id] || 0) + 1
+    if (n > aiLimit(P)) return -1
+    usage.n[id] = n
+    props.setProperty('AI_USAGE', JSON.stringify(usage))
+    return n
+  } finally {
+    lock.releaseLock()
+  }
 }
 
 /** App 的「測試連線」會呼叫這個 */
@@ -178,13 +263,23 @@ function touchSeen(props, P, who) {
     if (now - Number(P.SYNC_OWNER_SEEN || 0) > 600000) props.setProperty('SYNC_OWNER_SEEN', String(now))
     return
   }
-  const list = membersOf(P)
-  const m = list.filter(function (x) {
+  const old = membersOf(P).filter(function (x) {
     return x.id === who.id
   })[0]
-  if (m && now - (m.seen || 0) > 600000) {
+  if (!old || now - (old.seen || 0) <= 600000) return
+  // 寫回整份名單之前先鎖住、重新讀一次：不然剛好有管理員在移除別人，會把被移除的人寫回去
+  const lock = LockService.getScriptLock()
+  if (!lock.tryLock(3000)) return // 等不到就算了，下次再記
+  try {
+    const list = JSON.parse(props.getProperty('SYNC_MEMBERS') || '[]')
+    const m = list.filter(function (x) {
+      return x.id === who.id
+    })[0]
+    if (!m) return
     m.seen = now
     props.setProperty('SYNC_MEMBERS', JSON.stringify(list))
+  } finally {
+    lock.releaseLock()
   }
 }
 /** 管理共用的人（擁有者、管理員才能用） */
@@ -289,8 +384,16 @@ function writeIndex(folder, idx) {
   else idx.file = folder.createFile(Utilities.newBlob(text, 'application/json', 'index.json'))
 }
 
-/** 上傳：比較新的才寫（以裝置上的修改時間為準）；舊檔案丟到垃圾桶 */
-function syncPush(data, props, P) {
+/** 編輯者一次最多刪幾次盤點（「刪除全部盤點紀錄」只有擁有者、管理員能做） */
+const EDITOR_MAX_SESSION_DELETES = 20
+/**
+ * 上傳：比較新的才寫（以裝置上的修改時間為準）；舊檔案丟到垃圾桶。
+ * manager＝擁有者或管理員。編輯者送來的這些會被忽略（放在 ignored 回給 App）：
+ * - 正航產品表（erp:…）：匯入會改大家的帳面數
+ * - 一次刪超過 20 次盤點（等於刪光大家的紀錄）
+ * 共用設定（settings）裡的盲盤、複盤規則：編輯者送來的不算，保留雲端原本的（儲位、品項清單照常收）。
+ */
+function syncPush(data, props, P, manager) {
   const lock = LockService.getScriptLock()
   lock.waitLock(30000)
   try {
@@ -300,6 +403,15 @@ function syncPush(data, props, P) {
     let seq = Math.max(Date.now(), Number(props.getProperty('SYNC_SEQ') || 0) + 1)
     let n = 0
     const skipped = []
+    const ignored = []
+    const isSessionDel = function (r) {
+      return r.del && String(r.k).indexOf('session:') === 0
+    }
+    const tooManyDeletes =
+      !manager &&
+      (data.records || []).filter(function (r) {
+        return isSessionDel(r)
+      }).length > EDITOR_MAX_SESSION_DELETES
     const trash = function (e) {
       if (!e || !e.f) return
       try {
@@ -315,9 +427,30 @@ function syncPush(data, props, P) {
         n++
         return
       }
+      // 只有擁有者、管理員能改的：編輯者送來的不寫
+      if (!manager && (String(r.k).indexOf('erp:') === 0 || (tooManyDeletes && isSessionDel(r)))) {
+        ignored.push(r.k)
+        return
+      }
       if (cur && cur.t > r.t) {
         skipped.push(r.k) // 雲端已經有比較新的（別台改的）
         return
+      }
+      // 編輯者改了儲位、品項清單：盲盤、複盤規則照雲端原本的（沒有就不帶，別台就不會跟著改）
+      if (r.k === 'settings' && !manager && !r.del && r.d && typeof r.d === 'object') {
+        let old = {}
+        if (cur && cur.f && !cur.del) {
+          try {
+            old = JSON.parse(DriveApp.getFileById(cur.f).getBlob().getDataAsString()) || {}
+          } catch (err) {
+            old = {}
+          }
+        }
+        r.d = Object.assign({}, r.d)
+        ;['blind', 'recount'].forEach(function (f) {
+          if (old[f] != null) r.d[f] = old[f]
+          else delete r.d[f]
+        })
       }
       trash(cur)
       let f = ''
@@ -336,7 +469,13 @@ function syncPush(data, props, P) {
     })
     writeIndex(folder, idx)
     props.setProperty('SYNC_SEQ', String(seq))
-    return { ok: true, n: n, skipped: skipped }
+    const why = []
+    if (tooManyDeletes) why.push('一次刪超過 ' + EDITOR_MAX_SESSION_DELETES + ' 次盤點只有擁有者或管理員能做：這些刪除沒有同步，雲端和別台的紀錄還在')
+    if (ignored.some(function (k) {
+      return String(k).indexOf('erp:') === 0
+    }))
+      why.push('正航產品表只有擁有者或管理員能匯入：這次沒有同步給大家')
+    return { ok: true, n: n, skipped: skipped, ignored: ignored, ignoredMsg: why.join('；') }
   } finally {
     lock.releaseLock()
   }
@@ -657,7 +796,12 @@ function writeDashboard(ss, rep) {
     '該叫貨（前 10 項）',
     ['料號', '品名', '規格', '現在', '叫貨點'],
     orders.slice(0, 10).map(function (r) {
-      return [r[col('料號')], r[col('品名')], r[col('尺寸／規格')], r[col('帳面')] !== '' ? r[col('帳面')] : r[col('實盤')], r[col('剩幾個要叫貨（安全庫存）')]]
+      // 現在剩幾個：實盤、帳面都有就取比較少的（跟 App 的叫貨提醒一樣）
+      const book = r[col('帳面')]
+      const real = r[col('實盤')]
+      const counted = col('最近盤點') >= 0 && r[col('最近盤點')] !== '' // 沒盤過的，實盤是 0 但不能算
+      const now = book !== '' && counted ? Math.min(Number(book), Number(real)) : book !== '' ? book : real
+      return [r[col('料號')], r[col('品名')], r[col('尺寸／規格')], now, r[col('剩幾個要叫貨（安全庫存）')]]
     }),
     '沒有要叫貨的',
   )

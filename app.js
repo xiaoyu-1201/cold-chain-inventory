@@ -77,7 +77,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.6.0（10/9・貨架標籤新外觀）'
+const VERSION = '4.6.1（10/10・修正檢查找到的問題）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -419,6 +419,13 @@ const urlOf = (photo) => {
   urls.set(photo.id, { blob: photo.blob, size: photo.blob.size, url })
   return url
 }
+/** 照片不用了（刪掉、復原時間過了、整次盤點刪掉）：放掉它占的記憶體 */
+const dropUrl = (id) => {
+  const hit = urls.get(id)
+  if (!hit) return
+  URL.revokeObjectURL(hit.url)
+  urls.delete(id)
+}
 /**
  * 框的放大圖：用 SVG 的 viewBox 只露出那一塊（不切圖、不用 canvas，iPhone 也穩），框線用那一種的顏色。
  * ratio＝放大圖格子的寬÷高：把露出的範圍撐到一樣比例、而且不超出照片，格子才不會有一邊空白。
@@ -505,7 +512,8 @@ async function call(path, opts = {}, timeoutMs = 0) {
 }
 /** Gemini 的回覆：成功就回資料；失敗換成看得懂的錯誤（直接連、經過 Apps Script 都用這個） */
 function toResult(status, data) {
-  if (status < 200 || status >= 300) {
+  // 沒有狀態碼（舊版雲端程式碼、回覆壞掉）也算失敗，不能當成功
+  if (!(status >= 200 && status < 300)) {
     const msg = data?.error?.message || ''
     const err = new ApiError(friendly(status, msg), status, `${status} ${data?.error?.status || ''} ${msg}`.trim().slice(0, 200))
     // 429 會告訴你要等多久（例如 "17s"）
@@ -519,32 +527,43 @@ function toResult(status, data) {
 function hasAi() {
   return !!ls.get(LS.key) || aiViaSheet()
 }
-function aiViaSheet() {
+/** 擁有者有把金鑰放在雲端共用（不管這台能不能用） */
+function aiSharedOn() {
   return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(LS.aiShared) === '1'
 }
+/** 這台可以用共用金鑰：檢視者不行（雲端也會擋），所以檢視者的拍照鈕不會亮 */
+function aiViaSheet() {
+  return aiSharedOn() && canEdit()
+}
+/** 經過 Apps Script 時多等的時間：雲端那邊收到後照樣會跑完、照樣計費，太早放棄再送一次＝花兩次錢 */
+const SHEET_GRACE = 20000
 /** 共用金鑰：請求送到自己的 Apps Script，由它拿雲端的金鑰問 Gemini（會多 1～2 秒） */
 async function callViaSheet(path, opts, timeoutMs) {
   const outer = opts.signal
   if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
-  let timer = 0
-  let onAbort = null
-  const guard = new Promise((_, reject) => {
-    // Apps Script 多繞一手：等待時間多給 3 秒
-    if (timeoutMs) timer = setTimeout(() => reject(new ApiError(`等了 ${Math.round(timeoutMs / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${timeoutMs / 1000}s (sheet)`)), timeoutMs + 3000)
-    onAbort = () => reject(new ApiError('已取消', 499, 'cancelled'))
-    outer?.addEventListener('abort', onAbort)
-  })
+  const ctrl = new AbortController()
+  let timedOut = false
+  const timer = timeoutMs
+    ? setTimeout(() => {
+        timedOut = true
+        ctrl.abort()
+      }, timeoutMs + SHEET_GRACE)
+    : 0
+  const onAbort = () => ctrl.abort()
+  outer?.addEventListener('abort', onAbort)
   let r
   try {
-    r = await Promise.race([postSync({ action: 'ai', path, body: opts.body || '' }), guard])
+    r = await postSync({ action: 'ai', path, body: opts.body || '' }, { signal: ctrl.signal })
   } catch (e) {
-    if (e instanceof ApiError) throw e
-    throw new ApiError(e?.message || '連不到 Google（沒有網路？）', 0, `sheet ${e?.message || ''}`.trim())
+    if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
+    if (timedOut) throw new ApiError(`等了 ${Math.round((timeoutMs + SHEET_GRACE) / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${(timeoutMs + SHEET_GRACE) / 1000}s (sheet)`)
+    throw sheetAiError(e)
   } finally {
     clearTimeout(timer)
-    if (onAbort) outer?.removeEventListener('abort', onAbort)
+    outer?.removeEventListener('abort', onAbort)
   }
-  if (!r?.ok) throw new ApiError(r?.error || '共用的 AI 金鑰不能用，請找擁有者', r?.status || 0, `sheet ${r?.error || ''}`.trim())
+  // 舊版雲端程式碼不認得 ai：回覆裡沒有狀態碼
+  if (typeof r.status !== 'number') throw new ApiError('雲端的程式碼是舊版，還不會幫忙問 AI：請擁有者到「設定 → Google 試算表」複製新的程式碼、貼上、部署新版本。', 403, 'sheet: no status (old Apps Script)')
   let data = {}
   try {
     data = JSON.parse(r.body || '{}')
@@ -552,6 +571,19 @@ async function callViaSheet(path, opts, timeoutMs) {
     /* 回覆不是 JSON：當成空的，toResult 會依狀態碼處理 */
   }
   return toResult(r.status, data)
+}
+/**
+ * 經過雲端問 AI 失敗：分清楚是「雲端說不行」（檢視者、被移除、今天次數到上限、不支援 → 不重試，直接顯示原因）
+ * 還是「網路斷了、雲端暫時出錯」（可以重試）。以前全部當成網路斷線，一張照片會自動重試十幾次。
+ */
+function sheetAiError(e) {
+  const d = e?.data
+  const msg = e?.message || '連不到 Google（沒有網路？）'
+  if (!d || d.network) return new ApiError(msg, 0, `sheet ${msg}`.slice(0, 200))
+  if (d.html) return Object.assign(new ApiError(msg, 503, `sheet html ${d.httpStatus || ''}`.trim()), { sheetDown: true })
+  // 404＝共用金鑰不支援這個模型：換下一個模型試；其他都是雲端明確說不行：重試也一樣，不要浪費
+  const status = d.status === 404 && !d.quota && !d.viewer && !d.revoked ? 404 : 403
+  return new ApiError(d.error || msg, status, `sheet ${status} ${d.error || ''}`.trim().slice(0, 200))
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /** 這些狀況值得自動重試：太多人用、伺服器暫時錯誤、額度每分鐘上限、等太久、網路斷一下 */
@@ -727,7 +759,8 @@ async function generate(model, image, simple = false, refs = [], thinking = true
     })
   const { kept, merged } = dedupe(objects)
   const note = [String(parsed.note || ''), merged ? `同一個東西被框了兩次的，已經合併 ${merged} 個。` : ''].filter(Boolean).join(' ')
-  return { objects: kept, note, model, location: String(parsed.location || '').trim() }
+  // 儲位代號限 20 字：AI 偶爾把整段標籤文字塞進來，會撐爆畫面
+  return { objects: kept, note, model, location: String(parsed.location || '').trim().slice(0, 20) }
 }
 
 /** 兩個框重疊 7 成以上、而且是同一種：AI 把同一個東西框了兩次 → 留比較有把握的那個（數量才不會多算） */
@@ -775,7 +808,8 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
   const backup = list.find((m) => m !== first && /lite/.test(m)) ?? list.find((m) => m !== first)
   const hedge = new AbortController()
   const primary = attemptChain(models, image, refs, onStatus, hedge.signal)
-  if (!backup) return primary.finally(() => hedge.abort())
+  // 用共用金鑰（經過 Apps Script）不要「同時請備用模型」：這邊取消了，雲端那邊照樣跑完、照樣計費，等於花兩次錢
+  if (!backup || viaSheetNow()) return primary.finally(() => hedge.abort())
   let timer = 0
   let started = false
   const second = new Promise((resolve, reject) => {
@@ -802,9 +836,15 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
   }
 }
 
+/** 這次的 AI 請求會經過 Apps Script（這台沒有自己的金鑰、用擁有者的共用金鑰） */
+const viaSheetNow = () => !ls.get(LS.key) && aiViaSheet()
+/** 連續幾次「網路斷了」就停：網路真的不通，再試也是白等 */
+const MAX_NET_FAILS = 3
+
 /** 依序試：同一個模型（有思考設定 → 拿掉 → 簡化），不行就換下一個模型 */
 async function attemptChain(models, image, refs, onStatus, signal) {
   let lastErr
+  let netFails = 0
   for (const [mi, model] of models.entries()) {
     if (signal?.aborted) break
     onStatus(mi === 0 ? `用 ${model} 辨識中` : `改用 ${model} 再試`)
@@ -840,7 +880,11 @@ async function attemptChain(models, image, refs, onStatus, signal) {
         }
         // 等太久：同一個模型再等一次也是慢，直接換下一個（比較快的）模型
         if (e.status === 408) {
-          onStatus(`${model} 太慢，換比較快的模型`)
+          // 共用金鑰：雲端那邊可能還在跑（會計費），先等一下再送下一個，不要兩個同時跑
+          if (viaSheetNow() && mi < models.length - 1) {
+            onStatus(`${model} 太慢，等 3 秒再換比較快的模型`)
+            await sleep(3000)
+          } else onStatus(`${model} 太慢，換比較快的模型`)
           break
         }
         // 400：先拿掉思考設定、再改簡化請求；都不行就是別的問題（Key、照片）
@@ -849,7 +893,11 @@ async function attemptChain(models, image, refs, onStatus, signal) {
           throw e
         }
         if (!retryable(e)) throw e
-        if (e.status === 0) onStatus('網路斷了一下，重新送出')
+        // 網路斷了、Apps Script 整個出錯（回網頁不是 JSON）：連續 3 次就停，換模型也沒用
+        if (e.status === 0 || e.sheetDown) {
+          if (++netFails >= MAX_NET_FAILS) throw e
+          onStatus(e.sheetDown ? 'Google 試算表那邊出錯，再試一次' : '網路斷了一下，重新送出')
+        } else netFails = 0
         // 500 一直出現：換模型比較快；503／429／網路：再試一次
         if (e.status === 500 || pi === plan.length - 1) break
       }
@@ -1031,6 +1079,8 @@ const FIELDS = ['label', 'brand', 'model', 'spec']
 const keyOf = (o) => FIELDS.map((f) => norm(o[f])).join('|')
 /** 清單第二行：品牌・型號・規格 */
 const detailOf = (o) => [o.brand, o.model, o.spec].filter(Boolean).join('・')
+/** 畫面用：品牌・型號・規格，每一段不拆開換行（「3分」的「分」不會自己掉到下一行） */
+const detailHtml = (o) => [o.brand, o.model, o.spec].filter(Boolean).map((v) => `<span class="nb">${esc(v)}</span>`).join('・')
 
 function groupsOf(session) {
   const map = new Map()
@@ -1154,7 +1204,9 @@ function evalSession(s) {
     }
   }
   const groups = groupsOf(s).filter((g) => !g.manual)
-  for (const g of groups) types.unshift({ label: g.label, spec: g.spec, ai: aiOf.get(g.key) || 0, final: Number(g.count) || 0, item: s.itemOf?.[g.key] || '' })
+  // 還有「要確認」沒看過的那一種：不知道 AI 對不對，不算進準確率（以前會被當成「一個不差」）
+  const open = new Set(doubtsOf(s).map((d) => keyOf(d.o)))
+  for (const g of groups) if (!open.has(g.key)) types.unshift({ label: g.label, spec: g.spec, ai: aiOf.get(g.key) || 0, final: Number(g.count) || 0, item: s.itemOf?.[g.key] || '' })
   let missed = objs.filter((o) => o.added).length
   let extra = gone.length
   for (const g of groups) {
@@ -1177,6 +1229,7 @@ function evalSession(s) {
     wrong,
     caught,
     flagged: objs.filter((o) => o.aiFlag).length + gone.filter((x) => x.flag).length,
+    unchecked: groups.filter((g) => open.has(g.key)).length,
   }
 }
 
@@ -1199,6 +1252,7 @@ function qualityStats(sessions) {
     wrong: sum('wrong'),
     caught: sum('caught'),
     flagged: sum('flagged'),
+    unchecked: sum('unchecked'),
   }
 }
 const pct = (x) => (x == null ? '—' : `${Math.round(x * 100)}%`)
@@ -1286,7 +1340,23 @@ const saveLocations = (list) => {
   ls.set(LS.locations, JSON.stringify(list))
   touchSettings()
 }
-const findLocation = (code) => locations().find((l) => canon(l.code) === canon(code))
+/**
+ * 找儲位：品項清單每一格位置都要找一次（3000 個品項就是幾千次），不能每次都重新讀設定、解析 JSON。
+ * 用「代號 → 儲位」的對照表；設定的內容（原始字串）變了才重建。
+ */
+let locIndex = { raw: null, map: new Map() }
+const findLocation = (code) => {
+  const raw = ls.get(LS.locations, '[]')
+  if (raw !== locIndex.raw) {
+    const map = new Map()
+    for (const l of locations()) {
+      const k = canon(l?.code)
+      if (k && !map.has(k)) map.set(k, l) // 同一個代號建了兩次：照舊用第一個
+    }
+    locIndex = { raw, map }
+  }
+  return locIndex.map.get(canon(code))
+}
 /** 顯示用：「A-01（冷凍油那排第 1 層）」 */
 const placeLabel = (place) => {
   const loc = findLocation(place)
@@ -1311,7 +1381,7 @@ const placeHtml = (place, { size = '', name = true, none = '沒填位置' } = {}
 /** 一串「位置 數量」：A-01 ×3　A-02 ×2（品項清單、產品總表、總表用） */
 const placesHtml = (pairs, max = 99) => {
   const shown = pairs.slice(0, max)
-  return `<span class="loc-list">${shown.map(([p, n]) => `<span class="loc-pair">${p && !String(p).startsWith('未填位置') ? locTag(findLocation(p)?.code || p, 'sm') : `<span class="loc-tag none sm">${esc(p || '沒填位置')}</span>`}${n != null ? `<span class="loc-n">×${n}</span>` : ''}</span>`).join('')}${pairs.length > shown.length ? `<span class="loc-n">等 ${pairs.length} 格</span>` : ''}</span>`
+  return `<span class="loc-list">${shown.map(([p, n]) => `<span class="loc-pair">${p && !String(p).startsWith('未填位置') ? locTag(findLocation(p)?.code || p, 'sm') : `<span class="loc-tag none sm">${esc(p || '沒填位置')}</span>`}${n != null ? `<span class="loc-n">×${esc(n)}</span>` : ''}</span>`).join('')}${pairs.length > shown.length ? `<span class="loc-n">等 ${pairs.length} 格</span>` : ''}</span>`
 }
 
 // ───────────────────────── 品項庫：盤點時自動長出來 ─────────────────────────
@@ -1377,9 +1447,23 @@ function bookFromMoves(moves) {
   }
   return book
 }
-/** 現在大概有幾個：有帳面數用帳面數（進貨／賣出會改它），沒有就用實盤 */
-const expected = (it) => (it.book != null ? it.book : onHand(it))
-const needsOrder = (it) => it.safety != null && expected(it) <= it.safety
+/**
+ * 叫貨看的數字（待使用者／老闆確認規則）：實盤、帳面兩個都有就取比較小的——寧可多提醒，
+ * 例如帳面 8、架上只剩 3，也要提醒叫貨。沒盤過就看帳面；沒有帳面就看實盤。
+ */
+const orderQty = (it) => {
+  const counted = liveStock(it).length ? onHand(it) : null
+  if (it.book == null) return counted ?? 0
+  return counted == null ? it.book : Math.min(it.book, counted)
+}
+/** 畫面上說明用哪個數字（盲盤的人看不到帳面數，不寫數字） */
+const orderWhy = (it) => {
+  if (blindMe()) return '數量已經到叫貨點'
+  const counted = liveStock(it).length ? onHand(it) : null
+  if (it.book != null && counted != null) return `現在剩 ${orderQty(it)} 個（實盤 ${counted}、帳面 ${it.book}，看比較少的）`
+  return `現在剩 ${orderQty(it)} 個（${it.book != null ? '帳面' : '實盤'}）`
+}
+const needsOrder = (it) => it.safety != null && orderQty(it) <= it.safety
 const placeKeyOf = (s) => (s.place ? `p:${canon(s.place)}` : `s:${s.id}`)
 
 /**
@@ -1433,7 +1517,7 @@ const itemUrl = (it) => {
   return url
 }
 const itemThumb = (it, size = 44) =>
-  it.photo ? `<img class="thumb" src="${itemUrl(it)}" alt="" style="width:${size}px;height:${size}px">` : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc(it.label.slice(0, 1))}</span>`
+  it.photo ? `<img class="thumb" src="${itemUrl(it)}" alt="" loading="lazy" decoding="async" style="width:${size}px;height:${size}px">` : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc(it.label.slice(0, 1))}</span>`
 
 /**
  * 按「完成」：這次盤點記進品項庫。可以重複按（改完再按一次會更新，不會重複算）。
@@ -1532,6 +1616,12 @@ function equivalentsFor(it, decoded, items) {
 
 // ───────────────────────── 畫面狀態 ─────────────────────────
 const state = { view: 'home', session: null, photoIndex: 0, focus: null, focusObj: null, busy: false, cancel: false, progress: null, refining: null, addMode: false, viewer: false, zoom: 2, itemFilter: 'all', itemId: null, lookup: { q: '', read: null, busy: false } }
+
+/** 新盤點刪掉、還可以「復原」的照片（只放在記憶體，不存檔） */
+let removedPhotos = { s: null, list: [], timer: 0 }
+/** 新版 App 已經下載好、等安全的時候重新整理（見最下面 tryReload）；updateTold＝提示過了 */
+let updateReady = false
+let updateTold = false
 
 function go(view, extra = {}) {
   // 離開首頁就結束多選
@@ -1633,8 +1723,8 @@ function homeStats(sessions, items) {
     return `<${tag} class="tile ${n ? tone : 'zero'}" ${n ? attrs || '' : ''}><span class="tile-num">${n}<small>${unit}</small></span><span class="tile-label">${label}</span>${tag === 'button' ? chev : ''}</${tag}>`
   }
   return `<p class="section-title">現在要處理的 <span class="badge new">新</span></p><div class="home-stats" role="group" aria-label="現在要處理的">
-    ${tile({ n: today.reduce((n, s) => n + totalQty(s), 0), unit: '件', label: `今天盤了・${today.length} 次`, tone: 'brand', attrs: 'data-go="report"' })}
-    ${tile({ n: doubts, unit: '個', label: '要確認', tone: 'warn', attrs: doubtful.length ? `data-open="${doubtful[0][0].id}"` : '' })}
+    ${tile({ n: reportOf(today).total, unit: '件', label: `今天盤了・${today.length} 次`, tone: 'brand', attrs: 'data-go="report"' })}
+    ${tile({ n: doubts, unit: '個', label: '要確認', tone: 'warn', attrs: doubtful.length && canEdit() ? `data-open-doubts="${esc(doubtful[0][0].id)}"` : '' })}
     ${tile({ n: order, unit: '種', label: '該叫貨', tone: 'bad', attrs: 'data-go="items" data-item-filter="order"' })}
     ${tile({ n: recount, unit: '項', label: '要複盤', tone: 'warn', attrs: 'data-recount-list' })}
   </div>`
@@ -1661,14 +1751,16 @@ async function viewHome() {
         ? `<div class="hint-card"><b>你是檢視者（只能看）</b>：可以看大家的盤點紀錄、品項庫，也可以下載 Excel；不能盤點或修改。需要盤點請找管理員改成「編輯者」。</div>`
         : hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">${icon('camera', 30)}</span><span class="grow"><b>新盤點</b><span class="meta">拍一格貨架，AI 幫你數<br>拍到 ${locTag(locations()[0]?.code || 'A-03', 'sm')} 會自動填位置</span></span>${chev}</button>`
-        : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 Gemini API Key（只存在這台）；或請擁有者把金鑰放到雲端共用。<br>只想看別台盤點的結果：到「設定 → 共用 → 我收到連結碼了」貼上邀請連結就好，不用 Key。</p><button class="btn small" data-go="settings">去設定</button></div></div>`
+        : syncReady()
+          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → Gemini API Key」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 Gemini API Key。</p><button class="btn small" data-go="settings">去設定</button></div></div>`
+          : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 Gemini API Key<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>只想看別台盤點的結果：到「設定 → 我收到連結碼了」貼上邀請連結就好，不用 Key。</p><button class="btn small" data-go="settings">去設定</button></div></div>`
     }
     </div>
     ${sessions.length || items.length ? homeStats(sessions, items) : ''}
     </div><div class="home-side">
     ${
       sessions.length
-        ? `<div class="group home-report"><button class="row" data-go="report"><span class="row-ico" aria-hidden="true">${icon('chart')}</span><span class="grow"><span class="title">總表與匯出</span><br><span class="meta">很多次盤點合起來看；下載 Excel${ls.get(LS.sheet) ? '、同步試算表' : ''}</span></span>${chev}</button></div>`
+        ? `<div class="group home-report"><button class="row" data-go="report"><span class="row-ico" aria-hidden="true">${icon('chart')}</span><span class="grow"><span class="title">總表與匯出</span><br><span class="meta">很多次盤點合起來看；<span class="nb">下載 Excel</span>${ls.get(LS.sheet) ? '、<span class="nb">同步試算表</span>' : ''}</span></span>${chev}</button></div>`
         : ''
     }
     <div class="list-head"><p class="section-title">盤點紀錄${sel ? `・已選 ${picked.length} 筆` : ''}</p>${sessions.length ? `<button class="btn small plain" data-action="${sel ? 'select-done' : 'select-start'}">${sel ? '完成' : '選取'}</button>` : ''}</div>
@@ -1684,10 +1776,10 @@ async function viewHome() {
               const failed = s.photos.length && s.photos.every((p) => p.status !== 'done')
               const meta = [byName(s) ? `${byName(s)} 盤・${fmtTime(s.createdAt)}` : fmtTime(s.createdAt), s.photos.length > 1 ? `${s.photos.length} 張照片` : '', s.syncedAt ? '已同步到試算表' : ''].filter(Boolean).join('・')
               const on = sel && state.selected.has(s.id)
-              const body = `${s.photos[0]?.blob ? `<img class="sess-thumb" src="${urlOf(s.photos[0])}" alt="">` : `<span class="thumb-lost ${s.photos[0]?.pending ? 'pending' : ''}" aria-hidden="true"></span>`}<span class="grow">${s.place ? `<span class="sess-place">${placeHtml(s.place, { name: false })}</span>` : ''}<span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}${s.linkedAt ? '' : `${meta ? '・' : ''}<span class="unfinished">還沒按完成</span>`}</span></span>`
+              const body = `${s.photos[0]?.blob ? `<img class="sess-thumb" src="${urlOf(s.photos[0])}" alt="" loading="lazy" decoding="async">` : `<span class="thumb-lost ${s.photos[0]?.pending ? 'pending' : ''}" aria-hidden="true"></span>`}<span class="grow">${s.place ? `<span class="sess-place">${placeHtml(s.place, { name: false })}</span>` : ''}<span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}${s.linkedAt ? '' : `${meta ? '・' : ''}<span class="unfinished">還沒按完成</span>`}</span></span>`
               return sel
-                ? `<button class="row ${on ? 'picked' : ''}" data-pick="${s.id}" aria-pressed="${on}"><span class="pick" aria-hidden="true">${on ? icon('check', 16) : ''}</span>${body}</button>`
-                : `<button class="row" data-open="${s.id}">${body}${chev}</button>`
+                ? `<button class="row ${on ? 'picked' : ''}" data-pick="${esc(s.id)}" aria-pressed="${on}"><span class="pick" aria-hidden="true">${on ? icon('check', 16) : ''}</span>${body}</button>`
+                : `<button class="row" data-open="${esc(s.id)}">${body}${chev}</button>`
             })
             .join('')}</div>`
         : `<div class="empty"><span class="empty-ico" aria-hidden="true">${icon('box', 36)}</span><p><b>還沒有盤點紀錄</b><br>${!canEdit() ? '別台盤點完、同步後，紀錄會出現在這裡。' : hasKey ? '按「新盤點」，拍一層貨架試試看。' : '按「去設定」設定好 AI，就能拍照盤點；別台同步過來的紀錄也會出現在這裡。'}</p></div>`
@@ -1716,7 +1808,7 @@ function viewCapture() {
         ? `<div class="group" style="margin-bottom:10px"><div class="row"><span style="width:96px" class="muted">盤點人</span><span class="grow"><b>${esc(s.by)}</b></span><span class="muted" style="font-size:14px">${canManage() ? '' : '由管理員設定'}</span>${canManage() ? '<button class="btn small plain" data-action="counter-session">換人</button>' : ''}</div></div>`
         : ''
     }
-    <div class="group"><label class="row"><span style="width:96px" class="muted">位置</span><input class="inline place-input" id="place" placeholder="${locations().length ? '點下面的儲位，或打代號' : '例：A-01（拍到標籤會自動填）'}" value="${esc(s.place)}" autocomplete="off"></label></div>
+    <div class="group"><label class="row"><span style="width:96px" class="muted">位置</span><input class="inline place-input" id="place" placeholder="${locations().length ? '選下面的儲位或打代號' : '例：A-01（會自動填）'}" value="${esc(s.place)}" autocomplete="off"></label></div>
     ${
       locations().length
         ? `<div class="chips loc-chips" role="group" aria-label="選儲位">${locations()
@@ -1727,7 +1819,7 @@ function viewCapture() {
     <p class="section-title">照片（${s.photos.length}）</p>
     ${
       s.photos.length
-        ? `<div class="photo-strip cap-strip">${s.photos.map((p, i) => `<div class="cap-thumb"><button class="cap-view" data-preview-photo="${i}" aria-label="放大看第 ${i + 1} 張"><img src="${urlOf(p)}" alt=""></button><button class="cap-del" data-remove-photo="${i}" aria-label="刪掉第 ${i + 1} 張" title="刪掉這張"><span>${icon('x', 14)}</span></button></div>`).join('')}</div><p class="footnote">點縮圖放大看；拍錯了按 × 刪掉，可以復原。</p>`
+        ? `<div class="photo-strip cap-strip">${s.photos.map((p, i) => `<div class="cap-thumb"><button class="cap-view" data-preview-photo="${i}" aria-label="放大看第 ${i + 1} 張"><img src="${urlOf(p)}" alt="" decoding="async"></button><button class="cap-del" data-remove-photo="${i}" aria-label="刪掉第 ${i + 1} 張" title="刪掉這張"><span>${icon('x', 14)}</span></button></div>`).join('')}</div><p class="footnote">點縮圖放大看；拍錯了按 × 刪掉，可以復原。</p>`
         : ''
     }
     <div class="row-actions" style="margin-top:12px">
@@ -1828,7 +1920,7 @@ function viewReview() {
              <button class="photo-zoom" data-action="zoom" aria-label="放大看照片">${icon('maximize', 22)}</button>
            </div>
            ${state.addMode ? '<div class="add-hint" role="status"><b>點照片上漏掉的那一個</b>，會在那裡加一個框 <button class="btn small plain" data-action="add-cancel">取消</button></div>' : ''}
-           ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''} ${p.blob ? '' : 'lost'}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張${p.pending ? '（下載中）' : p.lost ? '（照片不見了）' : ''}">${p.blob ? `<img src="${urlOf(p)}" alt="">` : ''}</button>`).join('')}</div>` : ''}
+           ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''} ${p.blob ? '' : 'lost'}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張${p.pending ? '（下載中）' : p.lost ? '（照片不見了）' : ''}">${p.blob ? `<img src="${urlOf(p)}" alt="" decoding="async">` : ''}</button>`).join('')}</div>` : ''}
            <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>${icon('plus', 18)}漏掉的，點照片補一個</button></div>
            <p class="footnote">點照片上的框：選它是哪一種，改好會關掉視窗，下面跳出「復原」可以改回來。點品項清單：看那一種在哪裡；數量不對按 ＋／－。</p>`
         : ''
@@ -1862,7 +1954,7 @@ function viewReview() {
             <button class="swatch" style="--c:${g.color}" data-focus="${esc(g.key)}" aria-label="在照片上標出 ${esc(g.label)}">${gi + 1}</button>
             <button class="grow edit-btn" data-edit="${esc(g.key)}" aria-label="修改 ${esc(g.label)} 的名稱、品牌、型號、規格">
               <span class="name">${esc(g.label)}</span><span class="pencil" aria-hidden="true">${icon('edit', 16)}</span>${g.manual ? '<span class="badge edit">手動</span>' : doubtsByKey.get(g.key) ? `<span class="badge low">${doubtsByKey.get(g.key)} 個要確認</span>` : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}${itemsCache && !findItem(itemsCache, g) ? '<span class="badge ok">新品項</span>' : ''}
-              <br><span class="spec">${esc(detailOf(g) || '點名稱補品牌、型號、尺寸')}${!g.manual && g.count !== g.boxes ? `・照片裡 ${g.boxes} 個` : ''}</span>
+              <br><span class="spec">${detailOf(g) ? detailHtml(g) : '點名稱補品牌、型號、尺寸'}${!g.manual && g.count !== g.boxes ? `・<span class="nb">照片裡 ${g.boxes} 個</span>` : ''}</span>
             </button>
             <span class="stepper edit-only"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">${icon('minus', 20)}</button><input inputmode="numeric" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.label)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">${icon('plus', 20)}</button></span><span class="qty view-only"><b>${g.count}</b></span>
           </div>`,
@@ -1888,7 +1980,8 @@ function aiShareRows(key) {
   if (!syncReady()) return ''
   const rows = []
   const fresh = '<span class="badge new">新</span>'
-  if (aiViaSheet() && !key)
+  // 擁有者只看下面「金鑰已放在雲端給大家共用」那一列就好（不然兩列說的是同一件事）
+  if (aiSharedOn() && !key && myRole() !== 'owner')
     rows.push(
       canEdit()
         ? `<div class="row"><span class="grow"><span class="title ok-line">${icon('check', 18)}正在用公司共用的金鑰</span>${fresh}<br><span class="meta">擁有者把金鑰放在雲端（Apps Script），你的手機上沒有金鑰，可以直接拍照辨識；每次會多 1～2 秒。</span></span></div>`
@@ -1903,6 +1996,18 @@ function aiShareRows(key) {
   return rows.length ? `<div class="group">${rows.join('')}</div>` : ''
 }
 
+/**
+ * 設定頁的「連線測試」：擁有者放左欄；其他人右欄（沒有「Google 試算表」那一區，右欄比較短，搬過去兩欄才一樣高）。
+ * 沒有 AI 可以用（例如檢視者）就不顯示：按了也只會失敗。
+ */
+const diagSection = () =>
+  hasAi()
+    ? `<p class="section-title">連線測試</p>
+    <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
+    <p class="footnote">辨識一直失敗時按這個，把結果截圖傳給擁有者（管理這個 App 的人）。</p>`
+    : ''
+/** 還沒設定任何同步、也沒有金鑰的新手機（大多是剛收到邀請的同事） */
+const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.key)
 async function viewSettings() {
   const key = ls.get(LS.key)
   const model = ls.get(LS.model)
@@ -1911,6 +2016,15 @@ async function viewSettings() {
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}</div>
     <h1 class="large-title">設定</h1>
+    ${
+      // 還沒設定任何同步的新手機：大多是被邀請的同事 →「我收到連結碼了」放最前面（以前要往下捲很久）
+      freshPhone()
+        ? `<div class="hint-card stack join-first"><div><b>同事傳了邀請連結給你？</b> <span class="badge new">新</span><br>在 LINE 直接<b>點邀請連結</b>就會自動加入；點了沒反應，把整段連結貼在這裡：</div>
+        <input class="field" id="link-code" placeholder="貼上收到的邀請連結" autocomplete="off" spellcheck="false">
+        <button class="btn small" data-action="sync-link">加入</button>
+        <p class="footnote" style="margin:0">自己就是擁有者（管理這個 App 的人）：不用填這裡，往下設定 Gemini API Key、Google 試算表。</p></div>`
+        : ''
+    }
     <div class="settings-cols"><div class="settings-col">
     <p class="section-title">Gemini API Key</p>
     ${(() => {
@@ -1918,17 +2032,17 @@ async function viewSettings() {
       <div class="row-actions"><button class="btn small" data-action="save-key">儲存並測試</button><button class="btn small secondary" data-action="toggle-key">顯示／隱藏</button></div>
       <p class="footnote" style="margin:0">沒有 Key？到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style="color:var(--tint)">Google AI Studio</a> 免費建立。Key 只存在這支手機，照片只會送到 Google Gemini 分析。</p>`
       // 已經在用擁有者的共用金鑰：自己貼金鑰收進「進階」，同事才不會以為要自己去申請
-      return aiViaSheet() && !key
+      return aiSharedOn() && !key
         ? `<div class="stack">${aiShareRows(key)}${canEdit() ? `<details class="steps"><summary>進階：改用自己的金鑰</summary><div class="stack" style="margin-top:6px">${keyForm}</div></details>` : ''}</div>`
         : `<div class="stack">${keyForm}${aiShareRows(key)}</div>`
     })()}
     <p class="section-title">辨識模型</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model || '自動挑選')}</span><br><span class="meta">自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro</span></span><button class="btn small secondary" data-action="pick-model">重新挑選</button></div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model || '自動挑選')}</span><br><span class="meta">自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro</span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
       <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">AI 原本數的跟你確認後的比；也可以用標準答案考 AI</span></span>${chev}</button></div>
     <div id="models"></div>
     <p class="section-title">店內品項清單</p>
-    <textarea class="field" id="catalog" spellcheck="false">${esc(catalogLines().join('\n'))}</textarea>
-    <p class="footnote">一行一種品項，括號裡寫規格或別名。AI 會照這裡的名稱寫，修正時也會跳出來給你選。</p>
+    <textarea class="field" id="catalog" spellcheck="false" ${canEdit() ? '' : 'readonly aria-readonly="true"'}>${esc(catalogLines().join('\n'))}</textarea>
+    <p class="footnote">一行一種品項，括號裡寫規格或別名。AI 會照這裡的名稱寫，修正時也會跳出來給你選。${canEdit() ? '' : '（檢視者只能看）'}</p>
     <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small" data-action="save-catalog">儲存清單</button><button class="btn small secondary" data-action="reset-catalog">恢復預設</button></div>
     <p class="section-title">樣品照（${samples.length}）</p>
     ${
@@ -1943,9 +2057,7 @@ async function viewSettings() {
     }
     <div class="row-actions edit-only" style="margin-top:10px"><label class="btn small secondary">${icon('camera', 20)}拍一張樣品<input type="file" accept="image/*" capture="environment" id="sample-cam" class="sr-only"></label></div>
     <p class="footnote">長得很像、只差尺寸的商品（例如不同分數的三通），每一種存一張樣品照，名稱和尺寸寫清楚。辨識時會一起送給 AI 比對（最多 30 張，新的優先）。<br>最快的存法：盤點結果裡先點那個框、再點一次 →「儲存，並存成樣品照」。</p>
-    <p class="section-title">連線測試</p>
-    <div class="stack"><button class="btn small secondary" data-action="diagnose">測試連線</button><div id="diag"></div></div>
-    <p class="footnote">辨識一直失敗時按這個，把結果截圖傳給擁有者（管理這個 App 的人）。</p>
+    ${myRole() === 'owner' ? diagSection() : ''}
     </div><div class="settings-col">
     ${
       myRole() === 'owner'
@@ -1994,9 +2106,9 @@ async function viewSettings() {
           : '<div class="group"><div class="row muted">擁有者：先完成上面的 Google 試算表連結，再回來開啟同步。<br>被邀請的人：直接在下面貼上收到的連結碼。</div></div>'
     }
     ${
-      syncReady()
+      syncReady() || freshPhone()
         ? ''
-        : `<details class="steps" ${ls.get(LS.sheet) ? '' : 'open'}><summary>我收到連結碼了（被邀請的人用）</summary>
+        : `<details class="steps"><summary>我收到連結碼了（被邀請的人用）</summary>
       <div class="stack" style="margin-top:8px">
         <p class="footnote" style="margin:0">最簡單：在 LINE 直接<b>點邀請連結</b>就會自動加入。點了沒反應，再把整段連結貼在這裡。</p>
         <input class="field" id="link-code" placeholder="貼上收到的邀請連結" autocomplete="off" spellcheck="false">
@@ -2021,8 +2133,9 @@ async function viewSettings() {
       </ol>
     </details>` : ''}
     <p class="section-title">資料</p>
-    <div class="row-actions edit-only"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>
+    ${canManage() ? '<div class="row-actions"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>' : ''}
     <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
+    ${myRole() === 'owner' ? '' : diagSection()}
     </div></div>
     <p class="footnote" style="margin-top:18px;text-align:center">聖佳智慧庫存 版本 ${VERSION} <span class="badge new">新</span></p>
     <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
@@ -2047,7 +2160,7 @@ const itemRow = (it) => {
   const live = liveStock(it).map(([, st]) => st)
   const pairs = live.sort((a, b) => b.count - a.count).map((st) => [st.place, st.count])
   const search = canon([it.no, it.label, it.brand, it.model, it.spec, ...live.map((st) => st.place)].join(' '))
-  return `<button class="row item-row" data-item-open="${it.id}" data-search="${esc(search)}">
+  return `<button class="row item-row" data-item-open="${esc(it.id)}" data-search="${esc(search)}">
     ${itemThumb(it)}
     <span class="grow"><span class="title">${esc(itemTitle(it))}</span>${itemBadges(it)}<br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</span>${pairs.length ? placesHtml(pairs, 4) : ''}</span>
     <span class="qty"><b>${onHand(it)}</b>${it.book != null && !blindMe() ? `<small>帳面 ${it.book}</small>` : ''}</span>${chev}</button>`
@@ -2074,8 +2187,31 @@ async function erpPut(v) {
 const erpCat = (p) => (typeof p === 'string' ? p.trim().charAt(0).toUpperCase() : p?.cat || String(p?.no || '').trim().charAt(0).toUpperCase()) || '#'
 const erpCatName = (erp, c) => erp?.cats?.[c] || ERP_CATS_DEFAULT[c] || ''
 const erpCatLabel = (erp, c) => (erpCatName(erp, c) ? `${c}　${erpCatName(erp, c)}` : `${c} 類`)
-/** 這個產品在品項庫裡的那一筆（料號＝產品編號） */
-const erpItemOf = (items, no) => items.find((it) => it.erpNo === no || canon(it.no) === canon(no)) || null
+/**
+ * 品項庫的索引：正航產品編號 → 品項。產品總表一頁 150 列、匯入 4000 多種，一個一個從頭找太慢，先建好對照表。
+ * 先看「接上的正航料號」（erpNo）；沒有才看料號一樣的，而且那一筆不能已經接上別的正航產品
+ * （不然一個品項會同時算成兩個正航產品）。
+ */
+function erpIndex(items) {
+  const byErp = new Map()
+  const byNo = new Map()
+  for (const it of items) {
+    if (it.erpNo && !byErp.has(it.erpNo)) byErp.set(it.erpNo, it)
+    const k = canon(it.no)
+    if (k && !byNo.has(k)) byNo.set(k, it)
+  }
+  return {
+    of: (no) => {
+      const linked = byErp.get(no)
+      if (linked) return linked
+      const same = byNo.get(canon(no))
+      return same && (!same.erpNo || same.erpNo === no) ? same : null
+    },
+    link: (it, no) => byErp.set(no, it),
+  }
+}
+/** 這個產品在品項庫裡的那一筆（料號＝產品編號）；只找一個時用，找很多個請先 erpIndex() */
+const erpItemOf = (items, no) => erpIndex(items).of(no)
 /** 讀 CSV／Excel 貼上的表格：逗號或 Tab 分隔，欄位可以用引號包（品名裡有逗號也沒問題） */
 function parseDelimited(text) {
   const s = String(text).replace(/^﻿/, '')
@@ -2175,11 +2311,16 @@ async function importErp(text) {
   products.sort((a, b) => cmp(a.no, b.no))
   await erpPut({ id: ERP_ID, createdAt: old?.createdAt || Date.now(), at: Date.now(), products, cats: { ...(old?.cats || {}), ...parsed.cats } })
   const items = await itemsAll(true)
+  const index = erpIndex(items)
   let booked = 0
   for (const p of products) {
-    const it = erpItemOf(items, p.no)
+    const it = index.of(p.no)
     if (!it) continue
-    it.erpNo = p.no
+    if (it.erpNo !== p.no) {
+      it.erpNo = p.no
+      it.erpAt = Date.now()
+    }
+    index.link(it, p.no)
     if (it.book !== p.qty) {
       it.book = p.qty
       it.moves.push({ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' })
@@ -2199,45 +2340,84 @@ async function erpLink(no, intoId = '') {
   // 合併到已經有的品項（例如盤點時自動建立的 P0001）：接上正航料號、帳面改成正航的數量，不另外新增一筆
   const into = !it && intoId ? items.find((x) => x.id === intoId) : null
   if (into) {
+    // 合併前的樣子：給「復原」用
+    const prev = { erpNo: into.erpNo || '', unit: into.unit, book: into.book ?? null }
     into.erpNo = p.no
+    into.erpAt = Date.now()
     if (!into.unit && p.unit) into.unit = p.unit
     if (into.book !== p.qty) {
       into.book = p.qty
       ;(into.moves ||= []).push({ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' })
     }
     await putItem(into)
-    return into
+    return { item: into, prev }
   }
   if (!it) {
-    it = newItem(items, { label: p.name, brand: '', model: '', spec: '' }, { no: p.no, erpNo: p.no, unit: p.unit, status: 'ok', book: p.qty, moves: [{ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' }] })
+    it = newItem(items, { label: p.name, brand: '', model: '', spec: '' }, { no: p.no, erpNo: p.no, erpAt: Date.now(), unit: p.unit, status: 'ok', book: p.qty, moves: [{ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' }] })
     items.unshift(it)
-  } else it.erpNo = p.no
+  } else if (it.erpNo !== p.no) {
+    it.erpNo = p.no
+    it.erpAt = Date.now()
+  }
   await putItem(it)
-  return it
+  return { item: it }
+}
+/**
+ * 復原「合併到已經有的品項」：拿掉正航料號、帳面改回原本的。
+ * 帳面用「再記一筆設定」改回去（不是刪掉紀錄）：進出紀錄在多台之間是合起來的，刪掉的會被別台補回來。
+ */
+async function erpUnlink(id, prev, no) {
+  const it = (await itemsAll()).find((x) => x.id === id)
+  if (!it || it.erpNo !== no) return false
+  it.erpNo = prev.erpNo
+  it.erpAt = Date.now() // 比合併那次新：同步時以「取消」為準
+  if (prev.unit === undefined) delete it.unit
+  else it.unit = prev.unit
+  if (it.book !== prev.book) {
+    ;(it.moves ||= []).push({ at: Date.now(), kind: 'set', qty: prev.book, from: 'undo', why: `取消接上正航 ${no}` })
+    it.book = prev.book
+  }
+  await putItem(it)
+  return true
 }
 const erpSearchKey = (p) => canon(`${p.no} ${p.name}`)
 /** 只留英文和數字（型號比對用）：「DML 083S」→「dml083s」 */
 const alnum = (s) => canon(s).replace(/[^a-z0-9]/g, '')
+/** 比對時可以忽略的分隔符號（跟 canon 拿掉的一樣） */
+const TOKEN_SEP = `[\\s\\-_/.,，、・·()（）\\[\\]【】"'“”‘’]*`
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /**
- * 品項庫裡可能就是這個正航產品的（還沒接上正航料號的）：型號出現在品名裡最準；
- * 其次是品名和規格都出現在正航品名裡。給「要合併到 P0001 嗎？」用，最多 3 個。
+ * needle 有沒有「完整」出現在 hay 裡：中間的空白、橫線不計（DML083＝DML 083），
+ * 但前後不能再接英文或數字——「KP 1」不會對到「KP15」、「DML 083」不會對到「DML083S」（S＝焊接，是另一種產品）。
  */
-function erpSimilar(items, p) {
-  const name = canon(p.name)
-  const nameA = alnum(p.name)
+function hasToken(hay, needle) {
+  const c = canon(needle)
+  if (!c) return false
+  const body = [...c].map(reEsc).join(TOKEN_SEP)
+  const re = new RegExp(`${/^[a-z0-9]/.test(c) ? '(?:^|[^a-z0-9])' : ''}${body}${/[a-z0-9]$/.test(c) ? '(?![a-z0-9])' : ''}`)
+  return re.test(String(hay ?? '').normalize('NFKC').toLowerCase())
+}
+/**
+ * 品項庫裡可能就是這個正航產品的（還沒接上任何正航產品的）。給「要合併到 P0001 嗎？」用，最多 3 個：
+ * 1. 品項有型號：型號要完整出現在正航品名裡；對不到＝不同產品，品名一樣也不建議。
+ * 2. 沒有型號：品名要出現；有規格的規格也要出現。
+ * 3. 只對到品名（沒型號、沒規格）：品名要 3 個字以上（「銅管」「三通」幾乎每個品名都有），排最後、標「只對到品名」。
+ * erpNos：正航全部的產品編號（canon 過）；料號跟某個正航產品一樣的，已經算是那個產品的，不能再接別的。
+ */
+function erpSimilar(items, p, erpNos = new Set()) {
   const score = (it) => {
-    const m = alnum(it.model)
-    if (m.length >= 3 && nameA.includes(m)) return 2
-    if (it.label && name.includes(canon(it.label)) && (!it.spec || name.includes(canon(it.spec)))) return 1
-    return 0
+    if (alnum(it.model).length >= 3) return hasToken(p.name, it.model) ? 3 : 0
+    if (!it.label || !hasToken(p.name, it.label)) return 0
+    if (it.spec) return hasToken(p.name, it.spec) ? 2 : 0
+    return canon(it.label).length >= 3 ? 1 : 0
   }
   return items
-    .filter((it) => !it.erpNo)
-    .map((it) => [it, score(it)])
-    .filter(([, s]) => s)
-    .sort((a, b) => b[1] - a[1])
+    .filter((it) => !it.erpNo && !erpNos.has(canon(it.no)))
+    .map((it) => ({ it, score: score(it) }))
+    .filter((x) => x.score)
+    .sort((a, b) => b.score - a.score)
     .slice(0, 3)
-    .map(([it]) => it)
+    .map(({ it, score }) => ({ it, nameOnly: score === 1 }))
 }
 /** 認識產品：先看類別、再看那一類的東西；可以搜尋編號或名字 */
 async function viewCatalog() {
@@ -2253,7 +2433,7 @@ async function viewCatalog() {
     <p class="subtitle">把正航的產品表匯進來：每一種產品的庫存、放在哪裡、照片，點貨對單用。</p>
     <div class="hint-card stack">
       <div><b>還沒匯入正航產品表。</b>在公司電腦的正航：報表 → 庫存管理 → 存貨狀況報表 → <b>產品存量明細表</b> → 確定 → 存成 Excel；再另存成 CSV 檔，或整張複製貼上。</div>
-      <button class="btn small edit-only" data-action="erp-import">匯入正航產品表</button>
+      ${canManage() ? '<button class="btn small" data-action="erp-import">匯入正航產品表</button>' : '<div class="muted">匯入正航產品表會改大家的帳面數：請擁有者或管理員匯入。</div>'}
     </div>
   </main>`
   const all = erp.products
@@ -2264,7 +2444,7 @@ async function viewCatalog() {
   const catList = [...cats].sort((a, b) => b[1] - a[1])
   return `
   <main class="app">
-    <div class="nav">${back}<span class="nav-right"><button class="btn small plain edit-only" data-action="erp-cats">類別名稱</button><button class="btn small plain edit-only" data-action="erp-import">重新匯入</button></span></div>
+    <div class="nav">${back}${canManage() ? '<span class="nav-right"><button class="btn small plain" data-action="erp-cats">類別名稱</button><button class="btn small plain" data-action="erp-import">重新匯入</button></span>' : ''}</div>
     <h1 class="large-title">產品總表</h1>
     <p class="subtitle">正航 ${all.length} 種・有庫存 ${stockedN} 種・${fmtTime(erp.at)} 匯入。點類別或直接搜尋編號、品名。</p>
     <input class="field search" id="erp-q" type="search" placeholder="搜尋產品編號、品名（全部 ${all.length} 種）" autocomplete="off" enterkeyhint="search" value="${esc(st.q)}">
@@ -2278,8 +2458,9 @@ function erpListHtml(erp, items, catList) {
   const pool = st.stocked ? erp.products.filter((p) => p.qty > 0) : erp.products
   const q = canon(st.q)
   const PAGE = 150
+  const index = erpIndex(items) // 每打一個字都會重畫：先建對照表，不要每一列都從頭找
   const rowOf = (p) => {
-    const it = erpItemOf(items, p.no)
+    const it = index.of(p.no)
     const places = it ? liveStock(it).map(([, s]) => [s.place, null]).filter(([pl]) => pl) : []
     const meta = [p.no, p.unit, blindMe() ? '' : `庫存 ${p.qty}`].filter(Boolean).join('・')
     return `<button class="row" data-erp-no="${esc(p.no)}">${it ? itemThumb(it, 40) : `<span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(erpCat(p))}</span>`}<span class="grow"><span class="title">${esc(p.name)}</span><br><span class="meta">${esc(meta)}</span>${places.length ? placesHtml(places, 3) : ''}</span>${it ? '<span class="badge ok">品項</span>' : ''}${chev}</button>`
@@ -2296,7 +2477,7 @@ function erpListHtml(erp, items, catList) {
     catList = [...cats].sort((a, b) => b[1] - a[1])
   }
   const unnamed = catList.filter(([c]) => !erpCatName(erp, c)).length
-  return `<div class="group">${catList.map(([c, n]) => `<button class="row" data-erp-cat="${esc(c)}"><span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(c)}</span><span class="grow"><span class="title">${esc(erpCatLabel(erp, c))}</span><br><span class="meta">${n} 種</span></span>${chev}</button>`).join('')}</div>${unnamed ? `<p class="footnote">${unnamed} 個類別只有字母、還沒有名稱：到正航「產品類別設定」看代號對應什麼，按右上「類別名稱」填進來。</p>` : ''}`
+  return `<div class="group">${catList.map(([c, n]) => `<button class="row" data-erp-cat="${esc(c)}"><span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(c)}</span><span class="grow"><span class="title">${esc(erpCatLabel(erp, c))}</span><br><span class="meta">${n} 種</span></span>${chev}</button>`).join('')}</div>${unnamed ? `<p class="footnote">${unnamed} 個類別只有字母、還沒有名稱：到正航「產品類別設定」看代號對應什麼，${canManage() ? '按右上「類別名稱」填進來' : '請擁有者或管理員填類別名稱'}。</p>` : ''}`
 }
 /** 一個產品：編號、名稱、單位、各倉庫數量、放哪裡、照片；可以加入品項庫 */
 async function erpProductSheet(no) {
@@ -2325,22 +2506,44 @@ async function erpProductSheet(no) {
         const made = await erpLink(no, intoId)
         close()
         if (!made) return toast('加不進去，請再試一次')
-        toast(intoId ? `已合併：${made.no} 接上正航 ${no}，帳面改成正航的 ${p.qty}` : `已記進品項庫：${made.label}`)
-        state.itemId = made.id
+        const { item, prev } = made
+        state.itemId = item.id
         go('item')
+        if (!prev) return toast(`已記進品項庫：${item.label}`)
+        // 盲盤：盤點的人看不到帳面數，提示裡也不寫數字
+        const bookTxt = blindMe() || prev.book === item.book ? '' : prev.book == null ? `，帳面改成 ${item.book}（原本沒有）` : `，帳面 ${prev.book} → ${item.book}`
+        toast(`已合併：${item.no} 接上正航 ${no}${bookTxt}`, {
+          label: '復原',
+          run: async () => {
+            const ok = await erpUnlink(item.id, prev, no)
+            toast(ok ? `已復原：${item.no} 沒有接上正航 ${no}` : '這一筆已經改過了，沒辦法復原')
+            if (['item', 'catalog', 'items'].includes(state.view)) render()
+          },
+        })
       }
       el.querySelector('#e-link')?.addEventListener('click', () => {
         // 加入前先找品項庫裡是不是已經有同一個（例如盤點時自動建立的）：有的話問要不要合併，免得變成兩筆、盤差看錯
-        const similar = erpSimilar(items, p)
+        const similar = erpSimilar(items, p, new Set(erp.products.map((x) => canon(x.no))))
         if (!similar.length) return link()
+        const blind = blindMe()
         const box = el.querySelector('#e-dup')
         box.hidden = false
         box.innerHTML = `<p class="section-title" style="margin-top:14px">品項庫裡可能已經有了</p>
-          <div class="group">${similar.map((x) => `<button class="row" data-into="${esc(x.id)}">${itemThumb(x, 40)}<span class="grow"><span class="title">合併到 ${esc(x.no)}</span><br><span class="meta">${esc(itemTitle(x))}${x.model ? `・${esc(x.model)}` : ''}・實盤 ${onHand(x)}</span></span>${chev}</button>`).join('')}</div>
-          <p class="footnote">合併：正航料號 ${esc(no)}、帳面數 ${p.qty} 接到那一筆。</p>
+          <div class="group">${similar.map(({ it: x, nameOnly }) => `<button class="row" data-into="${esc(x.id)}">${itemThumb(x, 40)}<span class="grow"><span class="title">合併到 ${esc(x.no)}</span>${nameOnly ? '<span class="badge low">只對到品名</span>' : ''}<br><span class="meta">${esc(itemTitle(x))}${x.model ? `・${esc(x.model)}` : ''}・實盤 ${onHand(x)}</span></span>${chev}</button>`).join('')}</div>
+          <p class="footnote">合併：正航料號 ${esc(no)} 接到那一筆，${blind ? '帳面數改成正航的數量' : `帳面數改成正航的 ${esc(p.qty)}`}。${similar.some((x) => x.nameOnly) ? '「只對到品名」的不一定是同一個產品，請看清楚型號、規格。' : ''}</p>
           <button class="btn plain block" id="e-new" style="margin-top:8px">不一樣，還是新增一筆</button>`
         el.querySelector('#e-link').hidden = true
-        box.querySelectorAll('[data-into]').forEach((b) => (b.onclick = () => link(b.dataset.into)))
+        glueTails(box)
+        box.querySelectorAll('[data-into]').forEach(
+          (b) =>
+            (b.onclick = () => {
+              const x = similar.find((s) => s.it.id === b.dataset.into)?.it
+              if (!x) return
+              const change = blind ? '・帳面數改成正航的數量（盲盤中不顯示數字）' : x.book === p.qty ? `・帳面不變（都是 ${p.qty}）` : x.book == null ? `・帳面改成 ${p.qty}（原本沒有）` : `・帳面 ${x.book} → ${p.qty}`
+              if (!confirm(`合併到 ${x.no}「${itemTitle(x)}」？\n\n・接上正航 ${no}「${p.name}」\n${change}\n\n合併後幾秒內可以按「復原」。`)) return
+              link(x.id)
+            }),
+        )
         box.querySelector('#e-new').onclick = () => link()
       })
     },
@@ -2421,7 +2624,7 @@ async function viewItems() {
   <main class="app">
     <div class="nav"><button class="btn small plain" data-go="locations">${icon('shelf', 18)}儲位</button><span class="nav-right"><button class="icon-btn" data-action="items-more" aria-label="匯入、匯出、備份" title="匯入、匯出、備份">${icon('more', 24)}</button><button class="btn small edit-only" data-action="item-add">${icon('plus', 18)}新增</button></span></div>
     <h1 class="large-title">品項庫</h1>
-    <p class="subtitle">${items.length ? `${items.length} 種商品・${placeCount(items)} 個儲位。盤點按「完成」就會自動更新。` : '盤點按「完成」，數到的東西就會自動記進來。'}</p>
+    <p class="subtitle">${items.length ? `${items.length} 種商品・${locations().length || !placeCount(items) ? `${placeCount(items)} 個儲位` : `用到 ${placeCount(items)} 個位置（還沒建立儲位）`}。盤點按「完成」就會自動更新。` : '盤點按「完成」，數到的東西就會自動記進來。'}</p>
     <button class="report-card" data-go="catalog" style="margin-bottom:12px"><span class="row-ico" aria-hidden="true">${icon('tag')}</span><span class="grow"><span class="report-card-kicker">產品總表（正航）</span><span class="report-card-nums">${erp ? `<b>${erp.products.length}</b> 種・有庫存 <b>${erp.products.filter((p) => p.qty > 0).length}</b> 種` : '匯入正航產品表'}</span><span class="meta">${erp ? '查庫存、放在哪裡、照片；點貨對單用' : '正航的全部產品：查庫存、放哪裡，點貨對單不會錯'}</span></span>${chev}</button>
     ${
       items.length
@@ -2433,7 +2636,7 @@ async function viewItems() {
            ${
              list.length
                ? `<div class="item-secs${byLabel.size >= 4 && list.length >= 8 ? ' multi' : ''}">${[...byLabel]
-                   .map(([label, its]) => `<section class="item-sec"><p class="section-title">${esc(label)}（${its.length}）</p><div class="group">${its.map(itemRow).join('')}</div></section>`)
+                   .map(([label, its]) => `<section class="item-sec"><p class="section-title">${esc(label)}（${its.length}）</p><div class="group${byLabel.size >= 4 && list.length >= 8 ? '' : its.length >= 2 ? ' cols-2' : ''}">${its.map(itemRow).join('')}</div></section>`)
                    .join('')}</div>`
                : f.id === 'order'
                  ? `<div class="hint-card stack" style="margin-top:12px">
@@ -2506,7 +2709,7 @@ async function viewItem() {
     }
     </div><div class="detail-side">
     <p class="section-title">叫貨提醒</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">剩幾個就要叫貨</span><br><span class="meta">${needsOrder(it) ? `<span class="warn-line">${icon('warning', 16)}現在大概剩 ${expected(it)} 個，該叫貨了</span>` : it.safety == null ? '例如設 3：剩 3 個以下就列進「叫貨」（安全庫存）' : `剩 ${it.safety} 個以下，就列進「叫貨」`}</span></span><span class="stepper edit-only"><button data-safety="-1" aria-label="減一">${icon('minus', 20)}</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="剩幾個就要叫貨"><button data-safety="1" aria-label="加一">${icon('plus', 20)}</button></span><span class="qty view-only"><b>${it.safety ?? '—'}</b></span></div></div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">剩幾個就要叫貨</span><br><span class="meta">${needsOrder(it) ? `<span class="warn-line">${icon('warning', 16)}<span>${esc(orderWhy(it))}，該叫貨了</span></span>` : it.safety == null ? '例如設 3：剩 3 個以下就列進「叫貨」（安全庫存）' : `剩 ${it.safety} 個以下，就列進「叫貨」`}</span></span><span class="stepper edit-only"><button data-safety="-1" aria-label="減一">${icon('minus', 20)}</button><input id="safety" inputmode="numeric" value="${it.safety ?? ''}" placeholder="—" aria-label="剩幾個就要叫貨"><button data-safety="1" aria-label="加一">${icon('plus', 20)}</button></span><span class="qty view-only"><b>${it.safety ?? '—'}</b></span></div></div>
     ${
       decoded.length
         ? `<p class="section-title">型號解讀</p><div class="group">${decoded.map((x) => `<div class="row decode"><span class="grow"><span class="title">${esc(x.title)}</span>${x.facts.map((t) => `<br><span class="meta">・${esc(t)}</span>`).join('')}</span></div>`).join('')}</div>`
@@ -2525,7 +2728,7 @@ async function viewItem() {
         ? `<p class="section-title">進出紀錄</p><div class="group">${[...it.moves]
             .reverse()
             .slice(0, 20)
-            .map((m) => `<div class="row"><span class="grow">${m.kind === 'in' ? '進貨' : m.kind === 'out' ? '賣出' : m.why ? '複盤後調整帳面' : '設定帳面數'}<br><span class="meta">${fmtTime(m.at)}${m.why ? `・${esc(m.why)}` : ''}</span></span>${m.kind === 'set' && blindMe() ? '' : `<span class="qty"><b>${m.kind === 'in' ? '+' : m.kind === 'out' ? '−' : '＝'}${m.qty}</b></span>`}</div>`)
+            .map((m) => `<div class="row"><span class="grow">${m.kind === 'in' ? '進貨' : m.kind === 'out' ? '賣出' : m.from === 'undo' ? '帳面數改回原本的' : m.why ? '複盤後調整帳面' : '設定帳面數'}<br><span class="meta">${fmtTime(m.at)}${m.why ? `・${esc(m.why)}` : ''}</span></span>${m.kind === 'set' && blindMe() ? '' : `<span class="qty"><b>${m.kind === 'in' ? '+' : m.kind === 'out' ? '−' : '＝'}${m.qty == null ? '—' : esc(m.qty)}</b></span>`}</div>`)
             .join('')}</div>`
         : ''
     }
@@ -2560,7 +2763,7 @@ function recountSection(it) {
 function equivRow(e) {
   const x = e.item
   return x
-    ? `<button class="row" data-item-open="${x.id}"><span class="grow"><span class="title">${esc([e.brand, e.model].filter(Boolean).join(' '))}</span><br><span class="meta in-stock">店裡有 ${onHand(x)}・${esc(x.no)}${e.linked ? '・自己設定的' : ''}</span></span>${chev}</button>`
+    ? `<button class="row" data-item-open="${esc(x.id)}"><span class="grow"><span class="title">${esc([e.brand, e.model].filter(Boolean).join(' '))}</span><br><span class="meta in-stock">店裡有 ${onHand(x)}・${esc(x.no)}${e.linked ? '・自己設定的' : ''}</span></span>${chev}</button>`
     : `<div class="row"><span class="grow"><span class="title">${esc([e.brand, e.model].filter(Boolean).join(' '))}</span><br><span class="meta">店裡還沒有這一項</span></span></div>`
 }
 
@@ -2593,6 +2796,17 @@ function lookupResults() {
           })
           .slice(0, 10)
       : []
+  // 型號相近、但看得出尺寸或規格不一樣（例如 DML 083＝3分、DML 084＝4分）：明講不能互換
+  const specOf = (m) => decode(m).find((x) => x.model)?.spec || ''
+  const sizeOf = (s) => (String(s).match(/\d+吋\d+分|\d+分/) || [''])[0]
+  const qSpec = specOf(read?.model || q)
+  const nearNote = (it) => {
+    const s = specOf(it.model) || it.spec || ''
+    if (!qSpec || !s || canon(s) === canon(qSpec)) return ''
+    const a = sizeOf(qSpec)
+    const b = sizeOf(s)
+    return a && b && a !== b ? `尺寸不同（${a}／${b}），不能互換` : `規格不同（${qSpec}／${s}），不能互換`
+  }
   const eq = equivalentsFor(matches[0] || null, decoded, items)
   const links = linksFor({ brand: read?.brand || main?.brand || '', model: read?.model || main?.model || q, label: read?.label || '' }, decoded)
   if (!q && !read)
@@ -2606,14 +2820,14 @@ function lookupResults() {
         ? `<section class="summary read-card">
             <div class="read-head">${read.url ? `<img src="${read.url}" alt="拍到的標籤">` : ''}<div class="grow"><span class="stock-label">AI 讀到</span><b>${esc(read.label || '（看不出品名）')}</b><span class="meta">${esc([read.brand, read.model, read.spec].filter(Boolean).join('・') || '看不出型號')}</span>${read.code ? `<br><span class="meta">訂購碼 ${esc(read.code)}</span>` : ''}</div></div>
             ${read.text ? `<details class="trace"><summary>標籤上的字</summary>${esc(read.text)}</details>` : ''}
-            <div class="row-actions" style="margin-top:12px">${exact ? `<button class="btn small" data-item-open="${exact.id}">打開 ${esc(exact.no)}（店裡有 ${onHand(exact)}）</button>` : '<button class="btn small edit-only" data-action="read-add">加入品項庫</button>'}<button class="btn small secondary" data-action="read-clear">清除</button></div>
+            <div class="row-actions" style="margin-top:12px">${exact ? `<button class="btn small" data-item-open="${esc(exact.id)}">打開 ${esc(exact.no)}（店裡有 ${onHand(exact)}）</button>` : '<button class="btn small edit-only" data-action="read-add">加入品項庫</button>'}<button class="btn small secondary" data-action="read-clear">清除</button></div>
           </section>`
         : ''
     }
     ${decoded.length ? `<p class="section-title">這是什麼</p><div class="group">${decoded.map((x) => `<div class="row decode"><span class="grow"><span class="title">${esc(x.title)}</span>${x.facts.map((t) => `<br><span class="meta">・${esc(t)}</span>`).join('')}</span></div>`).join('')}</div>` : ''}
     <p class="section-title">店裡有的（${matches.length}）</p>
     ${matches.length ? `<div class="group">${matches.map(itemRow).join('')}</div>` : `<div class="group"><div class="row muted">品項庫裡沒有${fields.model || fields.label ? `「${esc(read ? read.model || read.label : q)}」` : ''}。</div></div>`}
-    ${near.length ? `<p class="section-title">型號相近的（${near.length}）<span class="badge new">新</span></p><div class="group">${near.map(itemRow).join('')}</div><p class="footnote">型號只差一點（例如尾巴多一個字母），不一定能互換；請看規格再確認。</p>` : ''}
+    ${near.length ? `<p class="section-title">型號相近的（${near.length}）<span class="badge new">新</span></p><div class="group">${near.map((it) => itemRow(it) + (nearNote(it) ? `<div class="row near-note"><span class="warn-line">${icon('warning', 16)}<span>${esc(nearNote(it))}</span></span></div>` : '')).join('')}</div><p class="footnote">型號只差一點（例如尾巴多一個字母），不一定能互換；請看規格再確認。</p>` : ''}
     ${
       eq.rule.length || eq.linked.length
         ? `<p class="section-title">替代品（同規格，可以互換）</p><div class="group">${eq.rule.map(equivRow).join('')}${eq.linked.map((x) => equivRow({ brand: x.brand, model: x.model || itemTitle(x), item: x, linked: true })).join('')}</div>${decoded.find((x) => x.note)?.note ? `<p class="footnote">${esc(decoded.find((x) => x.note).note)}</p>` : ''}`
@@ -2626,11 +2840,14 @@ async function viewLookup() {
   const { q, busy } = state.lookup
   return `
   <main class="app">
-    <div class="nav"><span></span></div>
+    <div class="nav nav-empty"><span></span></div>
     <h1 class="large-title">查型號</h1>
     <p class="subtitle">客人拿零件或型號來問：拍標籤或打型號，馬上看是什麼、店裡有沒有、可以用什麼替代。</p>
-    <label class="hero-btn ${busy ? 'busy' : ''}" ${busy ? 'aria-disabled="true"' : ''}><span class="hero-icon" aria-hidden="true">${busy ? '<span class="spinner small"></span>' : icon('camera', 30)}</span><span class="grow"><b>${busy ? 'AI 讀標籤中…' : '拍型號標籤'}</b><span class="meta">${busy ? '大約 5～15 秒' : '外盒、貼紙、機器上的型號牌、零件上的刻字都可以'}</span></span><input type="file" accept="image/*" capture="environment" id="label-cam" class="sr-only" ${busy || !hasAi() ? 'disabled' : ''}></label>
-    ${hasAi() ? '' : '<p class="footnote">拍標籤要先到「設定」貼上 API Key（或請擁有者把金鑰放到雲端共用）；打型號查詢不用。</p>'}
+    ${
+      hasAi()
+        ? `<label class="hero-btn ${busy ? 'busy' : ''}" ${busy ? 'aria-disabled="true"' : ''}><span class="hero-icon" aria-hidden="true">${busy ? '<span class="spinner small"></span>' : icon('camera', 30)}</span><span class="grow"><b>${busy ? 'AI 讀標籤中…' : '拍型號標籤'}</b><span class="meta">${busy ? '大約 5～15 秒' : '外盒、貼紙、機器上的型號牌、零件上的刻字都可以'}</span></span><input type="file" accept="image/*" capture="environment" id="label-cam" class="sr-only" ${busy ? 'disabled' : ''}></label>`
+        : `<button class="hero-btn off" data-action="lookup-no-ai" aria-disabled="true"><span class="hero-icon" aria-hidden="true">${icon('camera', 30)}</span><span class="grow"><b>拍型號標籤</b><span class="meta">${!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰' : '要先設定 AI 才能用；打型號查詢不用'}</span></span></button>`
+    }
     <input class="field search" id="lookup-q" type="search" placeholder="或打型號：DML 083S、TES 2、4×11×330" value="${esc(q)}" autocomplete="off" enterkeyhint="search" spellcheck="false">
     <div id="lookup-results">${lookupResults()}</div>
   </main>
@@ -2657,7 +2874,11 @@ async function viewLocations() {
               return `<button class="row loc-row" data-loc-edit="${i}"><span class="loc-slot">${locTag(l.code, 'lg')}</span><span class="grow"><span class="title">${esc(l.name || '（沒有說明）')}</span><br><span class="meta">${its.length ? `${its.length} 種・${qty} 件` : '還沒盤點'}</span></span>${chev}</button>`
             })
             .join('')}</div>`
-        : '<div class="group"><div class="row muted">還沒有儲位。按下面「新增儲位」，可以一次建立一整排。</div></div>'
+        : (() => {
+            // 還沒建立儲位、但盤點時填過位置：寫出用過哪些，跟品項庫的「用到 N 個位置」說法一致
+            const used = [...new Set(items.flatMap((it) => liveStock(it).map(([, st]) => st.place)).filter(Boolean))]
+            return `<div class="group"><div class="row muted"><span>還沒建立儲位。${used.length ? `盤點時用過 ${used.length} 個位置：<span class="loc-list">${used.slice(0, 8).map((p) => locTag(p, 'sm')).join('')}</span>${used.length > 8 ? '…' : ''}<br>` : ''}按下面「新增儲位」，可以一次建立一整排。</span></div></div>`
+          })()
     }
     <div class="row-actions" style="margin-top:14px"><button class="btn edit-only" style="flex:1" data-action="loc-add">${icon('plus', 20)}新增儲位</button><button class="btn secondary" style="flex:1" data-action="loc-print" ${locs.length ? '' : 'disabled'}>${icon('tag', 20)}列印標籤</button></div>
     <details class="steps"><summary>怎麼編號比較好？</summary>
@@ -2706,6 +2927,38 @@ async function render() {
   // 檢視者：所有修改用的按鈕藏起來（CSS：body.read-only .edit-only）
   document.body.classList.toggle('read-only', !canEdit())
   bindInputs()
+  glueTails($app)
+  // 新版等著裝：換到安全的頁面（例如回到首頁）就重新整理
+  if (updateReady) setTimeout(tryReload, 300)
+}
+
+/**
+ * 一個字單獨掉到下一行（「秒。」「選」「號）」）：把每一段說明最後 3 個字黏在一起，不在中間換行。
+ * CSS 的 text-wrap: pretty 對中文常常沒效（iPhone 的 Safari 舊版也不支援），所以畫完再處理一次；不用量字的位置，很快。
+ */
+const GLUE_SEL = 'p, li, .meta, .footnote, .subtitle, .sheet-sub, .hint-card > div, .doubt-reason, .setup-card p'
+function glueTails(root) {
+  for (const el of root.querySelectorAll(GLUE_SEL)) {
+    if ((el.textContent || '').length < 14) continue
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+    let last = null
+    let n
+    while ((n = walker.nextNode())) if (n.textContent.trim()) last = n
+    if (!last || last.parentElement.closest('.nb, input, textarea, svg, script, style')) continue
+    const t = last.textContent
+    let k = t.length
+    let count = 0
+    while (k > 0 && count < 3) {
+      k--
+      if (!/\s/.test(t[k])) count++
+    }
+    if (k <= 0) continue // 這一小段本來就很短：不用黏
+    const span = document.createElement('span')
+    span.className = 'nb'
+    span.textContent = t.slice(k)
+    last.textContent = t.slice(0, k)
+    last.after(span)
+  }
 }
 
 // ───────────────────────── 底部面板（Sheet）：點旁邊暗處或按 Esc 就關 ─────────────────────────
@@ -2727,6 +2980,7 @@ function sheet(html, onMount, onDismiss) {
   document.addEventListener('keydown', onKey)
   document.body.appendChild(back)
   onMount?.(back.querySelector('.sheet'), close)
+  glueTails(back)
   return close
 }
 
@@ -3015,20 +3269,20 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
       const groups = groupsOf(s).filter((g) => !g.manual)
       const mine = groups.find((g) => g.key === keyOf(o))
       body.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-          <h2 class="sheet-title" style="margin:0">${doubt ? '這一個一樣嗎？' : '這一個是哪一種？'}</h2>
-          <span class="muted" style="font-size:15px">${doubt ? '要確認的' : ''}第 ${cur + 1} / ${order.length} 個${s.photos.length > 1 ? `・第 ${pi + 1} 張照片` : ''}</span>
+        <div class="q-head">
+          <h2 class="sheet-title">${doubt ? '這一個一樣嗎？' : '這一個是哪一種？'}</h2>
+          <span class="q-count"><span class="nb">${doubt ? '要確認的' : ''}第 ${cur + 1} / ${order.length} 個</span>${s.photos.length > 1 ? `・<span class="nb">第 ${pi + 1} 張照片</span>` : ''}</span>
         </div>
         <div class="q-zoom"></div>
         ${reason ? `<p class="doubt-reason">為什麼要看：${esc(reason)}</p>` : ''}
-        <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${esc(detailOf(o))}` : ''}` : esc(o.label)}</p>
+        <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${detailHtml(o)}` : ''}` : esc(o.label)}</p>
         ${doubt ? `<button class="btn block" id="q-same" style="margin-bottom:12px">${icon('check', 20)}一樣，就是「${esc(mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label)}」</button><p class="sheet-sub" style="margin:0 0 8px">不一樣的話，選它是哪一種：</p>` : ''}
         <div class="group">
           ${groups
             .map(
               (g, gi) => `<button class="row" data-q="${gi}" ${g === mine ? 'aria-current="true"' : ''}>
                 <span class="swatch" style="--c:${g.color};pointer-events:none">${gi + 1}</span>
-                <span class="grow"><span class="title">${esc(g.label)}</span><br><span class="meta">${esc(detailOf(g) || '沒有寫尺寸')}・目前 ${g.boxes} 個</span></span>
+                <span class="grow"><span class="title">${esc(g.label)}</span><br><span class="meta">${detailOf(g) ? detailHtml(g) : '沒有寫尺寸'}・<span class="nb">目前 ${g.boxes} 個</span></span></span>
                 ${g === mine ? `<span class="muted now-mark">${icon('check', 16)}目前</span>` : ''}
               </button>`,
             )
@@ -3044,6 +3298,7 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
         <button class="btn danger block" id="q-del" style="margin-top:8px">這不是商品，刪掉這個框</button>`
       const zoom = body.querySelector('.q-zoom')
       zoom.innerHTML = boxZoomSvg(photo, o.box, mine?.color, zoom.clientWidth / zoom.clientHeight)
+      glueTails(body)
       const mineName = mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label
       // 確認一樣：記成「看過了」再存；存不進去就還原
       const confirmSame = async () => {
@@ -3090,6 +3345,7 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
         const form = body.querySelector('#q-form')
         form.style.display = 'block'
         form.innerHTML = `<p class="sheet-sub" style="margin:12px 2px 0">品名可以一樣，<b>尺寸要填不一樣的</b>（例如「4分 等徑」「5分×3分 異徑」），才會變成新的一種。</p>${fieldsHtml({ label: o.label, brand: o.brand, model: o.model }, await suggestions())}<button class="btn block" id="q-create" style="margin-top:12px">建立並改成這一種</button>`
+        glueTails(form)
         form.scrollIntoView({ block: 'start', behavior: 'smooth' })
         form.querySelector('#f-spec').focus()
         form.querySelector('#q-create').onclick = () => {
@@ -3258,7 +3514,7 @@ function pickItem(title, sub, exclude, onPick) {
     `<h2 class="sheet-title">${esc(title)}</h2><p class="sheet-sub">${esc(sub)}</p>
      <input class="field search" id="pick-q" type="search" placeholder="搜尋品名、型號、料號" autocomplete="off">
      <div class="group" style="margin-top:10px">${
-       items.map((it) => `<button class="row" data-pick="${it.id}" data-search="${esc(canon([it.no, it.label, it.brand, it.model, it.spec].join(' ')))}">${itemThumb(it, 36)}<span class="grow"><span class="title">${esc(itemTitle(it))}</span><br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</span></span></button>`).join('') ||
+       items.map((it) => `<button class="row" data-pick="${esc(it.id)}" data-search="${esc(canon([it.no, it.label, it.brand, it.model, it.spec].join(' ')))}">${itemThumb(it, 36)}<span class="grow"><span class="title">${esc(itemTitle(it))}</span><br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</span></span></button>`).join('') ||
        '<div class="row muted">品項庫裡沒有其他品項</div>'
      }</div>`,
     (el, close) => {
@@ -3274,13 +3530,15 @@ function pickItem(title, sub, exclude, onPick) {
 }
 
 /** 輸入一個數字（進貨、賣出、帳面數）；quick＝一鍵帶入的數字 */
-function numberSheet({ title, sub, value = '', action = '儲存', quick = [] }, onSave) {
+/** titleHtml：標題要放儲位黃標籤時用（已經處理過的 HTML）；title 一定要給（讀螢幕的人聽到的） */
+function numberSheet({ title, titleHtml, sub, value = '', action = '儲存', quick = [] }, onSave) {
   sheet(
-    `<h2 class="sheet-title">${esc(title)}</h2><p class="sheet-sub">${sub}</p>
+    `<h2 class="sheet-title">${titleHtml ?? esc(title)}</h2><p class="sheet-sub">${sub}</p>
      <input class="field big-num" id="n-val" inputmode="numeric" value="${esc(value)}" aria-label="${esc(title)}">
      ${quick.length ? `<div class="chips" style="margin-top:10px">${quick.map((q) => `<button class="chip" data-n="${q.n}">${esc(q.label)}</button>`).join('')}</div>` : ''}
-     <button class="btn block" id="n-save" style="margin-top:14px">${esc(action)}</button>`,
+     <div class="row-actions" style="margin-top:14px"><button class="btn secondary" id="n-cancel" style="flex:1">取消</button><button class="btn" id="n-save" style="flex:1">${esc(action)}</button></div>`,
     (el, close) => {
+      el.querySelector('#n-cancel').onclick = close
       const input = el.querySelector('#n-val')
       input.focus()
       input.select()
@@ -3373,7 +3631,7 @@ function itemsMoreSheet() {
   sheet(
     `<h2 class="sheet-title">品項庫</h2>
      <div class="group">
-       <button class="row edit-only" id="m-erp"><span class="grow"><span class="title">匯入正航產品表</span><br><span class="meta">產品存量明細表（CSV 或貼上）：產品總表、帳面數</span></span>${chev}</button>
+       ${canManage() ? `<button class="row" id="m-erp"><span class="grow"><span class="title">匯入正航產品表</span><br><span class="meta">產品存量明細表（CSV 或貼上）：產品總表、帳面數</span></span>${chev}</button>` : ''}
        <button class="row edit-only" id="m-import"><span class="grow"><span class="title">貼上 Excel 清單</span><br><span class="meta">一次匯入品名、型號、帳面數、剩幾個要叫貨</span></span>${chev}</button>
        <button class="row" id="m-xlsx"><span class="grow"><span class="title">下載品項庫 Excel</span><br><span class="meta">實盤、帳面、差異、叫貨清單</span></span>${chev}</button>
        <button class="row" id="m-order"><span class="grow"><span class="title">複製叫貨清單</span><br><span class="meta">貼到 LINE 給廠商或老闆</span></span>${chev}</button>
@@ -3389,10 +3647,10 @@ function itemsMoreSheet() {
         close()
         importSheet()
       }
-      el.querySelector('#m-erp').onclick = () => {
+      el.querySelector('#m-erp')?.addEventListener('click', () => {
         close()
         erpImportSheet()
-      }
+      })
       el.querySelector('#m-xlsx').onclick = async () => {
         close()
         downloadBlob(itemsXlsx(await itemsAll(true), await whoOfStock()), `品項庫_${ymd(Date.now())}.xlsx`)
@@ -3424,7 +3682,7 @@ function itemsMoreSheet() {
   )
 }
 const orderText = (list) =>
-  [`叫貨清單 ${ymd(Date.now())}`, ...list.map((it) => `・${itemTitle(it)}${it.brand || it.model ? `（${[it.brand, it.model].filter(Boolean).join(' ')}）` : ''}：剩 ${expected(it)} 個（設定剩 ${it.safety} 個以下要叫貨）`)].join('\n')
+  [`叫貨清單 ${ymd(Date.now())}`, ...list.map((it) => `・${itemTitle(it)}${it.brand || it.model ? `（${[it.brand, it.model].filter(Boolean).join(' ')}）` : ''}${blindMe() ? '' : `：剩 ${orderQty(it)} 個`}（設定剩 ${it.safety} 個以下要叫貨）`)].join('\n')
 
 /** 品項庫的表格（Excel、Google 試算表共用） */
 const ITEM_HEAD = ['料號', '品名', '品牌', '型號', '尺寸／規格', '實盤', '帳面', '差異', '剩幾個要叫貨（安全庫存）', '狀態', '在哪裡（位置 數量）', '最近盤點', '盤點人', '複盤', '差異原因']
@@ -3496,7 +3754,7 @@ const LOC_HEAD = ['儲位', '說明', '品項數', '件數', '最近盤點', '�
 const itemSheets = (items, whoOf) => [
   { name: '品項庫', rows: [ITEM_HEAD, ...itemRows(items, whoOf, timeText, blindMe())] },
   { name: '儲位庫存', rows: [STOCK_HEAD, ...stockRows(items, whoOf)] },
-  { name: '叫貨清單', rows: [['料號', '品名', '品牌', '型號', '尺寸／規格', '現在大概有', '剩幾個要叫貨（安全庫存）'], ...items.filter(needsOrder).map((it) => [it.no, it.label, it.brand, it.model, it.spec, expected(it), it.safety])] },
+  { name: '叫貨清單', rows: [['料號', '品名', '品牌', '型號', '尺寸／規格', '現在剩（實盤、帳面取少的）', '剩幾個要叫貨（安全庫存）'], ...items.filter(needsOrder).map((it) => [it.no, it.label, it.brand, it.model, it.spec, blindMe() ? '' : orderQty(it), it.safety])] },
 ]
 const itemsXlsx = (items, whoOf) => makeXlsx(itemSheets(items, whoOf))
 /** 送給 Google 試算表的報表資料（時間送 {$t}） */
@@ -3833,7 +4091,8 @@ function fetchPhotos(s, { quiet = true } = {}) {
     // 一次最多約 8 MB：沒拿完的再要
     for (let round = 0; round < 20 && keys.length; round++) {
       const r = await postSync({ action: 'photos', keys })
-      if (!r.ok || !Array.isArray(r.records)) throw new Error(Array.isArray(r.records) ? r.error : '雲端的程式碼是舊版，還不會傳照片：請擁有者更新程式碼（設定 → 複製試算表程式碼）')
+      // postSync 遇到雲端說不行會直接丟錯誤；這裡只剩「舊版程式碼不認得 photos」的情況
+      if (!Array.isArray(r.records)) throw new Error('雲端的程式碼是舊版，還不會傳照片：請擁有者更新程式碼（設定 → 複製試算表程式碼）')
       const back = new Set()
       for (const rec of r.records || []) {
         back.add(rec.k)
@@ -3928,30 +4187,50 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !syncReady() || syncing || state.moving || state.view === 'analyzing') return
   if (Date.now() - Number(ls.get(LS.lastSync, '0')) > 10000) syncNow().catch(() => {})
 })
-async function postSync(body) {
+/** 雲端（Apps Script）回的錯誤：data＝雲端的回覆（看得出是檢視者、被移除、次數到上限，還是網路問題） */
+class SyncError extends Error {
+  constructor(message, data = {}) {
+    super(message)
+    this.data = data
+  }
+}
+/** opt.signal：等太久或使用者取消時中斷（只是這邊不等了；雲端那邊收到的照樣會跑完） */
+async function postSync(body, opt = {}) {
   let res
   try {
     // dev：雲端用來跳過「這台自己傳的」；拿回照片時改用別的名字，連自己傳的也要（權限看 key，不看 dev）
-    res = await fetch(ls.get(LS.sheet), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, key: ls.get(LS.syncKey), dev: body.dev || deviceId() }) })
-  } catch {
-    throw new Error('連不到 Google（沒有網路？）')
+    res = await fetch(ls.get(LS.sheet), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, key: ls.get(LS.syncKey), dev: body.dev || deviceId() }), signal: opt.signal })
+  } catch (e) {
+    if (opt.signal?.aborted) throw new SyncError('已取消', { aborted: true })
+    throw new SyncError('連不到 Google（沒有網路？）', { network: true })
   }
+  const text = await res.text().catch(() => '')
   let data
   try {
-    data = await res.json()
+    data = JSON.parse(text)
   } catch {
-    throw new Error('Google 試算表沒有正確回覆：請確認貼的是新版程式碼，而且部署成「新版本」')
+    data = null
+  }
+  if (!data || typeof data !== 'object') {
+    // 不是 JSON：Apps Script 出錯時回的是網頁（例如 Google 的每日用量上限、執行太久），不是程式碼舊
+    const login = /accounts\.google\.com|ServiceLogin/i.test(res.url + text.slice(0, 2000))
+    const msg = login
+      ? 'Google 試算表要登入才能用：部署時「誰可以存取」要選「所有人」，再部署一次新版本'
+      : res.status === 404
+        ? '找不到這個 Google 試算表網址：請擁有者重新複製「網頁應用程式網址」'
+        : 'Google 試算表那邊暫時出錯（可能是 Google 每天的用量上限或執行太久），等一下再試'
+    throw new SyncError(msg, { html: true, httpStatus: res.status, login })
   }
   // 擁有者把資料搬到新的 Google 帳號：自動改用新網址（連結碼不用重貼）
   if (data.moved && !body.followed) {
     ls.set(LS.sheet, data.moved)
     toast('資料搬到新的位置了，已自動跟過去')
-    return postSync({ ...body, followed: true })
+    return postSync({ ...body, followed: true }, opt)
   }
   // 被移除權限：這台的公司資料自動清掉
   if (data.revoked === true && !data.ok) {
     await wipeLocal('這台已經被移除權限，App 裡的資料已清除')
-    throw new Error('這台已經被移除權限，App 裡的資料已清除')
+    throw new SyncError('這台已經被移除權限，App 裡的資料已清除', data)
   }
   // 雲端程式碼的版本（2＝會把照片分開存）：決定上傳用哪種格式、要不要提醒更新程式碼
   if (data.ver) ls.set(LS.serverVer, String(data.ver))
@@ -3979,7 +4258,7 @@ async function postSync(body) {
     if (ls.get(LS.counterId) && !data.roster.some((p) => p.id === ls.get(LS.counterId))) ls.set(LS.counterId, '')
     if (changed && ['home', 'review', 'settings', 'capture'].includes(state.view)) setTimeout(render, 0)
   }
-  if (!data.ok) throw new Error(data.error || '同步失敗')
+  if (!data.ok) throw new SyncError(data.error || '同步失敗', data)
   return data
 }
 /** 清除這台的資料（退出同步、被移除權限時） */
@@ -4034,11 +4313,18 @@ function mergeItemData(local, remote) {
   for (const k of new Set([...Object.keys(local.stock || {}), ...Object.keys(remote.stock || {})])) stock[k] = newerEntry(local.stock?.[k], remote.stock?.[k])
   const moves = [...new Map([...(local.moves || []), ...(remote.moves || [])].map((m) => [`${m.at}|${m.kind}|${m.qty}`, m])).values()].sort((a, b) => a.at - b.at)
   const book = moves.length ? bookFromMoves(moves) : base.book
+  // 正航料號：比較晚接上（或取消）的為準；都沒記時間（舊資料）就留有值的那份——
+  // 不然一台接上正航、另一台同時改了別的欄位，同步一合併，正航料號就不見了
+  const erpSrc = (local.erpAt || 0) === (remote.erpAt || 0) ? null : (local.erpAt || 0) > (remote.erpAt || 0) ? local : remote
+  const erpNo = erpSrc ? erpSrc.erpNo || '' : base.erpNo || local.erpNo || remote.erpNo || ''
   return {
     ...base,
     stock,
     moves,
     book,
+    erpNo,
+    erpAt: Math.max(local.erpAt || 0, remote.erpAt || 0) || undefined,
+    unit: base.unit || local.unit || remote.unit,
     aliases: [...new Set([...(local.aliases || []), ...(remote.aliases || [])])],
     equiv: [...new Set([...(local.equiv || []), ...(remote.equiv || [])])],
     recounts: mergeRecounts(local.recounts, remote.recounts),
@@ -4049,6 +4335,8 @@ function mergeItemData(local, remote) {
 const itemSig = (it) =>
   JSON.stringify([
     it.no,
+    it.erpNo || '',
+    it.unit || '',
     it.label,
     it.brand,
     it.model,
@@ -4169,6 +4457,11 @@ async function syncNow(report = () => {}) {
       // 雲端已經有比較新的（別台改的）→ 不要標成已同步；下面下載時會拿到新的版本再合併
       const skipped = new Set(r.skipped || [])
       for (const [i, m] of marks.entries()) if (!skipped.has(batch[i].k)) await m()
+      // 雲端沒收（只有擁有者、管理員能改的）：告訴使用者；被擋下的刪除，等一下從雲端把紀錄拿回來，跟大家一致
+      if (r.ignored?.length) {
+        if (r.ignoredMsg) toast(r.ignoredMsg)
+        if (r.ignored.some((k) => String(k).startsWith('session:'))) ls.set(LS.needRepair, '1')
+      }
       sent += batch.length
       onProgress(`上傳 ${sent}／${total}`)
       batch = []
@@ -4570,6 +4863,8 @@ function moveSheet() {
         btn.disabled = true
         state.moving = true // 搬家中：背景自動同步先停（網址會暫時切來切去）
         clearTimeout(syncTimer)
+        // 共用的 AI 金鑰不會跟著搬（金鑰不從雲端傳回手機）：搬完要提醒擁有者在新位置再放一次
+        const aiWas = ls.get(LS.aiShared) === '1'
         try {
           status('1／4 先把最新的資料下載到這台…')
           await syncNow()
@@ -4590,8 +4885,12 @@ function moveSheet() {
           ls.set(LS.sheet, oldUrl)
           await postSync({ action: 'moveTo', url: newUrl })
           ls.set(LS.sheet, newUrl)
-          status('搬家完成：大家的 App 下次同步會自動跟過來。舊的試算表和資料夾確認沒問題後可以刪掉。')
-          toast('搬家完成')
+          status(`搬家完成：大家的 App 下次同步會自動跟過來。舊的試算表和資料夾確認沒問題後可以刪掉。${aiWas ? '共用的 AI 金鑰沒有跟著搬：請到「設定 → Gemini API Key」再按一次「放到雲端」，同事才能繼續拍照辨識。' : ''}`)
+          if (aiWas) {
+            ls.set(LS.aiShared, '')
+            alert('搬家完成。\n\n共用的 AI 金鑰沒有跟著搬（金鑰不會從雲端傳回手機）。\n請到「設定 → Gemini API Key」再按一次「放到雲端」，同事才能繼續拍照辨識。')
+            render()
+          } else toast('搬家完成')
         } catch (e) {
           ls.set(LS.sheet, oldUrl)
           status(`沒有完成：${e?.message || String(e)}。資料還在原本的位置，可以再試一次。`)
@@ -4633,30 +4932,65 @@ function inRange(s, range) {
   return s.createdAt >= start.getTime()
 }
 
+/** 這次盤點有沒有結果（有辨識成功的照片或手動加的）：全部失敗的不算「盤過這一格」 */
+const hasResult = (s) => s.photos.some((p) => p.status === 'done') || !!(s.manual || []).length
+/**
+ * 同一格重盤，只算一次（跟品項庫一樣：重盤同一格以新的為準）：
+ * - 有「已完成」的：用最新一次已完成的；同一格比較舊的、還沒按完成的都不算
+ * - 都還沒按完成：用最新的那一次（還沒按完成的照舊算進來，畫面上會標示）
+ * - 沒填位置的：沒辦法知道是不是同一格，每一次各算一筆
+ * 只在你選的時間範圍裡比（今天／最近 7 天／全部）。回傳算進總表的那幾次。
+ */
+function countedSessions(sessions) {
+  const best = new Map()
+  for (const s of sessions) {
+    if (!s.place || !hasResult(s)) continue
+    const k = canon(s.place)
+    const cur = best.get(k)
+    const better = !cur || (!!s.linkedAt !== !!cur.linkedAt ? !!s.linkedAt : s.createdAt > cur.createdAt)
+    if (better) best.set(k, s)
+  }
+  return new Set(sessions.filter((s) => (!s.place ? hasResult(s) : best.get(canon(s.place)) === s)))
+}
 /**
  * 把好幾次盤點合起來：同一種商品（品名＋品牌＋型號＋尺寸都一樣）的數量加總，記下在哪些位置各幾件。
- * detail＝每次盤點、每一種一列（給 Excel 明細、Google 試算表用）。
+ * 同一格重盤只算最新的一次（見 countedSessions）。
+ * detail＝每次盤點、每一種一列（給 Excel 明細、Google 試算表用；原始紀錄，每一次都列）。
  */
 function reportOf(sessions) {
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
   const items = new Map()
   const detail = []
+  const counted = countedSessions(sessions)
   for (const s of [...sessions].sort((a, b) => a.createdAt - b.createdAt)) {
     const place = s.place || `未填位置（${fmtTime(s.createdAt)}）`
+    const use = counted.has(s)
     for (const g of groupsOf(s)) {
       const count = Number(g.count) || 0
       if (!count) continue
+      detail.push({ date: ymd(s.createdAt), time: hm(s.createdAt), place: s.place || '', label: g.label, brand: g.brand, model: g.model, spec: g.spec, count, boxes: g.manual ? '' : g.boxes, source: g.manual ? '手動' : g.edited ? 'AI（有修正）' : 'AI', id: s.id, by: byName(s) })
+      if (!use) continue
       const k = FIELDS.map((f) => norm(g[f])).join('|')
       if (!items.has(k)) items.set(k, { label: g.label, brand: g.brand, model: g.model, spec: g.spec, total: 0, places: new Map() })
       const it = items.get(k)
       it.total += count
       it.places.set(place, (it.places.get(place) || 0) + count)
-      detail.push({ date: ymd(s.createdAt), time: hm(s.createdAt), place: s.place || '', label: g.label, brand: g.brand, model: g.model, spec: g.spec, count, boxes: g.manual ? '' : g.boxes, source: g.manual ? '手動' : g.edited ? 'AI（有修正）' : 'AI', id: s.id, by: byName(s) })
     }
   }
   const list = [...items.values()].sort((a, b) => cmp(a.label, b.label) || cmp(a.spec, b.spec) || cmp(a.brand, b.brand))
-  const places = new Set(sessions.map((s) => s.place || s.id))
-  return { list, detail, total: list.reduce((n, it) => n + it.total, 0), places: places.size, sessions: sessions.length }
+  const places = new Set(sessions.map((s) => (s.place ? canon(s.place) : s.id)))
+  const used = sessions.filter((s) => counted.has(s))
+  return {
+    list,
+    detail,
+    counted,
+    total: list.reduce((n, it) => n + it.total, 0),
+    places: places.size,
+    sessions: sessions.length,
+    // 算進總表、但還沒按「完成」的（老闆要看得出來）；同一格重盤、被比較新的取代掉的
+    unfinished: used.filter((s) => !s.linkedAt).length,
+    replaced: sessions.filter((s) => s.place && hasResult(s) && !counted.has(s)).length,
+  }
 }
 const placesText = (it) => [...it.places].map(([p, n]) => `${p} ${n}`).join('、')
 
@@ -4668,7 +5002,7 @@ function reportXlsx(sessions, items = [], whoOf = () => '') {
     { name: '明細', rows: [['盤點日期', '時間', '盤點人', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源'], ...r.detail.map((d) => [d.date, d.time, d.by, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source])] },
     {
       name: '盤點清單',
-      rows: [['盤點時間', '盤點人', '位置', '照片張數', '種類', '件數', '辨識模型'], ...[...sessions].sort((a, b) => a.createdAt - b.createdAt).map((s) => [`${ymd(s.createdAt)} ${hm(s.createdAt)}`, byName(s), s.place || '', s.photos.length, groupsOf(s).length, totalQty(s), s.model || ''])],
+      rows: [['盤點時間', '盤點人', '位置', '照片張數', '種類', '件數', '辨識模型', '按完成了沒', '算進總表'], ...[...sessions].sort((a, b) => a.createdAt - b.createdAt).map((s) => [`${ymd(s.createdAt)} ${hm(s.createdAt)}`, byName(s), s.place || '', s.photos.length, groupsOf(s).length, totalQty(s), s.model || '', s.linkedAt ? '已完成' : '還沒按完成', r.counted.has(s) ? '算' : hasResult(s) ? '不算（同一格有比較新的）' : '不算（沒有辨識成功）'])],
     },
     ...(items.length ? itemSheets(items, whoOf) : []),
   ])
@@ -4739,6 +5073,11 @@ async function viewReport() {
             <div class="stat"><span class="stat-num">${r.places}</span><span class="stat-label">個位置</span></div>
             <div class="stat"><span class="stat-num">${r.sessions}</span><span class="stat-label">次盤點</span></div>
           </div>
+          ${
+            r.unfinished || r.replaced
+              ? `<div class="hint-card report-note" role="note"><div><b>總數怎麼算</b> <span class="badge new">新</span></div>${r.unfinished ? `<div><span class="badge low">含 ${r.unfinished} 次還沒按完成</span> 這幾次的數量已經算進上面，但還沒記進品項庫，可能還會改。</div>` : ''}${r.replaced ? `<div>同一格盤了好幾次的，只算一次（按過完成的優先，再看最新的）：${r.replaced} 次沒算進來。</div>` : ''}</div>`
+              : ''
+          }
           <div class="row-actions" style="margin:14px 0 6px">
             <button class="btn" style="flex:1" data-action="report-xlsx">下載 Excel</button>
             <button class="btn secondary" style="flex:1" data-action="report-copy">複製表格</button>
@@ -4751,7 +5090,7 @@ async function viewReport() {
           <p class="footnote">Excel 有：總表、明細（每次盤點每一種一列）、盤點清單，還有品項庫（實盤、帳面、差異）和叫貨清單。「複製表格」後，在 Google 試算表點一格貼上，就會自動分好欄。</p>
           <div class="group" style="margin-top:12px"><button class="row" data-go="quality"><span class="grow"><span class="title">AI 準不準</span><br><span class="meta">AI 原本數的跟你確認後的比：數量一個不差的比例、錯在哪</span></span>${chev}</button></div>
           <p class="section-title">品項（${r.list.length}）</p>
-          <div class="group">${r.list
+          <div class="group${r.list.length >= 2 ? ' cols-2' : ''}">${r.list
             .map(
               (it) => `<div class="row report-row"><span class="grow"><span class="title">${esc(it.label)}</span><br><span class="meta">${esc([it.spec, it.brand, it.model].filter(Boolean).join('・') || '沒有寫尺寸')}</span>${placesHtml([...it.places])}</span><span class="report-count">${it.total}</span></div>`,
             )
@@ -4804,7 +5143,7 @@ async function viewQuality() {
             <div class="stat ${tone(q.wrong ? q.caught / q.wrong : null, 0.9, 0.7)}"><span class="stat-num">${q.wrong ? pct(q.caught / q.wrong) : '—'}</span><span class="stat-label">錯的有標出來</span></div>
             <div class="stat"><span class="stat-num">${q.sessions}</span><span class="stat-label">次盤點・${q.n} 種</span></div>
           </div>
-          <p class="footnote" style="margin-top:8px">目標：數量一個不差 95% 以上（盤點實務的常見標準）；「錯的有標出來」越高，代表你只看「要確認」的就夠。</p>
+          <p class="footnote" style="margin-top:8px">目標：數量一個不差 95% 以上（盤點實務的常見標準）；「錯的有標出來」越高，代表你只看「要確認」的就夠。${q.unchecked ? `<br>${q.unchecked} 種還有「要確認」沒看過就按了完成：不知道 AI 對不對，沒有算進來。` : ''}</p>
           <p class="section-title">AI 錯在哪</p>
           <div class="group">
             <div class="row"><span class="grow"><span class="title">漏數</span><br><span class="meta">你補了框，或把數量加上去（例如疊在後面看不到）</span></span><span class="qty"><b>${q.missed}</b></span></div>
@@ -4980,8 +5319,12 @@ function exportSheet() {
 // ───────────────────────── 動作 ─────────────────────────
 async function runAnalysis(indices) {
   const s = state.session
+  // 「已刪掉第 N 張照片・復原」的提示拿掉：開始辨識後不能再把照片插回去（順序會對錯）
+  document.querySelector('.toast')?.remove()
+  // 佇列放照片本身（不是第幾張）：中途照片清單有變動，也不會辨識到別張
+  const photos = indices.map((i) => s.photos[i]).filter(Boolean)
   state.cancel = false
-  state.progress = { done: 0, total: indices.length, started: Date.now() }
+  state.progress = { done: 0, total: photos.length, started: Date.now() }
   keepAwake()
   go('analyzing')
   const timer = setInterval(() => {
@@ -4995,10 +5338,11 @@ async function runAnalysis(indices) {
     if (el) el.textContent = msg + (refs.length ? `（附 ${refs.length} 張樣品照）` : '')
   }
   // 多張照片一次送兩張（總時間差不多減半；再多會撞到免費額度每分鐘上限）
-  const queue = [...indices]
+  const queue = [...photos]
   const worker = async () => {
     while (queue.length && !state.cancel) {
-      const photo = s.photos[queue.shift()]
+      const photo = queue.shift()
+      if (!s.photos.includes(photo)) continue
       // 辨識過程（用哪個模型、花幾秒、哪一步失敗）記在照片上，結果頁可以展開看、截圖回報
       photo.trace = []
       const t0 = Date.now()
@@ -5013,7 +5357,7 @@ async function runAnalysis(indices) {
         s.model = r.model
         // 拍到儲位標籤：沒填位置就自動填（有建立過的儲位用那個寫法）
         if (r.location && !s.place) {
-          s.place = findLocation(r.location)?.code || r.location.toUpperCase()
+          s.place = findLocation(r.location)?.code || r.location.slice(0, 20).toUpperCase()
           s.placeAuto = true
           log(`看到儲位標籤 ${s.place}，自動填位置`)
         }
@@ -5034,17 +5378,16 @@ async function runAnalysis(indices) {
     toast(`看到儲位標籤，位置自動填「${placeLabel(s.place)}」`)
   }
   // 結果先給你看；相似品在背景再比一次，好了自動更新
-  if (!state.cancel) backgroundRefine(s, indices, refs)
+  if (!state.cancel) backgroundRefine(s, photos, refs)
 }
 
 /**
  * 第二輪在背景跑：同一類、但大小不一樣的框，切小圖並排再比一次。
  * 先記住要比的那幾個框（物件本身），等待時你刪了或改了框也不會對錯位置；你改過的框不會被蓋掉。
  */
-async function backgroundRefine(s, indices, refs) {
-  const jobs = indices
-    .map((i) => s.photos[i])
-    .filter((p) => p?.status === 'done')
+async function backgroundRefine(s, photos, refs) {
+  const jobs = photos
+    .filter((p) => p?.status === 'done' && s.photos.includes(p))
     .map((p) => ({ photo: p, objs: refineCandidates(p, p.objects, refs).map((oi) => p.objects[oi]) }))
     .filter((j) => j.objs.length >= 2)
   if (!jobs.length) return
@@ -5108,7 +5451,7 @@ $app.addEventListener('click', async (e) => {
   // 補框模式：點照片哪裡，就在那裡加一個框（大小跟這張照片的其他框差不多），再選它是哪一種
   const wrap = e.target.closest('[data-photo]')
   if (state.addMode && wrap && !e.target.closest('[data-action]')) return addBoxAt(wrap, e)
-  const t = e.target.closest('[data-go],[data-action],[data-open],[data-remove-photo],[data-preview-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-qrange],[data-recount-list],[data-pick],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example],[data-erp-cat],[data-erp-no]')
+  const t = e.target.closest('[data-go],[data-action],[data-open],[data-open-doubts],[data-remove-photo],[data-preview-photo],[data-photo-index],[data-focus],[data-step],[data-edit],[data-retry],[data-range],[data-qrange],[data-recount-list],[data-pick],[data-item-open],[data-item-filter],[data-place],[data-loc-edit],[data-stock-del],[data-safety],[data-example],[data-erp-cat],[data-erp-no]')
   if (!t) {
     // 點空白處取消標示（不捲回頂端）
     if (state.focus && !e.target.closest('.photo-wrap,.item')) {
@@ -5126,6 +5469,13 @@ $app.addEventListener('click', async (e) => {
   }
   if (d.go === 'quality' && state.view !== 'quality') state.qBack = ['settings', 'review'].includes(state.view) ? state.view : 'report'
   if (d.go) {
+    // 新盤點拍了照片、還沒按「開始辨識」就要離開：照片只在記憶體裡，離開就不見 → 先問
+    if (photosAtRisk() && d.go !== 'capture') {
+      const n = state.session.photos.length
+      if (!confirm(`還沒按「開始辨識」：要放棄這 ${n} 張照片嗎？\n\n放棄的話照片不會留下來。要留著就按「取消」，再按下面的「開始辨識」。`)) return
+      for (const p of state.session.photos) dropUrl(p.id)
+      state.session = null
+    }
     // 首頁「該叫貨」方塊：到品項，直接開「叫貨」那一頁
     if (d.itemFilter) state.itemFilter = d.itemFilter
     return go(d.go)
@@ -5154,13 +5504,20 @@ $app.addEventListener('click', async (e) => {
     else state.selected.add(d.pick)
     return render()
   }
-  if (d.open) {
-    state.session = await db.get(d.open)
+  if (d.open || d.openDoubts) {
+    const s = await db.get(d.open || d.openDoubts)
+    if (!s) return toast('找不到這次盤點（可能在別台被刪掉了）')
+    state.session = s
     delete state.session.edits // 第一版的舊欄位，不再使用
     await itemsAll()
     go('review', { photoIndex: 0 })
     // 照片還沒下載的：現在抓這一次的（畫面先出來，照片到了再補上）
     fetchPhotos(state.session).catch((e) => toast(`照片下載不了：${e.message}`))
+    // 首頁「要確認」方塊：直接跳出「這一個一樣嗎？」，不用再按一次
+    if (d.openDoubts && canEdit()) {
+      const list = doubtsOf(state.session)
+      if (list.length) quickSheet(list, 0, { doubt: true })
+    }
     return
   }
   if (d.itemOpen) {
@@ -5200,13 +5557,29 @@ $app.addEventListener('click', async (e) => {
     const s = state.session
     const i = Number(d.removePhoto)
     const [ph] = s.photos.splice(i, 1)
+    if (!ph) return
+    // 連續刪好幾張：按一次「復原」全部放回原來的位置
+    if (removedPhotos.s !== s) removedPhotos = { s, list: [], timer: 0 }
+    removedPhotos.list.push({ ph, i })
     render()
-    return toast(`已刪掉第 ${i + 1} 張照片`, {
+    // 復原時間過了還是沒放回去：放掉這些照片占的記憶體
+    clearTimeout(removedPhotos.timer)
+    const batch = removedPhotos
+    batch.timer = setTimeout(() => {
+      for (const r of batch.list) if (!s.photos.includes(r.ph)) dropUrl(r.ph.id)
+      if (removedPhotos === batch) removedPhotos = { s: null, list: [], timer: 0 }
+    }, 7000)
+    const n = batch.list.length
+    return toast(n > 1 ? `已刪掉 ${n} 張照片` : `已刪掉第 ${i + 1} 張照片`, {
       label: '復原',
       run: () => {
-        if (state.session !== s) return
-        s.photos.splice(Math.min(i, s.photos.length), 0, ph)
+        // 已經開始辨識（或換了一次盤點）就不能放回去：辨識是照順序排好的，插回去會對錯照片
+        if (state.session !== s || state.view !== 'capture' || s.photos.some((p) => p.status !== 'pending')) return toast('已經開始辨識了，沒辦法復原；要的話請重拍')
+        // 倒著放回去：每一張都回到刪掉前的位置
+        for (const r of [...batch.list].reverse()) s.photos.splice(Math.min(r.i, s.photos.length), 0, r.ph)
+        batch.list = []
         render()
+        toast(n > 1 ? `已放回 ${n} 張照片` : '已放回這張照片')
       },
     })
   }
@@ -5334,6 +5707,8 @@ $app.addEventListener('click', async (e) => {
     }
     case 'bulk-delete': {
       const list = (await db.all()).filter((s) => state.selected.has(s.id))
+      // 編輯者一次最多刪 20 次（雲端也是這樣擋：刪更多＝刪光大家的紀錄，要擁有者或管理員來）
+      if (!canManage() && syncReady() && list.length > 20) return toast(`一次最多刪 20 次盤點（你選了 ${list.length} 次）；要刪更多請找擁有者或管理員`)
       if (!list.length || !confirm(`刪除 ${list.length} 次盤點？照片和結果都會刪掉，記在品項庫的數量也會拿掉。刪掉的找不回來。`)) return
       t.disabled = true
       for (const s of list) {
@@ -5372,25 +5747,34 @@ $app.addEventListener('click', async (e) => {
     }
     case 'ai-share': {
       // 擁有者：把金鑰放到自己的 Apps Script（指令碼屬性），大家共用；同事手機上不會有金鑰
-      const v = (document.getElementById('apikey')?.value || ls.get(LS.key)).trim()
-      if (!v) return toast('先在上面貼上 API Key、按「儲存並測試」確認可以用，再放到雲端')
-      if (!confirm('把這把金鑰放到你的 Apps Script（雲端）給大家共用？\n同事的手機不會拿到金鑰；大家用的次數都算在這把金鑰上。')) return
+      // 只放「存好、測過」的金鑰：輸入框裡還沒按「儲存並測試」的不算（打錯一個字，大家都不能用）
+      const v = ls.get(LS.key).trim()
+      const typed = (document.getElementById('apikey')?.value || '').trim()
+      if (!v || (typed && typed !== v)) return toast('先在上面貼上 API Key、按「儲存並測試」確認可以用，再放到雲端')
+      if (!confirm('把這把金鑰放到你的 Apps Script（雲端）給大家共用？\n同事的手機不會拿到金鑰；大家用的次數都算在這把金鑰上（每人每天最多 300 次）。')) return
+      const done = busyBtn(t, '測試中…')
       try {
+        // 放上去之前再測一次（金鑰可能已經被停用）
+        try {
+          await fetchModels()
+        } catch (err) {
+          return toast(`這把金鑰現在不能用，沒有放到雲端：${err.message}`)
+        }
         const r = await postSync({ action: 'aiKey', aiKey: v })
         if (!('ai' in r)) return toast('雲端程式碼是舊版：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本')
-        if (!r.ok) return toast(r.error || '沒有放成功')
         ls.set(LS.aiShared, '1')
         toast('已放到雲端：同事打開 App 就能拍照辨識，不用再跟你要金鑰')
         return render()
       } catch (err) {
         return toast(err.message)
+      } finally {
+        done()
       }
     }
     case 'ai-unshare': {
       if (!confirm('停止共用金鑰？之後同事要拍照辨識，就得自己貼金鑰。')) return
       try {
-        const r = await postSync({ action: 'aiKey', aiKey: '' })
-        if (!r.ok) return toast(r.error || '沒有成功')
+        await postSync({ action: 'aiKey', aiKey: '' }) // 雲端說不行（例如不是擁有者）會丟錯誤，下面會顯示
         ls.set(LS.aiShared, '')
         toast('已停止共用金鑰')
         return render()
@@ -5398,7 +5782,10 @@ $app.addEventListener('click', async (e) => {
         return toast(err.message)
       }
     }
+    case 'lookup-no-ai':
+      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰拍標籤；打型號查詢可以用' : syncReady() ? '先請擁有者到「設定」把 AI 金鑰放到雲端，或到「設定」貼上自己的 Gemini API Key' : '先到「設定」貼上 Gemini API Key，才能拍標籤；打型號查詢不用')
     case 'pick-model':
+      if (!hasAi()) return toast(canEdit() ? '先在上面貼上 Gemini API Key' : '檢視者不能用公司共用的金鑰')
       try {
         const list = await fetchModels()
         const rows = (arr) => arr.map((m) => `<button class="row" data-action="use-model" data-model="${esc(m)}"><span class="grow">${esc(m)}</span>${m === ls.get(LS.model) ? `<span class="now-mark">${icon('check', 20)}</span>` : ''}</button>`).join('')
@@ -5407,11 +5794,13 @@ $app.addEventListener('click', async (e) => {
             ? `<p class="section-title">精細（Pro）</p><div class="group">${rows(proCache.slice(0, 3))}</div><p class="footnote">看得比較細，相似品比較分得開；但每張要等比較久，免費額度也比 Flash 少很多。Flash 分不出來、又不想存樣品照時再試。</p>`
             : ''
         }`
+        glueTails(document.getElementById('models'))
       } catch (err) {
         toast(err.message)
       }
       return
     case 'diagnose': {
+      if (!hasAi()) return toast(canEdit() ? '先在上面貼上 Gemini API Key' : '檢視者不能用公司共用的金鑰')
       const out = document.getElementById('diag')
       const lines = []
       const show = () => (out.innerHTML = `<div class="group">${lines.map((l) => `<div class="row"><span class="grow" style="font-size:14px;word-break:break-all">${l}</span></div>`).join('')}</div>`)
@@ -5521,6 +5910,9 @@ $app.addEventListener('click', async (e) => {
     case 'finish': {
       // 完成：記進品項庫；有設定 Google 試算表又開著自動同步，就順便寫進去（在背景送，不用等）
       const s = state.session
+      // 還有「要確認」沒看過：先提醒（按取消＝回去一個一個確認；按確定＝還是完成，沒確認的不算進「AI 準不準」）
+      const open = s ? doubtsOf(s).length : 0
+      if (open && !confirm(`還有 ${open} 個「要確認」沒看過。\n\n按「取消」回去一個一個確認；\n按「確定」還是完成（沒確認的不會算進「AI 準不準」）。`)) return quickSheet(doubtsOf(s), 0, { doubt: true })
       if (s) {
         // 記進品項庫要 1～2 秒：按鈕先變「記進品項庫中…」，不然像沒反應
         busyBtn(t, '記進品項庫中…')
@@ -5635,6 +6027,8 @@ $app.addEventListener('click', async (e) => {
       toast('已刪掉樣品照')
       return render()
     case 'clear-all':
+      // 有同步時會刪掉每一台的紀錄：只給擁有者、管理員（雲端也擋）
+      if (!canManage()) return toast('只有擁有者或管理員可以刪除全部盤點紀錄')
       if (!confirm(`確定刪除全部盤點紀錄（含照片）？刪了救不回來。\n品項庫、各位置的數量、儲位會保留。${syncReady() ? '\n有開多台同步：其他裝置的盤點紀錄也會一起刪掉。' : ''}`)) return
       for (const s of await db.all()) tombstone(`session:${s.id}`)
       await db.clear()
@@ -5649,8 +6043,10 @@ $app.addEventListener('click', async (e) => {
       document.body.classList.toggle('side-collapsed', sideCollapsed())
       return render()
     case 'erp-import':
+      if (!canManage()) return toast('匯入正航產品表會改大家的帳面數：只有擁有者或管理員可以匯入')
       return erpImportSheet()
     case 'erp-cats':
+      if (!canManage()) return toast('類別名稱由擁有者或管理員設定')
       return erpCatsSheet()
     case 'erp-stocked':
       state.erp.stocked = !state.erp.stocked
@@ -5711,7 +6107,7 @@ $app.addEventListener('click', async (e) => {
       const me = currentCounter() || { id: ls.get(LS.memberId) || '', name: ls.get(LS.memberName) || '' }
       const same = me.id && me.id === rc.first.byId && roster().length > 1
       // 複盤一律看不到第一次的數字（不然會照著數）
-      return numberSheet({ title: `${rc.place ? placeLabel(rc.place) : '這一格'}有幾個？`, sub: `${esc(itemTitle(it))}：到那一格自己數一次。${same ? '<br><b>這一格是你第一次盤的，最好請另一個人複盤。</b>' : ''}`, value: '', action: '記下複盤數字' }, async (n) => {
+      return numberSheet({ title: `${rc.place ? placeLabel(rc.place) : '這一格'} 有幾個？`, titleHtml: `${rc.place ? placeHtml(rc.place, { name: false }) : '這一格'} 有幾個？`, sub: `${esc(itemTitle(it))}：到那一格自己數一次。${same ? '<br><b>這一格是你第一次盤的，最好請另一個人複盤。</b>' : ''}`, value: '', action: '記下複盤數字' }, async (n) => {
         const now = Date.now()
         const earlier = [rc.first.count, ...rc.counts.map((c) => c.count)]
         rc.counts.push({ count: n, by: me.name, byId: me.id, at: now })
@@ -5798,7 +6194,7 @@ $app.addEventListener('click', async (e) => {
       // 「叫貨」是空的：直接選一個品項 → 填「剩幾個就要叫貨」
       return pickItem('設定哪一種？', '選一個品項，再填「剩幾個就要叫貨」。之後可以一個一個設。', [], async (it) => {
         if (!it) return
-        numberSheet({ title: '剩幾個就要叫貨？', sub: `${esc(itemTitle(it))}：現在大概剩 ${expected(it)} 個。填 3 的意思是：剩 3 個以下就提醒叫貨。`, value: it.safety ?? 3, action: '儲存' }, async (n) => {
+        numberSheet({ title: '剩幾個就要叫貨？', sub: `${esc(itemTitle(it))}：${blindMe() ? `實盤 ${onHand(it)} 個` : esc(orderWhy(it))}。填 3 的意思是：剩 3 個以下就提醒叫貨（實盤、帳面看比較少的）。`, value: it.safety ?? 3, action: '儲存' }, async (n) => {
           it.safety = n
           await putItem(it)
           toast(needsOrder(it) ? `已設定：${itemTitle(it)} 現在就該叫貨了` : `已設定：剩 ${n} 個以下會提醒叫貨`)
@@ -5849,13 +6245,18 @@ function bindInputs() {
     state.erp.q = e.target.value
     state.erp.more = 0
     const list = document.getElementById('erp-list')
-    if (list) list.innerHTML = erpListHtml(await erpGet(), await itemsAll())
+    if (list) {
+      list.innerHTML = erpListHtml(await erpGet(), await itemsAll())
+      glueTails(list)
+    }
   })
   document.getElementById('lookup-q')?.addEventListener('input', (e) => {
     // 只更新結果區，輸入框不重畫（打字、選字不會被打斷）
     if (state.lookup.read?.url) URL.revokeObjectURL(state.lookup.read.url)
     state.lookup = { q: e.target.value.trim(), read: null, busy: false }
-    document.getElementById('lookup-results').innerHTML = lookupResults()
+    const box = document.getElementById('lookup-results')
+    box.innerHTML = lookupResults()
+    glueTails(box)
   })
   document.getElementById('label-cam')?.addEventListener('change', async (e) => {
     const file = e.target.files[0]
@@ -5892,12 +6293,56 @@ function bindInputs() {
 
 // 離線也能打開（服務工作程式快取 App 本身；AI 辨識還是要網路）
 // updateViaCache: 'none'＝檢查新版時不用手機暫存；回到 App 時也檢查一次（新版裝好會自動重新整理）
+// 新版裝好了：不要馬上重新整理（拍了照片還沒辨識的話，照片只在記憶體裡，重新整理就全部不見）→ 等到安全的時候才重新整理
+const photosAtRisk = () => state.view === 'capture' && !!state.session?.photos.length
+const safeToReload = () =>
+  // 只在清單類的頁面重新整理（盤點結果、品項頁、拍照頁等你換頁再說）
+  ['home', 'items', 'lookup', 'settings', 'report', 'catalog', 'locations', 'quality'].includes(state.view) &&
+  !photosAtRisk() &&
+  !state.busy &&
+  !state.refining &&
+  !state.lookup?.busy &&
+  !state.moving &&
+  !syncing &&
+  !document.querySelector('.sheet-backdrop') &&
+  !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)
+// 拍了照片還沒辨識就要關掉／重新整理分頁：瀏覽器會先問一下（iPhone 的 App 模式不一定會問）
+addEventListener('beforeunload', (e) => {
+  if (!photosAtRisk()) return
+  e.preventDefault()
+  e.returnValue = ''
+})
+function tryReload() {
+  if (!updateReady) return
+  if (safeToReload()) return location.reload()
+  if (!updateTold) {
+    updateTold = true
+    toast('新版已經下載好：這一頁做完、換頁時會自動更新')
+  }
+}
 if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type !== 'sw-updated') return
+    // 回覆服務工作程式「我自己會重新整理」（舊版 App 不會回，服務工作程式就直接幫它重新整理）
+    e.ports?.[0]?.postMessage({ type: 'sw-ack' })
+    updateReady = true
+    tryReload()
+  })
+  // 保險：沒收到通知、但已經換成新的服務工作程式（不是第一次安裝）→ 一樣等安全的時候重新整理
+  const hadController = !!navigator.serviceWorker.controller
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) return
+    updateReady = true
+    tryReload()
+  })
   navigator.serviceWorker
     .register('sw.js', { updateViaCache: 'none' })
     .then((reg) => {
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && !state.busy && state.view !== 'analyzing') reg.update().catch(() => {})
+        if (document.visibilityState !== 'visible') return
+        // 拍照拍到一半（照片還沒辨識）不要檢查更新
+        if (!state.busy && state.view !== 'analyzing' && !photosAtRisk()) reg.update().catch(() => {})
+        tryReload()
       })
     })
     .catch(() => {})

@@ -6,3 +6,10 @@
 *backup*.json
 .env
 ~$*
+# 照片、PDF、表格匯出、壓縮檔也不要傳上去（App 的圖示是 png，不受影響）
+*.jpg
+*.jpeg
+*.heic
+*.pdf
+*.tsv
+*.zip
