@@ -1,0 +1,8 @@
+# 公司資料（庫存表、正航匯出、備份）只能放在自己的電腦和 Google 帳號，不能傳到公開的 GitHub
+*.xls
+*.xlsx
+*.csv
+*備份*.json
+*backup*.json
+.env
+~$*

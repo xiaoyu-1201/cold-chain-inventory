@@ -74,7 +74,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.3.1（10/7・產品總表認得正航的類別名稱、側邊欄名稱不再被切掉）'
+const VERSION = '4.4.0（10/9・資安加強：金鑰不放網址、只准連 Google）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -485,7 +485,8 @@ async function call(path, opts = {}, timeoutMs = 0) {
   outer?.addEventListener('abort', onOuter)
   try {
     if (outer?.aborted) throw new Error('aborted')
-    res = await fetch(`${API}/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`, { ...opts, signal: ctrl.signal })
+    // 金鑰放在標頭（x-goog-api-key），不放網址：網址可能被記錄在紀錄檔或截圖裡
+    res = await fetch(`${API}/${path}`, { ...opts, headers: { ...(opts.headers || {}), 'x-goog-api-key': key }, signal: ctrl.signal })
   } catch {
     if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
     if (ctrl.signal.aborted) throw new ApiError(`等了 ${Math.round(timeoutMs / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${timeoutMs / 1000}s`)
