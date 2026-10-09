@@ -1,22 +1,38 @@
-/* 拍照盤點：Apple（iOS）設計語言——系統字、分組圓角清單、藍色＝可點、底部主要按鈕 */
+/*
+ * 聖佳智慧庫存：4.6「貨架標籤」外觀（10/09 使用者選定 A）
+ * - 主角：店裡貼的儲位標籤（黃底黑字、粗黑框、等寬粗字），凡是位置都用 .loc-tag
+ * - 主色：公司招牌藍 #1f44a8（主要按鈕、可以點的東西）；底色 iOS 淺灰＋白卡片
+ * - 不用漸層、卡片不加陰影（用底色分層）；只有「新盤點」大按鈕有一點陰影
+ * 顏色：--tint＝可以點的字和圖示；--brand＝按鈕底色（深色模式兩個不一樣：字要亮、底要深）
+ */
 :root {
   --bg: #f2f2f7;
   --card: #ffffff;
-  --card-2: #f7f7fa;
-  --text: #111114;
-  --text-2: #6b6b73;
-  --text-3: #a1a1aa;
-  --line: rgba(60, 60, 67, 0.14);
-  --tint: #0a84ff;
-  --tint-soft: rgba(10, 132, 255, 0.12);
-  --green: #30a46c;
-  --green-soft: rgba(48, 164, 108, 0.14);
-  --amber: #c27c0e;
+  --card-2: #ececf1;
+  --text: #15181f;
+  --text-2: #5f6370;
+  --text-3: #858995;
+  --line: rgba(60, 60, 67, 0.16);
+  --tint: #1f44a8;
+  --tint-soft: rgba(31, 68, 168, 0.1);
+  --brand: #1f44a8;
+  --brand-press: #183886;
+  --on-brand: #ffffff;
+  --green: #1d8348;
+  --green-soft: rgba(29, 131, 72, 0.12);
+  --amber: #a35f00;
   --amber-soft: rgba(255, 159, 10, 0.16);
-  --red: #e5484d;
-  --red-soft: rgba(229, 72, 77, 0.12);
-  --shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.25);
+  --amber-dot: #ff9f0a;
+  --red: #cf3238;
+  --red-soft: rgba(207, 50, 56, 0.1);
+  /* 儲位標籤：店裡真的貼的那種 */
+  --tag-bg: #ffd60a;
+  --tag-ink: #2b2400;
+  --tag-line: #2b2400;
+  --shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.28);
   --radius: 16px;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Roboto Mono', monospace;
+  --rounded: ui-rounded, 'SF Pro Rounded', -apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', system-ui, sans-serif;
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
   color-scheme: light dark;
@@ -26,19 +42,22 @@
     --bg: #000000;
     --card: #1c1c1e;
     --card-2: #2c2c2e;
-    --text: #f5f5f7;
-    --text-2: #a1a1aa;
-    --text-3: #6b6b73;
-    --line: rgba(84, 84, 88, 0.55);
-    --tint: #0a84ff;
-    --tint-soft: rgba(10, 132, 255, 0.22);
-    --green: #3dd68c;
-    --green-soft: rgba(61, 214, 140, 0.18);
-    --amber: #ffb224;
-    --amber-soft: rgba(255, 178, 36, 0.18);
-    --red: #ff6369;
-    --red-soft: rgba(255, 99, 105, 0.18);
-    --shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.8);
+    --text: #f2f2f7;
+    --text-2: #a4a7b2;
+    --text-3: #70737e;
+    --line: rgba(84, 84, 88, 0.6);
+    --tint: #8fa9ff;
+    --tint-soft: rgba(143, 169, 255, 0.16);
+    --brand: #2d55c8;
+    --brand-press: #2448ad;
+    --green: #4cd787;
+    --green-soft: rgba(76, 215, 135, 0.16);
+    --amber: #ffb340;
+    --amber-soft: rgba(255, 179, 64, 0.18);
+    --red: #ff6b70;
+    --red-soft: rgba(255, 107, 112, 0.16);
+    --tag-line: #000000;
+    --shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.85);
   }
 }
 
@@ -98,6 +117,7 @@ img {
   background: none;
   color: var(--tint);
   font-size: 17px;
+  min-height: 44px;
   padding: 8px 4px;
   margin-left: -4px;
 }
@@ -115,13 +135,12 @@ img {
 }
 
 /* 分組清單（Inset Grouped） */
+/* 區塊小標：不轉大寫（「Gemini API Key」「Google 試算表」照原本寫法） */
 .section-title {
   margin: 22px 16px 6px;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-2);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
 }
 .group {
   background: var(--card);
@@ -154,22 +173,32 @@ button.row:active {
 button.row[aria-current='true'] {
   background: var(--tint-soft);
 }
-/* ── 首頁「總表與匯出」卡片 ── */
+/* ── 品項頁「產品總表」卡片（白卡、不加陰影、不用漸層） ── */
 .report-card {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 12px;
   margin: 8px 0 4px;
-  padding: 16px;
+  padding: 14px 16px;
   border: 0;
-  border-radius: 20px;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--tint) 16%, var(--card)), var(--card));
-  box-shadow: var(--shadow);
+  border-radius: var(--radius);
+  background: var(--card);
   color: var(--text);
   text-align: left;
   font: inherit;
   cursor: pointer;
+}
+.report-card:active {
+  background: var(--card-2);
+}
+/* 清單左邊的單色線條圖示（不是彩色方塊：彩色方塊只給分類用） */
+.row-ico {
+  flex: none;
+  width: 28px;
+  display: grid;
+  place-items: center;
+  color: var(--tint);
 }
 .report-card .grow {
   flex: 1;
@@ -180,15 +209,16 @@ button.row[aria-current='true'] {
 }
 .report-card-kicker {
   color: var(--tint);
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
 }
 .report-card-nums {
-  font-size: 18px;
+  font-size: 17px;
 }
 .report-card-nums b {
-  font-size: 26px;
-  font-weight: 800;
+  font-size: 22px;
+  font-weight: 700;
+  font-family: var(--rounded);
   font-variant-numeric: tabular-nums;
 }
 .report-card .meta {
@@ -205,7 +235,8 @@ button.row[aria-current='true'] {
 }
 .seg button {
   flex: 1;
-  padding: 8px 0;
+  min-height: 44px;
+  padding: 6px 4px;
   border: 0;
   border-radius: 9px;
   background: transparent;
@@ -217,37 +248,46 @@ button.row[aria-current='true'] {
 }
 .seg button[aria-selected='true'] {
   background: var(--card);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  color: var(--tint);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
+/* 大數字方塊（總表、AI 準不準）：跟首頁的 .tile 同一種長相——大數字在上、小標籤在下、靠左 */
 .stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
 }
 .stat {
-  padding: 12px 10px;
-  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 88px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
   background: var(--card);
-  box-shadow: var(--shadow);
-  text-align: center;
+  text-align: left;
 }
 .stat-num {
   display: block;
-  font-size: 28px;
-  font-weight: 800;
-  line-height: 1.1;
+  font-family: var(--rounded);
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
 .stat-label {
   color: var(--text-2);
   font-size: 14px;
+  font-weight: 600;
 }
 .report-row .report-count {
   flex: none;
   min-width: 48px;
   text-align: right;
+  font-family: var(--rounded);
   font-size: 24px;
-  font-weight: 800;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 .steps {
@@ -256,10 +296,35 @@ button.row[aria-current='true'] {
   color: var(--text-2);
 }
 .steps summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
   color: var(--tint);
   font-weight: 600;
   cursor: pointer;
   padding: 4px 0;
+  list-style: none;
+}
+.steps summary::-webkit-details-marker,
+.trace summary::-webkit-details-marker {
+  display: none;
+}
+/* 收合的小箭頭：自己畫（跟清單的箭頭同一種線條），打開時轉下來 */
+.steps summary::before,
+.trace summary::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 10px 0 4px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.2s ease;
+}
+.steps[open] > summary::before,
+.trace[open] > summary::before {
+  transform: rotate(45deg);
 }
 .steps ol {
   padding-left: 20px;
@@ -270,9 +335,8 @@ button.row[aria-current='true'] {
 .summary {
   margin: 12px 0 16px;
   padding: 16px;
-  border-radius: 20px;
+  border-radius: 18px;
   background: var(--card);
-  box-shadow: var(--shadow);
 }
 .sum-nums {
   display: flex;
@@ -281,9 +345,10 @@ button.row[aria-current='true'] {
   gap: 12px;
 }
 .sum-big {
+  font-family: var(--rounded);
   font-size: 52px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
+  font-weight: 700;
+  letter-spacing: -0.03em;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
@@ -319,6 +384,11 @@ button.row[aria-current='true'] {
 .sum-doubt.tip {
   margin: 0 0 10px;
 }
+.sum-doubt .grow,
+.sum-eval .grow {
+  flex: 1;
+  min-width: 0;
+}
 .sum-doubt .meta {
   color: var(--text-2);
   font-size: 14px;
@@ -331,12 +401,15 @@ button.row[aria-current='true'] {
   display: grid;
   place-items: center;
   background: #ff9f0a;
-  color: #fff;
+  color: #2b1d00;
   font-weight: 800;
 }
 .sum-ok {
   margin-top: 12px;
-  color: #30a46c;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--green);
   font-weight: 600;
 }
 /* 要確認的框：橘色虛線＋右上角「?」 */
@@ -353,7 +426,7 @@ button.row[aria-current='true'] {
   height: 20px;
   border-radius: 50%;
   background: #ff9f0a;
-  color: #fff;
+  color: #2b1d00;
   font-size: 13px;
   font-weight: 800;
   display: grid;
@@ -372,8 +445,10 @@ button.row[aria-current='true'] {
   position: absolute;
   right: 10px;
   bottom: 10px;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
   border: 0;
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.55);
@@ -433,6 +508,7 @@ button.row[aria-current='true'] {
 }
 .viewer-bar .btn.secondary {
   min-width: 44px;
+  padding: 0 10px;
   background: rgba(255, 255, 255, 0.18);
   color: #fff;
   font-size: 20px;
@@ -478,10 +554,14 @@ body.no-scroll {
   line-height: 1.5;
 }
 .trace summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
   cursor: pointer;
   color: var(--tint);
   font-size: 14px;
   padding: 4px 0;
+  list-style: none;
 }
 .row .grow {
   flex: 1;
@@ -513,19 +593,27 @@ body.no-scroll {
   min-height: 50px;
   padding: 0 20px;
   border: 0;
-  border-radius: 14px;
+  border-radius: 12px;
   font-weight: 600;
   font-size: 17px;
-  background: var(--tint);
-  color: #fff;
-  transition: transform 0.12s ease, opacity 0.12s ease;
+  background: var(--brand);
+  color: var(--on-brand);
+  transition: transform 0.12s ease, opacity 0.12s ease, background-color 0.12s ease;
 }
 .btn:active {
   transform: scale(0.98);
+  background: var(--brand-press);
+}
+.btn .ico {
+  flex: none;
+  margin-left: -2px;
 }
 .btn[disabled] {
   opacity: 0.4;
   pointer-events: none;
+}
+.btn[aria-busy='true'] {
+  opacity: 0.75;
 }
 .btn.secondary {
   background: var(--tint-soft);
@@ -539,25 +627,35 @@ body.no-scroll {
   background: var(--red-soft);
   color: var(--red);
 }
+.btn.secondary:active,
+.btn.plain:active,
+.btn.danger:active {
+  background: color-mix(in srgb, currentColor 16%, var(--card));
+}
 .btn.block {
   width: 100%;
 }
+/* 小按鈕也至少 44px 高（手指點得到） */
 .btn.small {
-  min-height: 36px;
-  padding: 0 14px;
+  min-height: 44px;
+  padding: 0 16px;
   border-radius: 999px;
   font-size: 15px;
+  gap: 6px;
 }
 /* 首頁左上的同步狀態：雲朵用 SVG（iPhone 的 ☁︎ 字會畫得很小） */
 .sync-pill {
   gap: 6px;
   padding-left: 12px;
 }
-.sync-pill .cloud {
+.sync-pill .ico {
   flex: none;
 }
-.sync-pill.syncing .cloud {
+.sync-pill.syncing .ico {
   animation: cloud-pulse 1.2s ease-in-out infinite;
+}
+.sync-pill.error {
+  color: var(--red);
 }
 @keyframes cloud-pulse {
   50% {
@@ -565,7 +663,7 @@ body.no-scroll {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sync-pill.syncing .cloud {
+  .sync-pill.syncing .ico {
     animation: none;
   }
 }
@@ -601,7 +699,13 @@ body.no-scroll {
   gap: 10px;
 }
 .toolbar .btn {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  padding-inline: 12px;
+}
+/* 主要動作（藍底）寬一點，「完成・記進品項庫」在手機上才不會斷成兩行 */
+.toolbar .btn:not(.secondary):not(.plain):not(.danger) {
+  flex-grow: 1.8;
 }
 
 /* 輸入 */
@@ -634,7 +738,6 @@ textarea.field {
   border-radius: var(--radius);
   overflow: hidden;
   background: var(--card-2);
-  box-shadow: var(--shadow);
 }
 .photo-wrap img {
   width: 100%;
@@ -698,6 +801,58 @@ textarea.field {
   height: 100%;
   object-fit: cover;
 }
+/* 新盤點的縮圖：點縮圖＝放大看；右上角 × 才是刪除（按的範圍 44px） */
+.cap-strip {
+  gap: 10px;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+}
+.cap-thumb {
+  position: relative;
+  flex: none;
+  width: 84px;
+  height: 84px;
+}
+.photo-strip .cap-view {
+  width: 84px;
+  height: 84px;
+  border-radius: 12px;
+}
+.photo-strip .cap-del {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 44px;
+  height: 44px;
+  padding: 4px;
+  border: 0;
+  border-radius: 0 12px 0 0;
+  background: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  overflow: visible;
+}
+.cap-del span {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
+}
+.cap-del:active span {
+  background: var(--red);
+}
+.cap-preview {
+  width: 100%;
+  max-height: 60dvh;
+  object-fit: contain;
+  border-radius: 12px;
+  background: var(--card-2);
+}
 
 /* 結果清單的一列 */
 .item {
@@ -718,18 +873,48 @@ textarea.field {
 .item.on {
   background: var(--tint-soft);
 }
+/* 每一種品項的顏色方塊（跟照片上的框同色）＝分類，所以可以用彩色方塊 */
 .swatch {
   flex: none;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: 8px;
   background: var(--c);
   color: #fff;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   display: grid;
   place-items: center;
   border: 0;
+  position: relative;
+}
+/* 方塊看起來 28px，手指點的範圍擴大到 44px */
+button.swatch::after {
+  content: '';
+  position: absolute;
+  inset: -8px;
+}
+/* 「新增一種」「加一個可以互換的」：灰色虛線圓圈＋（不是分類，不用彩色方塊） */
+.add-dot {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1.5px dashed var(--text-3);
+  color: var(--tint);
+  display: grid;
+  place-items: center;
+}
+.now-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--tint);
+}
+.muted.now-mark {
+  color: var(--text-2);
 }
 .item .name {
   font-weight: 600;
@@ -748,9 +933,10 @@ textarea.field {
   background: var(--card-2);
 }
 .pencil {
+  display: inline-flex;
+  vertical-align: -2px;
   margin-left: 6px;
   color: var(--tint);
-  font-size: 15px;
 }
 .sheet-title {
   margin: 4px 0 4px;
@@ -798,8 +984,19 @@ textarea.field {
   background: var(--tint-soft);
   color: var(--tint);
 }
+/* 這次新增的東西（使用者要看得出哪些是新的） */
+.badge.new {
+  background: #1d8348;
+  color: #ffffff;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.section-title .badge {
+  margin-left: 4px;
+  vertical-align: 1px;
+}
 
-/* 數量步進器（－ 數字 ＋） */
+/* 數量步進器（－ 數字 ＋）：按鈕 44px */
 .stepper {
   display: inline-flex;
   align-items: center;
@@ -808,19 +1005,26 @@ textarea.field {
   border-radius: 999px;
 }
 .stepper button {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
   border: 0;
+  border-radius: 999px;
   background: none;
   color: var(--tint);
   font-size: 22px;
   line-height: 1;
 }
+.stepper button:active {
+  background: var(--tint-soft);
+}
 .stepper input {
-  width: 46px;
+  width: 40px;
   border: 0;
   background: none;
   text-align: center;
+  font-family: var(--rounded);
   font-weight: 700;
   font-size: 18px;
   font-variant-numeric: tabular-nums;
@@ -964,8 +1168,8 @@ body.read-only .view-only {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: var(--tint);
-  color: #fff;
+  background: var(--brand);
+  color: var(--on-brand);
   font-weight: 700;
   font-size: 16px;
 }
@@ -994,12 +1198,13 @@ body.read-only .view-only {
 }
 .avatar.lock {
   background: var(--card-2);
+  color: var(--text-2);
   font-size: 16px;
 }
 .role-select,
 .role-pick {
   flex: none;
-  min-height: 40px;
+  min-height: 44px;
   padding: 6px 30px 6px 12px;
   border: 0;
   border-radius: 10px;
@@ -1056,11 +1261,12 @@ body.read-only .view-only {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1px;
+  justify-content: center;
+  gap: 2px;
   min-height: 50px;
   border: 0;
   background: none;
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1071,33 +1277,47 @@ body.read-only .view-only {
   transform: scale(0.94);
 }
 
-/* 首頁「新盤點」、查型號「拍標籤」：大按鈕卡片 */
+/* 首頁「新盤點」、查型號「拍標籤」：畫面的主角——招牌藍大按鈕＋白色圓形相機（像快門） */
 .hero-btn {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin: 4px 0 12px;
-  padding: 16px;
+  gap: 16px;
+  min-height: 96px;
+  margin: 6px 0 16px;
+  padding: 18px 18px 18px 20px;
   border: 0;
   border-radius: 20px;
-  background: var(--tint);
-  color: #fff;
+  background: var(--brand);
+  color: var(--on-brand);
   text-align: left;
   font: inherit;
   cursor: pointer;
-  box-shadow: 0 10px 24px -12px color-mix(in srgb, var(--tint) 70%, transparent);
-  transition: transform 0.12s ease;
+  box-shadow:
+    0 1px 2px rgba(15, 30, 80, 0.2),
+    0 10px 24px -14px rgba(31, 68, 168, 0.75);
+  transition: transform 0.12s ease, background-color 0.12s ease;
 }
 .hero-btn:active {
   transform: scale(0.98);
+  background: var(--brand-press);
 }
 .hero-btn b {
-  font-size: 19px;
+  display: block;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
 }
 .hero-btn .meta {
-  font-size: 14px;
-  opacity: 0.85;
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.88);
+}
+.hero-btn .meta .loc-tag {
+  vertical-align: 1px;
 }
 .hero-btn .grow {
   flex: 1;
@@ -1112,20 +1332,21 @@ body.read-only .view-only {
 }
 .hero-icon {
   flex: none;
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
   display: grid;
   place-items: center;
-  background: rgba(255, 255, 255, 0.2);
-  font-size: 24px;
+  background: #ffffff;
+  color: #1f44a8;
+  box-shadow: inset 0 0 0 3px rgba(31, 68, 168, 0.12);
 }
 .spinner.small {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-width: 3px;
-  border-color: rgba(255, 255, 255, 0.35);
-  border-top-color: #fff;
+  border-color: rgba(31, 68, 168, 0.2);
+  border-top-color: #1f44a8;
 }
 
 /* 選擇用的小膠囊（儲位、範例型號、快速數字） */
@@ -1137,9 +1358,9 @@ body.read-only .view-only {
 }
 .chip {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-  min-height: 40px;
+  min-height: 44px;
   padding: 8px 14px;
   border: 0;
   border-radius: 999px;
@@ -1147,6 +1368,18 @@ body.read-only .view-only {
   color: var(--text);
   font-weight: 600;
   font-size: 15px;
+}
+.chip .ico {
+  flex: none;
+  margin-left: -4px;
+}
+/* 選儲位的膠囊：裡面是黃色標籤，方角膠囊比較像貨架 */
+.loc-chips .chip {
+  border-radius: 12px;
+  padding: 8px 12px 8px 10px;
+}
+.chip[aria-pressed='true'] .loc-tag {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
 }
 .chip small {
   color: var(--text-2);
@@ -1161,8 +1394,8 @@ body.read-only .view-only {
   color: var(--tint);
 }
 .chip[aria-pressed='true'] {
-  background: var(--tint);
-  color: #fff;
+  background: var(--brand);
+  color: var(--on-brand);
 }
 .chip[aria-pressed='true'] small {
   color: rgba(255, 255, 255, 0.85);
@@ -1181,12 +1414,16 @@ body.read-only .view-only {
   font-weight: 600;
 }
 .icon-btn.small {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   font-size: 18px;
-  background: var(--card-2);
+  background: none;
   color: var(--text-2);
   flex: none;
+  margin-right: -10px;
+}
+.icon-btn.small:active {
+  background: var(--card-2);
 }
 .field.search {
   margin: 0 0 4px;
@@ -1216,8 +1453,9 @@ body.read-only .view-only {
   min-width: 44px;
 }
 .qty b {
+  font-family: var(--rounded);
   font-size: 22px;
-  font-weight: 800;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.15;
 }
@@ -1260,9 +1498,11 @@ body.read-only .view-only {
   font-weight: 600;
 }
 .stock-big {
+  font-family: var(--rounded);
   font-size: 40px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.1;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
 .stock-big.neg {
@@ -1286,16 +1526,140 @@ a.row {
   color: var(--tint);
   text-decoration: none;
 }
-.loc-code {
+/* ───────── 儲位標籤（4.6 的主角）：店裡貼在貨架上的黃底黑字小標籤 ───────── */
+.loc-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
-  min-width: 64px;
-  padding: 4px 10px;
-  border-radius: 10px;
-  background: var(--card-2);
+  max-width: 100%;
+  padding: 1px 7px;
+  border: 1.5px solid var(--tag-line);
+  border-radius: 4px;
+  background: var(--tag-bg);
+  color: var(--tag-ink);
+  font-family: var(--mono);
+  font-size: 15px;
   font-weight: 800;
-  font-size: 19px;
-  text-align: center;
+  line-height: 1.35;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-variant-numeric: tabular-nums;
+}
+.loc-tag.sm {
+  padding: 0 5px;
+  font-size: 13px;
+  border-radius: 3px;
+}
+.loc-tag.lg {
+  min-width: 76px;
+  padding: 4px 10px;
+  font-size: 19px;
+  border-width: 2px;
+  border-radius: 5px;
+}
+.loc-tag.xl {
+  padding: 3px 12px;
+  font-size: 30px;
+  border-width: 2.5px;
+  border-radius: 6px;
+  letter-spacing: 0.01em;
+}
+/* 沒填位置：灰色虛線框（看得出「這裡應該有一張標籤」） */
+.loc-tag.none {
+  border: 1.5px dashed var(--text-3);
+  background: transparent;
+  color: var(--text-2);
+  font-family: inherit;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.loc {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.loc-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+/* 一串「標籤 ×數量」 */
+.loc-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 6px;
+}
+.loc-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.loc-n {
+  color: var(--text-2);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* 儲位頁：左邊一排大標籤，寬度一樣才對得齊 */
+.loc-slot {
+  flex: none;
+  width: 92px;
+  display: flex;
+}
+/* 盤點結果的大標題：大標籤＋儲位說明 */
+.large-title.place-title .loc {
+  gap: 6px 12px;
+}
+.large-title.place-title .loc-name {
+  font-size: 22px;
+  color: var(--text-2);
+}
+/* 首頁紀錄：標題前面的小標籤 */
+.sess-place {
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+.sess-place .loc {
+  vertical-align: baseline;
+}
+.sess-thumb {
+  flex: none;
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--card-2);
+}
+.unfinished {
+  color: var(--amber);
+  font-weight: 600;
+}
+/* 品項頁「在哪裡」：標籤一行、時間一行 */
+.stock-row .grow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+/* 輸入位置：照標籤的寫法（等寬粗字） */
+.place-input {
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.place-input::placeholder {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', system-ui, sans-serif;
+  font-weight: 400;
+  letter-spacing: 0;
 }
 .read-head {
   display: flex;
@@ -1316,6 +1680,9 @@ a.row {
 .read-head .meta {
   color: var(--text-2);
   font-size: 15px;
+}
+.read-head .stock-label {
+  display: block;
 }
 .field.big-num {
   font-size: 34px;
@@ -1387,6 +1754,7 @@ a.row {
 .sum-eval {
   margin-top: 10px;
   width: 100%;
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1408,11 +1776,11 @@ a.row {
   margin-top: 18px;
   border-radius: 14px;
   background: var(--card);
-  box-shadow: var(--shadow);
-}/* AI 準不準：手機上兩欄兩列，說明字才不會斷成好幾行 */
+}
+/* 手機：大數字方塊兩欄兩列（總表、AI 準不準；跟首頁一樣），4 位數、說明字都放得下 */
 @media (max-width: 520px) {
-  .stats.q {
-    grid-template-columns: repeat(2, 1fr);
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 /* ───────── 平板、電腦：左邊側邊欄＋寬版內容（照 Apple 在 iPad、Mac 的排法；手機不變） ───────── */
@@ -1424,7 +1792,7 @@ a.row {
 @media (min-width: 768px) {
   :root {
     --side: 248px;
-    --content: 960px;
+    --content: 1120px;
   }
   /* 底部分頁列 → 右邊側邊欄（每一頁都有；可以收合成只剩圖示） */
   body.side-collapsed {
@@ -1441,7 +1809,9 @@ a.row {
     padding: calc(var(--safe-t) + 22px) 12px 20px;
     border-top: 0;
     border-left: 0.5px solid var(--line);
-    background: color-mix(in srgb, var(--card-2) 70%, var(--bg));
+    background: var(--card);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
     overflow-y: auto;
     transition: width 0.25s ease;
   }
@@ -1466,8 +1836,9 @@ a.row {
   }
   .side-toggle {
     flex: none;
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
+    margin-right: -4px;
     border: 0;
     border-radius: 10px;
     background: none;
@@ -1532,22 +1903,19 @@ a.row {
     background: color-mix(in srgb, var(--text) 6%, transparent);
   }
   .tabbar button[aria-current='page'] {
-    background: var(--tint);
-    color: #fff;
+    background: var(--brand);
+    color: var(--on-brand);
   }
   .tabbar button[aria-current='page'] svg {
-    color: #fff;
+    color: var(--on-brand);
+  }
+  body.side-collapsed .side-toggle {
+    margin-right: 0;
   }
   .tabbar button:active {
     transform: none;
   }
-  /* 內容在側邊欄右邊、置中；清單類的頁面可以寬一點 */
-  body[data-view='review'],
-  body[data-view='item'],
-  body[data-view='items'],
-  body[data-view='quality'] {
-    --content: 1240px;
-  }
+  /* 內容在側邊欄左邊、置中；每一頁同一個寬度（切分頁時標題、內容不會左右跳） */
   .app {
     max-width: none;
     margin: 0 var(--side) 0 0;
@@ -1601,20 +1969,6 @@ a.row {
   }
 }
 @media (min-width: 1000px) {
-  /* 首頁：新盤點、總表並排；提醒卡占整列 */
-  .home-cards {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
-    margin: 6px 0 4px;
-  }
-  .home-cards > * {
-    margin: 0 !important;
-  }
-  .home-cards > .hint-card,
-  .home-cards > [data-recount-list] {
-    grid-column: 1 / -1;
-  }
   /* 盤點結果：照片在左（捲動時固定在畫面上）、總結和品項清單在右，邊看照片邊改 */
   .review-cols {
     display: grid;
@@ -1648,17 +2002,41 @@ a.row {
     gap: 28px;
     align-items: start;
   }
-  /* 品項清單：分類排成兩欄 */
-  .item-secs {
+  /* 品項清單：分類多（4 類以上、8 種以上）才排成兩欄；太少的話分欄會一邊一組、左輕右重 */
+  .item-secs.multi {
     columns: 2;
     column-gap: 24px;
   }
   .item-sec {
     break-inside: avoid;
   }
+  /* 設定：兩欄（左：AI、品項清單、樣品照；右：試算表、共用、規則、資料），一行才不會太長 */
+  .settings-cols {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 28px;
+    align-items: start;
+  }
+  /* 首頁：左邊新盤點＋數字（捲動時固定），右邊盤點紀錄 */
+  .home-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 28px;
+    align-items: start;
+  }
+  .home-main {
+    position: sticky;
+    top: calc(var(--safe-t) + 16px);
+  }
+  .home-grid .home-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .home-grid .home-report {
+    margin-top: 6px;
+  }
 }
 @media (min-width: 1500px) {
-  .item-secs {
+  .item-secs.multi {
     columns: 3;
   }
 }
@@ -1701,7 +2079,7 @@ a.row {
 }
 /* 清單標題右邊的「選取／完成」：iPhone 的純文字按鈕（不要白底，才不會跟下面的卡片黏在一起） */
 .list-head .btn {
-  min-height: 30px;
+  min-height: 44px;
   margin: 0 4px 0 0;
   padding: 0 12px;
   background: none;
@@ -1721,14 +2099,14 @@ a.row {
   place-items: center;
   font-size: 15px;
   font-weight: 800;
-  color: #fff;
+  color: var(--on-brand);
 }
 .row.picked {
   background: var(--tint-soft);
 }
 .row.picked .pick {
-  background: var(--tint);
-  border-color: var(--tint);
+  background: var(--brand);
+  border-color: var(--brand);
 }
 .select-bar .btn {
   flex: 1;
@@ -1742,12 +2120,14 @@ a.row {
 }
 .toast-action {
   flex: none;
+  min-height: 44px;
+  margin: -10px -6px -10px 0;
   border: 0;
   background: none;
-  color: #6cb4ff;
+  color: #9db4ff;
   font-weight: 700;
   font-size: 15px;
-  padding: 4px 2px;
+  padding: 4px 8px;
   cursor: pointer;
 }
 /* 「這一個是哪一種？」上面的放大圖（SVG 只露出框住的那一塊） */
@@ -1829,5 +2209,185 @@ button.row.chosen {
 @media (prefers-reduced-motion: reduce) {
   .q-tick {
     animation: none;
+  }
+}
+.q-tick {
+  display: inline-flex;
+}
+
+/* ───────── 4.6 首頁：大數字方塊、設定提示、空畫面 ───────── */
+/* 大數字＋小標籤（像 Apple 健康）；有事要處理的數字才上色，0 就變淡 */
+.home-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  min-height: 92px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+}
+button.tile {
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+button.tile:active {
+  transform: scale(0.97);
+  background: var(--card-2);
+}
+.tile-num {
+  font-family: var(--rounded);
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.tile-num small {
+  margin-left: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-2);
+}
+.tile-label {
+  max-width: 100%;
+  color: var(--text-2);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile .chev {
+  position: absolute;
+  top: 16px;
+  right: 14px;
+  width: 8px;
+  height: 14px;
+}
+.tile.brand .tile-num {
+  color: var(--tint);
+}
+.tile.warn .tile-num {
+  color: var(--amber);
+}
+.tile.bad .tile-num {
+  color: var(--red);
+}
+.tile.zero .tile-num {
+  color: var(--text-3);
+}
+.home-report {
+  margin-bottom: 4px;
+}
+/* 還沒設定 AI：白卡＋相機圖示＋一個「去設定」按鈕（空畫面一定要給下一步） */
+.setup-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin: 6px 0 16px;
+  padding: 18px;
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: inset 0 0 0 1.5px var(--tint-soft);
+}
+.setup-card b {
+  display: block;
+  font-size: 19px;
+  line-height: 1.35;
+}
+.setup-card p {
+  margin: 6px 0 12px;
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1.6;
+}
+.setup-ico {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--tint-soft);
+  color: var(--tint);
+}
+.empty-ico {
+  display: inline-grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--card);
+  color: var(--text-3);
+}
+.empty p b {
+  color: var(--text);
+  font-size: 17px;
+}
+/* 狀態小字：綠色打勾、橘色警告、測試連線的結果 */
+.ok-line,
+.warn-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ok-line {
+  color: var(--green);
+}
+.warn-line {
+  color: var(--amber);
+  font-weight: 600;
+}
+.ok-line .ico,
+.warn-line .ico {
+  flex: none;
+}
+.diag-ok,
+.diag-bad {
+  display: inline-flex;
+  vertical-align: -3px;
+  margin-right: 6px;
+}
+.diag-ok {
+  color: var(--green);
+}
+.diag-bad {
+  color: var(--red);
+}
+.icon-btn .ico {
+  flex: none;
+}
+@media (min-width: 768px) {
+  .home-stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+/* 深色模式：公司 LOGO 是深藍色，放在黑底上看不見 → 改成淺色 */
+@media (prefers-color-scheme: dark) {
+  .brand-logo,
+  .join-logo {
+    filter: brightness(0) invert(0.93);
+  }
+  .seg button[aria-selected='true'] {
+    background: #3a3a3c;
+  }
+  .hero-btn {
+    box-shadow: none;
   }
 }
