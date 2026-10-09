@@ -20,6 +20,10 @@
  * - 權限像 Google 雲端硬碟的「共用」：擁有者（第一台）、管理員（可以邀請／移除人）、編輯者（可以盤點、修改）、檢視者（只能看）。
  * - 每個人一組自己的連結碼（只存雜湊值）；有人離職，管理員在 App 按「移除權限」，只有他失效，其他人不用改；被移除的裝置下次連線會自動清除資料。
  * - 擁有者的手機不見了：Apps Script 左邊「專案設定」→ 最下面「指令碼屬性」→ 刪掉 SYNC_KEY，再從 App 重新開啟同步（其他人的權限會保留）。
+ *
+ * 共用 AI 金鑰（4.5 起）：擁有者在 App「設定 → 把金鑰放到雲端」→ 金鑰存在這裡的指令碼屬性 GEMINI_KEY。
+ * 同事拍照時，請求送到這裡，由這裡拿金鑰去問 Gemini，同事的手機不會有金鑰；移除權限的人就不能再用。
+ * 第一次更新到這一版，部署時 Google 會再問一次授權（多了「連到外部網站」，用來連 Gemini），按允許即可。
  */
 const RAW = '盤點紀錄'
 const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID', '盤點人']
@@ -73,11 +77,21 @@ function doPost(e) {
         }),
       )
     : []
+  // 共用 AI 金鑰：ai＝擁有者有沒有放；每個回覆都帶，App 才知道能不能用
+  if (!who && (data.action === 'ai' || data.action === 'aiKey')) return json({ ok: false, error: '還沒開啟同步，不能用共用的 AI 金鑰' })
+  const ai = !!P.GEMINI_KEY
+  if (who && data.action === 'aiKey') {
+    if (who.role !== 'owner') return json({ ok: false, ai: ai, me: me, error: '只有擁有者可以設定共用的 AI 金鑰' })
+    if (data.aiKey) props.setProperty('GEMINI_KEY', String(data.aiKey))
+    else props.deleteProperty('GEMINI_KEY')
+    return json({ ok: true, ai: !!data.aiKey, me: me })
+  }
+  if (who && data.action === 'ai') return json(canEdit ? Object.assign(aiProxy(data, P), { ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
   // ver 2：盤點的照片分開存（photo:盤點ID:照片ID），下載只拿資料，照片用 photos 另外要；App 看到 ver 才改用新格式上傳
-  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster })
-  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, me: me, roster: roster }))
-  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, me: me }))
-  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P), { ver: SYNC_VER, me: me }) : { ok: false, viewer: true, me: me, error: '你是檢視者，只能看' })
+  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, ai: ai, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster })
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, ai: ai, me: me, roster: roster }))
+  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, ai: ai, me: me }))
+  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P), { ver: SYNC_VER, ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
   if (!canEdit) return json({ ok: false, viewer: true, error: '你是檢視者，只能看' })
   const lock = LockService.getScriptLock()
@@ -107,6 +121,23 @@ function doPost(e) {
   } finally {
     lock.releaseLock()
   }
+}
+
+/**
+ * 共用 AI 金鑰：幫 App 問 Gemini（金鑰只在這裡）。只准兩種請求：列出模型、看圖回答（generateContent），
+ * 不能拿這把金鑰做別的事。
+ */
+function aiProxy(data, P) {
+  if (!P.GEMINI_KEY) return { ok: false, status: 0, error: '擁有者還沒把 AI 金鑰放到雲端（或已經停止共用）' }
+  const path = String(data.path || '')
+  if (!/^models(\/[\w.\-]+:generateContent|\?pageSize=\d+)$/.test(path)) return { ok: false, status: 400, error: '不支援的 AI 請求' }
+  const opt = { method: data.body ? 'post' : 'get', headers: { 'x-goog-api-key': P.GEMINI_KEY }, muteHttpExceptions: true }
+  if (data.body) {
+    opt.contentType = 'application/json'
+    opt.payload = typeof data.body === 'string' ? data.body : JSON.stringify(data.body)
+  }
+  const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/' + path, opt)
+  return { ok: true, status: res.getResponseCode(), body: res.getContentText() }
 }
 
 /** App 的「測試連線」會呼叫這個 */

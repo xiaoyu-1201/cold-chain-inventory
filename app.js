@@ -11,6 +11,8 @@ import { decode, normalizeModel, looseKey, canon, modelKey, linksFor } from './r
 const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = {
   key: 'inventory:apiKey',
+  /** 擁有者有沒有把 AI 金鑰放在雲端（Apps Script）給大家共用：'1'＝有 */
+  aiShared: 'inventory:aiShared',
   model: 'inventory:model',
   catalog: 'inventory:catalog',
   pinned: 'inventory:modelPinned',
@@ -74,7 +76,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.4.0（10/9・資安加強：金鑰不放網址、只准連 Google）'
+const VERSION = '4.5.0（10/9・AI 金鑰可以放雲端給大家共用、金鑰不放網址、只准連 Google）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -476,6 +478,8 @@ function friendly(status, msg = '') {
 /** timeoutMs：等太久就放棄（之後會自動重試或換模型），不要讓人一直乾等 */
 async function call(path, opts = {}, timeoutMs = 0) {
   const key = ls.get(LS.key)
+  // 這台沒有自己的金鑰、擁有者有放共用金鑰：改由自己的 Apps Script 去問 Gemini（金鑰不會到這支手機）
+  if (!key && aiViaSheet()) return callViaSheet(path, opts, timeoutMs)
   let res
   const ctrl = new AbortController()
   const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : 0
@@ -496,15 +500,57 @@ async function call(path, opts = {}, timeoutMs = 0) {
     outer?.removeEventListener('abort', onOuter)
   }
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) {
+  return toResult(res.status, data)
+}
+/** Gemini 的回覆：成功就回資料；失敗換成看得懂的錯誤（直接連、經過 Apps Script 都用這個） */
+function toResult(status, data) {
+  if (status < 200 || status >= 300) {
     const msg = data?.error?.message || ''
-    const err = new ApiError(friendly(res.status, msg), res.status, `${res.status} ${data?.error?.status || ''} ${msg}`.trim().slice(0, 200))
+    const err = new ApiError(friendly(status, msg), status, `${status} ${data?.error?.status || ''} ${msg}`.trim().slice(0, 200))
     // 429 會告訴你要等多久（例如 "17s"）
     const retry = (data?.error?.details || []).find((d) => d.retryDelay)?.retryDelay
     if (retry) err.retryAfter = Math.min(30, parseFloat(retry) || 0)
     throw err
   }
   return data
+}
+/** 有沒有 AI 可以用：自己的金鑰，或擁有者放在雲端的共用金鑰 */
+function hasAi() {
+  return !!ls.get(LS.key) || aiViaSheet()
+}
+function aiViaSheet() {
+  return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(LS.aiShared) === '1'
+}
+/** 共用金鑰：請求送到自己的 Apps Script，由它拿雲端的金鑰問 Gemini（會多 1～2 秒） */
+async function callViaSheet(path, opts, timeoutMs) {
+  const outer = opts.signal
+  if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
+  let timer = 0
+  let onAbort = null
+  const guard = new Promise((_, reject) => {
+    // Apps Script 多繞一手：等待時間多給 3 秒
+    if (timeoutMs) timer = setTimeout(() => reject(new ApiError(`等了 ${Math.round(timeoutMs / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${timeoutMs / 1000}s (sheet)`)), timeoutMs + 3000)
+    onAbort = () => reject(new ApiError('已取消', 499, 'cancelled'))
+    outer?.addEventListener('abort', onAbort)
+  })
+  let r
+  try {
+    r = await Promise.race([postSync({ action: 'ai', path, body: opts.body || '' }), guard])
+  } catch (e) {
+    if (e instanceof ApiError) throw e
+    throw new ApiError(e?.message || '連不到 Google（沒有網路？）', 0, `sheet ${e?.message || ''}`.trim())
+  } finally {
+    clearTimeout(timer)
+    if (onAbort) outer?.removeEventListener('abort', onAbort)
+  }
+  if (!r?.ok) throw new ApiError(r?.error || '共用的 AI 金鑰不能用，請找擁有者', r?.status || 0, `sheet ${r?.error || ''}`.trim())
+  let data = {}
+  try {
+    data = JSON.parse(r.body || '{}')
+  } catch {
+    /* 回覆不是 JSON：當成空的，toResult 會依狀態碼處理 */
+  }
+  return toResult(r.status, data)
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /** 這些狀況值得自動重試：太多人用、伺服器暫時錯誤、額度每分鐘上限、等太久、網路斷一下 */
@@ -1538,7 +1584,7 @@ const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'ho
 
 async function viewHome() {
   const sessions = await db.all()
-  const hasKey = !!ls.get(LS.key)
+  const hasKey = hasAi()
   const toRecount = canEdit() ? (await itemsAll()).filter(needsRecount) : []
   // 多選：按「選取」後，每一筆前面出現圓圈，下面出現動作列（匯出、記進品項庫、刪除）
   const sel = !!state.selecting
@@ -1787,6 +1833,20 @@ function viewReview() {
   <div class="toolbar"><div class="inner"><button class="btn secondary" data-action="export">匯出</button><button class="btn edit-only" data-action="finish">完成・記進品項庫</button></div></div>`
 }
 
+/** 設定頁：共用金鑰（擁有者放到雲端／同事看到「正在用共用的」）；都不適用就什麼都不顯示 */
+function aiShareRows(key) {
+  if (!syncReady()) return ''
+  const rows = []
+  if (aiViaSheet() && !key) rows.push('<div class="row"><span class="grow"><span class="title">✓ 正在用公司共用的金鑰</span><br><span class="meta">擁有者把金鑰放在雲端（Apps Script），你的手機上沒有金鑰，可以直接拍照辨識；每次會多 1～2 秒。</span></span></div>')
+  if (myRole() === 'owner')
+    rows.push(
+      ls.get(LS.aiShared) === '1'
+        ? '<div class="row"><span class="grow"><span class="title">金鑰已放在雲端給大家共用</span><br><span class="meta">同事不用跟你要金鑰；大家的用量都算在這把金鑰上。</span></span><button class="btn small secondary" data-action="ai-unshare">停止共用</button></div>'
+        : '<div class="row"><span class="grow"><span class="title">把金鑰放到雲端，大家共用</span><br><span class="meta">金鑰存在你的 Apps Script，同事的手機不會有，不用一個一個給。</span></span><button class="btn small" data-action="ai-share">放到雲端</button></div>',
+    )
+  return rows.length ? `<div class="group">${rows.join('')}</div>` : ''
+}
+
 async function viewSettings() {
   const key = ls.get(LS.key)
   const model = ls.get(LS.model)
@@ -1800,6 +1860,7 @@ async function viewSettings() {
       <input class="field" id="apikey" type="password" placeholder="貼上 API Key（AIza 開頭）" value="${esc(key)}" autocomplete="off" spellcheck="false">
       <div class="row-actions"><button class="btn small" data-action="save-key">儲存並測試</button><button class="btn small secondary" data-action="toggle-key">顯示／隱藏</button></div>
       <p class="footnote" style="margin:0">沒有 Key？到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style="color:var(--tint)">Google AI Studio</a> 免費建立。Key 只存在這支手機，照片只會送到 Google Gemini 分析。</p>
+      ${aiShareRows(key)}
     </div>
     <p class="section-title">辨識模型</p>
     <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model || '自動挑選')}</span><br><span class="meta">自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro</span></span><button class="btn small secondary" data-action="pick-model">重新挑選</button></div>
@@ -2442,8 +2503,8 @@ async function viewLookup() {
     <div class="nav"><span></span></div>
     <h1 class="large-title">查型號</h1>
     <p class="subtitle">客人拿零件或型號來問：拍標籤或打型號，馬上看是什麼、店裡有沒有、可以用什麼替代。</p>
-    <label class="hero-btn ${busy ? 'busy' : ''}" ${busy ? 'aria-disabled="true"' : ''}><span class="hero-icon" aria-hidden="true">${busy ? '<span class="spinner small"></span>' : '📷'}</span><span class="grow"><b>${busy ? 'AI 讀標籤中…' : '拍型號標籤'}</b><br><span class="meta">${busy ? '大約 5～15 秒' : '外盒、貼紙、機器上的型號牌、零件上的刻字都可以'}</span></span><input type="file" accept="image/*" capture="environment" id="label-cam" class="sr-only" ${busy || !ls.get(LS.key) ? 'disabled' : ''}></label>
-    ${ls.get(LS.key) ? '' : '<p class="footnote">拍標籤要先到「設定」貼上 API Key；打型號查詢不用。</p>'}
+    <label class="hero-btn ${busy ? 'busy' : ''}" ${busy ? 'aria-disabled="true"' : ''}><span class="hero-icon" aria-hidden="true">${busy ? '<span class="spinner small"></span>' : '📷'}</span><span class="grow"><b>${busy ? 'AI 讀標籤中…' : '拍型號標籤'}</b><br><span class="meta">${busy ? '大約 5～15 秒' : '外盒、貼紙、機器上的型號牌、零件上的刻字都可以'}</span></span><input type="file" accept="image/*" capture="environment" id="label-cam" class="sr-only" ${busy || !hasAi() ? 'disabled' : ''}></label>
+    ${hasAi() ? '' : '<p class="footnote">拍標籤要先到「設定」貼上 API Key（或請擁有者把金鑰放到雲端共用）；打型號查詢不用。</p>'}
     <input class="field search" id="lookup-q" type="search" placeholder="或打型號：DML 083S、TES 2、4×11×330" value="${esc(q)}" autocomplete="off" enterkeyhint="search" spellcheck="false">
     <div id="lookup-results">${lookupResults()}</div>
   </main>
@@ -3768,6 +3829,12 @@ async function postSync(body) {
   }
   // 雲端程式碼的版本（2＝會把照片分開存）：決定上傳用哪種格式、要不要提醒更新程式碼
   if (data.ver) ls.set(LS.serverVer, String(data.ver))
+  // 擁有者有沒有把 AI 金鑰放在雲端共用（新版雲端程式碼才會回這個）
+  if ('ai' in data) {
+    const was = ls.get(LS.aiShared) === '1'
+    ls.set(LS.aiShared, data.ai ? '1' : '')
+    if (was !== !!data.ai) setTimeout(render, 0)
+  }
   // 權限隨時可能被管理員改：每次回覆都更新
   if (data.me?.role) {
     const changed = data.me.role !== ls.get(LS.memberRole)
@@ -3792,7 +3859,7 @@ async function postSync(body) {
 /** 清除這台的資料（退出同步、被移除權限時） */
 async function wipeLocal(msg) {
   clearTimeout(syncTimer)
-  for (const k of [LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId]) ls.set(k, '')
+  for (const k of [LS.aiShared, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId]) ls.set(k, '')
   // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
   await idb.sessions.clear()
   await idb.items.clear()
@@ -4635,7 +4702,7 @@ async function viewQuality() {
                   .join('')}</div>`
               : ''
           }`
-        : `<div class="empty"><p>${range === 'all' ? '還沒有資料。' : '這段時間沒有資料。'}<br>從這一版開始，盤點完按「完成・記進品項庫」，就會開始累積。</p>${canEdit() && ls.get(LS.key) && range === 'all' ? '<button class="btn small" data-action="new">開始盤點</button>' : ''}</div>`
+        : `<div class="empty"><p>${range === 'all' ? '還沒有資料。' : '這段時間沒有資料。'}<br>從這一版開始，盤點完按「完成・記進品項庫」，就會開始累積。</p>${canEdit() && hasAi() && range === 'all' ? '<button class="btn small" data-action="new">開始盤點</button>' : ''}</div>`
     }
     <p class="section-title">標準答案考 AI</p>
     <div class="group">
@@ -4665,7 +4732,7 @@ async function viewQuality() {
 /** 用標準答案考 AI：那些照片重新辨識一次（不看你改過的），每一種比數量 */
 async function runGolden() {
   if (state.golden) return
-  if (!ls.get(LS.key)) return toast('要先在設定貼上 Gemini API Key')
+  if (!hasAi()) return toast('要先在設定貼上 Gemini API Key，或請擁有者把金鑰放到雲端共用')
   const sessions = (await db.all()).filter((s) => s.golden)
   const photos = sessions.flatMap((s) => s.photos.filter((p) => p.status === 'done').map((p) => ({ s, p })))
   if (!photos.length) return toast('先勾幾次「當成標準答案」才能考')
@@ -5141,6 +5208,34 @@ $app.addEventListener('click', async (e) => {
       el.type = el.type === 'password' ? 'text' : 'password'
       return
     }
+    case 'ai-share': {
+      // 擁有者：把金鑰放到自己的 Apps Script（指令碼屬性），大家共用；同事手機上不會有金鑰
+      const v = (document.getElementById('apikey')?.value || ls.get(LS.key)).trim()
+      if (!v) return toast('先在上面貼上 API Key、按「儲存並測試」確認可以用，再放到雲端')
+      if (!confirm('把這把金鑰放到你的 Apps Script（雲端）給大家共用？\n同事的手機不會拿到金鑰；大家用的次數都算在這把金鑰上。')) return
+      try {
+        const r = await postSync({ action: 'aiKey', aiKey: v })
+        if (!('ai' in r)) return toast('雲端程式碼是舊版：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本')
+        if (!r.ok) return toast(r.error || '沒有放成功')
+        ls.set(LS.aiShared, '1')
+        toast('已放到雲端：同事打開 App 就能拍照辨識，不用再跟你要金鑰')
+        return render()
+      } catch (err) {
+        return toast(err.message)
+      }
+    }
+    case 'ai-unshare': {
+      if (!confirm('停止共用金鑰？之後同事要拍照辨識，就得自己貼金鑰。')) return
+      try {
+        const r = await postSync({ action: 'aiKey', aiKey: '' })
+        if (!r.ok) return toast(r.error || '沒有成功')
+        ls.set(LS.aiShared, '')
+        toast('已停止共用金鑰')
+        return render()
+      } catch (err) {
+        return toast(err.message)
+      }
+    }
     case 'pick-model':
       try {
         const list = await fetchModels()
@@ -5159,7 +5254,7 @@ $app.addEventListener('click', async (e) => {
       const lines = []
       const show = () => (out.innerHTML = `<div class="group">${lines.map((l) => `<div class="row"><span class="grow" style="font-size:14px;word-break:break-all">${l}</span></div>`).join('')}</div>`)
       lines.push('版本 ' + esc(VERSION))
-      lines.push('API Key：' + (ls.get(LS.key) ? '有（' + esc(ls.get(LS.key).slice(0, 6)) + '…）' : '<b>沒有</b>'))
+      lines.push('API Key：' + (ls.get(LS.key) ? '有（' + esc(ls.get(LS.key).slice(0, 6)) + '…）' : aiViaSheet() ? '用公司共用的（放在雲端）' : '<b>沒有</b>'))
       show()
       try {
         const list = await fetchModels()
