@@ -3894,3 +3894,341 @@ h2,
     font-size: 15px;
   }
 }
+
+/* ───────── 4.7.3 液態玻璃（Liquid Glass）：只加在「浮在內容上面」的那一層 ─────────
+ * 用在：手機懸浮分頁列＋鏡片、上方標題列（手機捲動時）、彈出視窗（sheet）、提示（toast）、底部動作列、
+ *       點貨進度列、放大看照片的上下工具列和圓形按鈕、照片上的放大鈕；「新盤點」大按鈕＝實心招牌藍＋淡淡反光。
+ * 卡片、表格、品項清單維持實心（要讀的內容不透明）。側邊欄後面沒有內容會捲過去 → 維持實心，只有鏡片。
+ * 全部用同一組變數；退路（不支援模糊、減少透明度、高對比）只要改變數就全部變回實心。
+ */
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.78); /* 分頁列、標題列：字和圖示在最壞的背景（黑色照片）上也有 4.5 */
+  --glass-bg-strong: rgba(242, 242, 247, 0.88); /* 彈出視窗：字多，底更實 */
+  --glass-solid: #f9f9fb; /* 退路：實心 */
+  --glass-solid-strong: #f2f2f7;
+  --glass-filter: blur(20px) saturate(1.7);
+  --glass-ring: rgba(255, 255, 255, 0.65); /* 1px 半透明白邊 */
+  --glass-hi: rgba(255, 255, 255, 0.85); /* 上緣反光 */
+  --glass-sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0) 42%);
+  --glass-shadow: 0 10px 30px -10px rgba(16, 32, 72, 0.3), 0 2px 6px -2px rgba(16, 32, 72, 0.12);
+  --glass-text-2: #4b4f5a; /* 玻璃上的次要字：比 --text-2 深一點，後面是照片也看得清楚 */
+  --glass-icon: #3d414b;
+  --glass-icon-on: #1f44a8;
+  /* 鏡片：比玻璃更亮一點，白色反光邊＋很淡的高光 */
+  --lens-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.12)), rgba(15, 36, 64, 0.07);
+  --lens-edge: inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 0 0 1px rgba(255, 255, 255, 0.6), 0 1px 4px rgba(15, 36, 64, 0.12);
+  /* 黑底（放大看照片）、提示用的深色玻璃 */
+  --glass-dark: rgba(30, 30, 34, 0.8); /* 後面是白色照片時：白字 8.7、「復原」5.6 */
+  --glass-dark-btn: rgba(30, 30, 34, 0.55);
+  --glass-dark-ring: rgba(255, 255, 255, 0.16);
+  --glass-dark-hi: rgba(255, 255, 255, 0.2);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --glass-bg: rgba(28, 28, 31, 0.84);
+    --glass-bg-strong: rgba(18, 18, 20, 0.86);
+    --glass-solid: #1c1c1e;
+    --glass-solid-strong: #111113;
+    --glass-ring: rgba(255, 255, 255, 0.12);
+    --glass-hi: rgba(255, 255, 255, 0.14);
+    --glass-sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 42%);
+    --glass-shadow: 0 12px 32px -10px rgba(0, 0, 0, 0.85), 0 0 0 0.5px rgba(0, 0, 0, 0.6);
+    --glass-text-2: #a4a7b2;
+    --glass-icon: #c3c6cf;
+    --glass-icon-on: #b3c3ff;
+    --lens-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04)), rgba(255, 255, 255, 0.08);
+    --lens-edge: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.1), 0 1px 4px rgba(0, 0, 0, 0.4);
+  }
+}
+/* 共用的玻璃材質（以後要加玻璃，加 .glass 就好） */
+.glass,
+.toolbar,
+.pk-progress {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+}
+.toolbar {
+  border-top: 0;
+  box-shadow: inset 0 0.5px 0 var(--line), inset 0 1px 0 var(--glass-hi);
+}
+
+/* 1. 手機：底部懸浮膠囊（像 Instagram）——只放圖示，目前那一頁後面有一顆鏡片 */
+@media (max-width: 767px) {
+  .tabbar {
+    left: max(22px, env(safe-area-inset-left, 0px));
+    right: max(22px, env(safe-area-inset-right, 0px));
+    bottom: calc(var(--safe-b) + 12px);
+    max-width: 440px;
+    height: 64px;
+    margin: 0 auto;
+    padding: 0 6px;
+    border: 1px solid var(--glass-ring);
+    border-radius: 999px;
+    background: var(--glass-sheen), var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
+    box-shadow: inset 0 1px 0 var(--glass-hi), var(--glass-shadow);
+    /* 按住左右滑：鏡片跟著手指走，頁面不能跟著捲 */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .tabbar .inner {
+    height: 100%;
+    align-items: center;
+  }
+  .tabbar button {
+    height: 100%;
+    min-height: 48px;
+    color: var(--glass-icon);
+  }
+  .tabbar button span {
+    display: none;
+  }
+  .tabbar button[aria-current='page'] {
+    color: var(--glass-icon-on);
+  }
+  /* 鏡片：72×48、全圓角，置中在那一格（四格各 25%）；左右位置由程式用 transform 放 */
+  .tabbar .tab-lens {
+    top: 50%;
+    width: min(72px, calc(25% - 4px));
+    height: 48px;
+    margin-top: -24px;
+  }
+  /* 「新」→ 圖示右上角的小綠點（念的時候按鈕名稱有「（新）」） */
+  .tab-new {
+    top: calc(50% - 16px);
+    left: calc(50% + 8px);
+    width: 10px;
+    height: 10px;
+    padding: 0;
+    border-radius: 50%;
+    overflow: hidden;
+    color: transparent;
+    text-indent: 20px;
+    white-space: nowrap;
+    box-shadow: 0 0 0 2px var(--glass-solid);
+  }
+  /* 最後一筆不會被懸浮列蓋住：12（離底）＋64（列高）＋28（留白） */
+  .app {
+    padding-bottom: calc(var(--safe-b) + 104px);
+  }
+  /* 2. 上方標題列：黏在上面，捲下去內容從後面透出（在最上面時跟背景融在一起） */
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 15;
+    margin: calc(-1 * var(--safe-t)) -16px 0;
+    padding: var(--safe-t) 16px 0;
+    transition: box-shadow 0.2s ease, background-color 0.2s ease;
+  }
+  html.is-scrolled .nav {
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
+    box-shadow: 0 0.5px 0 var(--line);
+  }
+  /* 點貨進度列黏在標題列下面 */
+  .pk-progress {
+    top: calc(var(--safe-t) + 44px);
+  }
+}
+/* 鏡片（共用）：按鈕在鏡片上面 */
+.has-lens {
+  position: relative;
+}
+.has-lens > button {
+  position: relative;
+  z-index: 1;
+}
+.tab-lens {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  border-radius: 999px;
+  background: var(--lens-bg);
+  box-shadow: var(--lens-edge);
+  pointer-events: none;
+  will-change: transform;
+}
+.tab-lens.off {
+  display: none;
+}
+.has-lens .ico {
+  transform-origin: center;
+}
+
+/* 平板、電腦的側邊欄：選到的那一項後面是同一種鏡片（取代原本的實心藍底） */
+@media (min-width: 768px) {
+  .tabbar .inner {
+    touch-action: pan-x;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .tabbar .tab-lens {
+    right: 0;
+    height: 44px;
+    --lens-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0)), var(--tint-soft);
+  }
+  .tabbar button {
+    border-radius: 999px;
+  }
+  .tabbar.has-lens button[aria-current='page'],
+  .tabbar .has-lens button[aria-current='page'] {
+    background: none;
+    color: var(--tint);
+  }
+  .tabbar .has-lens button[aria-current='page'] svg {
+    color: var(--tint);
+  }
+  .tabbar .has-lens button[aria-current='page'] .tab-new {
+    box-shadow: none;
+  }
+  /* 滑鼠移過去：淡淡的預覽（不是鏡片過去）；觸控不要 hover */
+  .tabbar button:hover {
+    background: none;
+  }
+}
+@media (min-width: 768px) and (hover: hover) and (pointer: fine) {
+  .tabbar button:not([aria-current]):hover {
+    background: color-mix(in srgb, var(--text) 5%, transparent);
+  }
+}
+@media (min-width: 768px) and (prefers-color-scheme: dark) {
+  .tabbar .tab-lens {
+    --lens-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0)), var(--tint-soft);
+  }
+}
+/* 分段控制（總表的時間範圍、品項篩選）：選到的那一格是鏡片，一樣可以滑 */
+.seg.has-lens {
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.seg .tab-lens {
+  top: 3px;
+  border-radius: 9px;
+  background: var(--card);
+  box-shadow: inset 0 1px 0 var(--glass-hi), 0 1px 2px rgba(0, 0, 0, 0.12), 0 2px 8px -2px rgba(0, 0, 0, 0.1);
+}
+.seg.has-lens button[aria-selected='true'] {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 3. 彈出視窗、提示 */
+.sheet {
+  --text-2: var(--glass-text-2);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  box-shadow: inset 0 1px 0 var(--glass-hi), inset 0 0 0 1px var(--glass-ring), var(--glass-shadow);
+}
+.toast {
+  background: var(--glass-dark);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  box-shadow: inset 0 1px 0 var(--glass-dark-hi), inset 0 0 0 1px var(--glass-dark-ring), var(--glass-shadow);
+}
+.toast-action {
+  color: #c3d0ff;
+}
+
+/* 4. 「新盤點」大按鈕：實心招牌藍（字一樣清楚）＋上緣反光、很淡的斜向高光 */
+.hero-btn {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 45%), var(--brand);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 1px 2px rgba(15, 30, 80, 0.2),
+    0 12px 28px -14px rgba(31, 68, 168, 0.8);
+}
+.hero-btn:active {
+  background: var(--brand-press);
+}
+
+/* 6. 放大看照片：黑底上的深色玻璃（上下工具列、圓形按鈕） */
+.viewer-bar,
+.pv-foot {
+  background: var(--glass-dark);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+}
+.viewer-bar {
+  box-shadow: inset 0 -0.5px 0 var(--glass-dark-ring);
+}
+.pv-foot {
+  box-shadow: inset 0 0.5px 0 var(--glass-dark-ring), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.viewer-close {
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 var(--glass-dark-hi), inset 0 0 0 1px var(--glass-dark-ring);
+}
+.pv-nav,
+.photo-zoom {
+  background: var(--glass-dark-btn);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  box-shadow: inset 0 1px 0 var(--glass-dark-hi), inset 0 0 0 1px var(--glass-dark-ring), 0 4px 12px -4px rgba(0, 0, 0, 0.5);
+}
+
+/* 退路：不支援模糊、或使用者開了「減少透明度」→ 全部實心（只改變數） */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass-bg: var(--glass-solid);
+    --glass-bg-strong: var(--glass-solid-strong);
+    --glass-sheen: none;
+    --glass-dark: #1e1e21;
+    --glass-dark-btn: rgba(30, 30, 34, 0.9);
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-bg: var(--glass-solid);
+    --glass-bg-strong: var(--glass-solid-strong);
+    --glass-sheen: none;
+    --glass-filter: none;
+    --glass-dark: #1e1e21;
+    --glass-dark-btn: rgba(30, 30, 34, 0.92);
+  }
+}
+html.no-glass {
+  /* 測試用：模擬「減少透明度」 */
+  --glass-bg: var(--glass-solid);
+  --glass-bg-strong: var(--glass-solid-strong);
+  --glass-sheen: none;
+  --glass-filter: none;
+  --glass-dark: #1e1e21;
+  --glass-dark-btn: rgba(30, 30, 34, 0.92);
+}
+/* 高對比：實心＋看得見的邊框 */
+@media (prefers-contrast: more) {
+  :root {
+    --glass-bg: var(--glass-solid);
+    --glass-bg-strong: var(--glass-solid-strong);
+    --glass-sheen: none;
+    --glass-filter: none;
+    --glass-ring: var(--text-2);
+    --glass-text-2: var(--text);
+    --glass-dark: #000000;
+    --glass-dark-btn: #000000;
+    --glass-dark-ring: #ffffff;
+  }
+  .tab-lens {
+    box-shadow: inset 0 0 0 2px var(--tint);
+  }
+}
+@media (forced-colors: active) {
+  .tabbar,
+  .sheet,
+  .toast,
+  .viewer-bar,
+  .pv-foot {
+    border: 1px solid CanvasText;
+  }
+  .tab-lens {
+    border: 2px solid Highlight;
+  }
+}

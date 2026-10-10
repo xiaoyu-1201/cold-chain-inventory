@@ -85,7 +85,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.2（10/10・照片都可以點開放大）'
+const VERSION = '4.7.3（10/10・液態玻璃）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1728,10 +1728,217 @@ const TABS = [
 ]
 /**
  * 手機：底部分頁列（只在四個主頁）。平板、電腦（≥768px）：同一個元素變成右邊側邊欄，每一頁都有（sub＝子頁面，手機不顯示）。
- * fresh：新加的入口，標綠色「新」
+ * fresh：新加的入口，標綠色「新」（手機上變成圖示右上角的小綠點）
+ * 4.7.3 液態玻璃：手機是浮起來的膠囊、只放圖示（像 Instagram）；目前那一頁的圖示後面有一顆淡灰「鏡片」（.tab-lens），換頁時滑過去
  */
-const tabBar = (active, sub = false) =>
-  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt=""><span class="side-name">聖佳智慧庫存</span><button class="side-toggle" data-action="side-toggle" aria-label="${sideCollapsed() ? '展開選單' : '收合選單'}" title="${sideCollapsed() ? '展開選單' : '收合選單'}">${icon('chevron-right', 20)}</button></div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''} title="${t.label}${t.fresh ? '（新）' : ''}">${icon(t.icon, 26)}<span>${t.label}</span>${t.fresh ? '<em class="tab-new" aria-hidden="true">新</em>' : ''}</button>`).join('')}</div></nav>`
+const tabBar = (active, sub = false) => {
+  return `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt=""><span class="side-name">聖佳智慧庫存</span><button class="side-toggle" data-action="side-toggle" aria-label="${sideCollapsed() ? '展開選單' : '收合選單'}" title="${sideCollapsed() ? '展開選單' : '收合選單'}">${icon('chevron-right', 20)}</button></div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''} aria-label="${t.label}${t.fresh ? '（新）' : ''}" title="${t.label}${t.fresh ? '（新）' : ''}">${icon(t.icon, 26)}<span>${t.label}</span>${t.fresh ? '<em class="tab-new" aria-hidden="true">新</em>' : ''}</button>`).join('')}</div></nav>`
+}
+// ───────── 液態玻璃鏡片：手機分頁列（橫）、平板／電腦側邊欄（直）、分段控制（.seg）共用這一份 ─────────
+// 10/10 使用者：「液態玻璃那種如果滑過去，有沒有辦法做那種 iPhone 滑過去的效果」「各個載具都要有」
+// - 點一下：鏡片用彈簧滑過去（有一點 overshoot）。按住拖：鏡片跟著手指／滑鼠走，放開彈到最近一格再換頁
+// - 果凍拉伸：越快越長（順著方向最多 1.25 倍、另一邊最少 0.9 倍），停下來彈回 1；放大鏡：鏡片經過的圖示放大
+// - 只改 transform（不重排版面、不重畫 App），放開才換頁；「減少動態效果」：沒有彈簧、拉伸、放大，直接切換
+// - 做不到：iPhone 的網頁沒有震動回饋；Safari 做不到玻璃的折射扭曲
+// 畫面每次重畫都是新的元素 → 狀態記在 LENSES（用 key 分），liquidLens() 每次重畫後接上新的元素
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)')
+const phoneBar = matchMedia('(max-width: 767px)')
+const LENSES = new Map()
+let lensClickOk = false // 放開後程式自己按的那一下（換頁）不要擋
+let lensEatClick = 0 // 拖完放開，瀏覽器補發的 click 不要算（不然會按到手指底下那一顆）
+/** box：放鏡片的容器；items：可以選的按鈕；opts：axis 'x'|'y'、fit 'h'|'wh'（鏡片高／寬跟按鈕一樣）、mag 圖示放大倍數、isActive */
+function liquidLens(key, box, items, opts) {
+  let S = LENSES.get(key)
+  if (!S) LENSES.set(key, (S = { idx: -1, pos: 0, v: 0, target: 0, st: 1, stv: 0, raf: 0, last: 0, drag: null, after: null, homes: [] }))
+  let el = box.querySelector(':scope > .tab-lens')
+  if (!el) {
+    el = document.createElement('i')
+    el.className = 'tab-lens'
+    el.setAttribute('aria-hidden', 'true')
+    box.prepend(el)
+  }
+  box.classList.add('has-lens')
+  const axisChanged = S.axis !== opts.axis
+  Object.assign(S, { box, el, items, axis: opts.axis, mag: opts.mag || 0 })
+  const active = items.findIndex(opts.isActive)
+  if (active < 0) {
+    el.classList.add('off')
+    S.idx = -1
+    S.drag = null
+    S.after = null
+    return
+  }
+  el.classList.remove('off')
+  const X = opts.axis === 'x'
+  const a = items[active]
+  if (opts.fit) {
+    el.style.height = a.offsetHeight + 'px'
+    if (opts.fit === 'wh') el.style.width = a.offsetWidth + 'px'
+  }
+  const len = X ? el.offsetWidth : el.offsetHeight
+  S.len = len
+  S.homes = items.map((b) => (X ? b.offsetLeft + (b.offsetWidth - len) / 2 : b.offsetTop + (b.offsetHeight - len) / 2))
+  const prev = S.idx
+  S.idx = active
+  if (reduceMotion.matches || prev < 0 || axisChanged) {
+    cancelAnimationFrame(S.raf)
+    Object.assign(S, { raf: 0, v: 0, st: 1, stv: 0, after: null, drag: null, pos: S.homes[active], target: S.homes[active] })
+  } else if (prev !== active) {
+    S.target = S.homes[active] // 從現在的位置用彈簧滑過去
+    lensRun(S)
+  } else if (!S.raf && !S.drag) S.pos = S.target = S.homes[active]
+  lensPaint(S)
+}
+function lensPaint(S) {
+  if (!S.el) return
+  const X = S.axis === 'x'
+  const along = S.st
+  const cross = Math.max(0.9, 1 - (S.st - 1) * 0.4)
+  S.el.style.transform = `translate3d(${X ? S.pos.toFixed(2) : 0}px,${X ? 0 : S.pos.toFixed(2)}px,0)` + (Math.abs(along - 1) > 0.002 ? ` scale(${(X ? along : cross).toFixed(3)},${(X ? cross : along).toFixed(3)})` : '')
+  if (!S.mag) return
+  // 放大鏡：拖的時候一直有；點一下滑過去時越接近終點越小，停下來回到 1
+  const pitch = S.homes.length > 1 ? Math.abs(S.homes[1] - S.homes[0]) || 1 : 1
+  const act = S.drag?.moved ? 1 : Math.min(1, Math.abs(S.v) / 600 + Math.abs(S.pos - S.target) / pitch)
+  S.items.forEach((b, k) => {
+    const ic = b.querySelector('.ico')
+    if (!ic) return
+    const s = 1 + S.mag * Math.max(0, 1 - Math.abs(S.homes[k] - S.pos) / pitch) * act
+    ic.style.transform = s > 1.002 ? `scale(${s.toFixed(3)})` : ''
+  })
+}
+function lensStep(S, t) {
+  const dt = S.last ? Math.min(0.034, (t - S.last) / 1000) : 1 / 60
+  S.last = t
+  // 簡單的彈簧：拖的時候硬一點（跟得上手指），放開後軟一點（有一點 overshoot）
+  const [k, c] = S.drag?.moved ? [900, 52] : [320, 24]
+  S.v += (-k * (S.pos - S.target) - c * S.v) * dt
+  S.pos += S.v * dt
+  const sp = Math.abs(S.v)
+  S.stv += (-450 * (S.st - (1 + Math.min(0.25, sp / 2400))) - 16 * S.stv) * dt
+  S.st = Math.min(1.25, Math.max(0.94, S.st + S.stv * dt))
+  const near = Math.abs(S.pos - S.target) < 0.8 && sp < 15
+  if (near && S.after) {
+    const f = S.after
+    S.after = null
+    f()
+  }
+  if (!S.drag && near && Math.abs(S.st - 1) < 0.003 && Math.abs(S.stv) < 0.05) {
+    Object.assign(S, { pos: S.target, v: 0, st: 1, stv: 0, raf: 0, last: 0 })
+    lensPaint(S)
+    return
+  }
+  lensPaint(S)
+  S.raf = requestAnimationFrame((tt) => lensStep(S, tt))
+}
+function lensRun(S) {
+  if (S.raf) return
+  S.last = 0
+  S.raf = requestAnimationFrame((t) => lensStep(S, t))
+}
+/** 每次畫完畫面：分頁列／側邊欄、每一個分段控制接上鏡片 */
+function mountLenses(root = $app) {
+  const nav = root.querySelector('.tabbar .inner')
+  if (nav) {
+    const phone = phoneBar.matches
+    const shown = nav.offsetParent !== null // 手機的子頁面沒有分頁列
+    const items = shown ? [...nav.querySelectorAll(':scope > button')].filter((b) => !phone || !b.classList.contains('wide-only')) : []
+    liquidLens('nav', nav, items, { axis: phone ? 'x' : 'y', fit: phone ? null : 'h', mag: phone ? 0.18 : 0.12, isActive: (b) => b.hasAttribute('aria-current') })
+  }
+  root.querySelectorAll('.seg').forEach((seg, i) => {
+    liquidLens(`seg:${state.view}:${i}`, seg, [...seg.querySelectorAll(':scope > button')], { axis: 'x', fit: 'wh', isActive: (b) => b.getAttribute('aria-selected') === 'true' })
+  })
+}
+document.addEventListener('pointerdown', (e) => {
+  if (reduceMotion.matches || e.button > 0 || !e.isPrimary) return
+  const box = e.target.closest?.('.has-lens')
+  const S = box && [...LENSES.values()].find((s) => s.box === box && s.idx >= 0)
+  if (!S) return
+  S.drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, r: box.getBoundingClientRect(), moved: false }
+})
+addEventListener(
+  'pointermove',
+  (e) => {
+    for (const S of LENSES.values()) {
+      const d = S.drag
+      if (!d || d.id !== e.pointerId) continue
+      const X = S.axis === 'x'
+      const off = X ? e.clientX - d.x0 : e.clientY - d.y0
+      if (!d.moved) {
+        if (Math.abs(off) < 8) continue
+        // 分段控制在內容裡：手指主要是上下滑 → 交給頁面捲動
+        if (Math.abs(X ? e.clientY - d.y0 : e.clientX - d.x0) > Math.abs(off)) {
+          S.drag = null
+          continue
+        }
+        d.moved = true
+        S.box.classList.add('lens-drag')
+      }
+      let p = (X ? e.clientX - d.r.left : e.clientY - d.r.top) - S.len / 2
+      const lo = S.homes[0]
+      const hi = S.homes[S.homes.length - 1]
+      if (p < lo) p = lo - (lo - p) * 0.3
+      else if (p > hi) p = hi + (p - hi) * 0.3
+      S.target = p
+      lensRun(S)
+    }
+  },
+  { passive: true },
+)
+function lensEnd(e) {
+  for (const S of LENSES.values()) {
+    const d = S.drag
+    if (!d || d.id !== e.pointerId) continue
+    S.drag = null
+    S.box?.classList.remove('lens-drag')
+    if (!d.moved) continue
+    lensEatClick = performance.now() + 450
+    let k = S.idx
+    if (e.type === 'pointerup') {
+      let best = Infinity
+      S.homes.forEach((h, i) => {
+        if (Math.abs(h - S.target) < best) (best = Math.abs(h - S.target)), (k = i)
+      })
+    }
+    S.target = S.homes[k]
+    if (k !== S.idx)
+      S.after = () => {
+        lensClickOk = true
+        try {
+          S.items[k]?.click()
+        } finally {
+          lensClickOk = false
+        }
+      }
+    lensRun(S)
+  }
+}
+addEventListener('pointerup', lensEnd)
+addEventListener('pointercancel', lensEnd)
+addEventListener(
+  'click',
+  (e) => {
+    if (lensClickOk || performance.now() > lensEatClick || !e.target.closest?.('.has-lens')) return
+    lensEatClick = 0
+    e.preventDefault()
+    e.stopImmediatePropagation()
+  },
+  true,
+)
+let lensResize = 0
+addEventListener('resize', () => {
+  cancelAnimationFrame(lensResize)
+  lensResize = requestAnimationFrame(() => mountLenses())
+})
+// 上方標題列：捲下去才出現玻璃的分隔線（在最上面時跟背景融在一起，跟 iOS 一樣）
+let scrolledFlag = false
+addEventListener(
+  'scroll',
+  () => {
+    const s = scrollY > 4
+    if (s !== scrolledFlag) document.documentElement.classList.toggle('is-scrolled', (scrolledFlag = s))
+  },
+  { passive: true },
+)
 /** 電腦、平板的右側選單收合（只剩圖示）；記在這台 */
 // 沒按過收合鈕：平板直放（不到 1000px 寬）預設收起來，內容才不會被擠到只剩七成
 const sideCollapsed = () => {
@@ -4610,6 +4817,8 @@ async function render() {
   document.body.classList.toggle('read-only', !canEdit())
   bindInputs()
   glueTails($app)
+  // 液態玻璃鏡片：放在最後（量一次位置，不會讓瀏覽器多排一次版）
+  mountLenses()
   // 新版等著裝：換到安全的頁面（例如回到首頁）就重新整理
   if (updateReady) setTimeout(tryReload, 300)
 }
