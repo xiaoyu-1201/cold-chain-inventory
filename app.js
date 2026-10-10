@@ -1777,6 +1777,10 @@ function liquidLens(key, box, items, opts) {
   if (opts.fit) {
     el.style.height = a.offsetHeight + 2 * pad + 'px'
     if (opts.fit === 'wh') el.style.width = a.offsetWidth + 2 * pad + 'px'
+  } else {
+    // 側邊欄（fit）寫過的大小要清掉：跨過 768px 變回手機分頁列時，交給 CSS（不然鏡片會留著 44px 高、往上偏）
+    el.style.height = ''
+    el.style.width = ''
   }
   if (pad) el.style.top = a.offsetTop - pad + 'px'
   const len = X ? el.offsetWidth : el.offsetHeight

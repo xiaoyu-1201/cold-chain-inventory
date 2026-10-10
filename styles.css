@@ -1269,6 +1269,8 @@ button.swatch::after {
   left: 50%;
   bottom: calc(var(--safe-b) + 96px);
   transform: translateX(-50%);
+  /* max-content：用 left:50% 置中時，寬度不會被限制在右半邊（手機長訊息才不會折成好幾行）；max-width 擋住不會太寬 */
+  width: max-content;
   max-width: min(92vw, 520px);
   padding: 12px 18px;
   border-radius: 14px;
