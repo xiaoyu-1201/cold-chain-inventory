@@ -494,6 +494,226 @@ button.row[aria-current='true'] {
   flex: 1;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
+  /* 一指捲動交給瀏覽器、兩指縮放由程式處理（不會變成整頁放大） */
+  touch-action: pan-x pan-y;
+  overscroll-behavior: contain;
+}
+/* 右上角關閉（44×44，Apple 的圓形 ×） */
+.viewer-close {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  cursor: pointer;
+}
+.viewer-close:active {
+  transform: scale(0.94);
+}
+.viewer-close:focus-visible,
+.viewer-bar .btn:focus-visible,
+.pv-nav:focus-visible {
+  outline: 3px solid #64d2ff;
+  outline-offset: 2px;
+}
+/* 全站共用的放大檢視（photoViewer）：蓋在所有視窗上面 */
+.viewer.pv {
+  z-index: 60;
+  background: rgba(0, 0, 0, var(--pv-dim, 1));
+  color: #fff;
+  animation: fade-in 0.18s ease;
+}
+.pv .viewer-bar,
+.pv .pv-foot {
+  transition: opacity 0.15s;
+}
+.pv-pad {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.12s ease-out;
+}
+.pv-stage {
+  position: relative;
+  flex: none;
+  cursor: zoom-in;
+}
+.pv-scroll.zoomed .pv-stage {
+  cursor: grab;
+}
+/* 沒放大時照片整張都看得到，不用捲軸 */
+.pv-scroll:not(.zoomed) {
+  overflow: hidden;
+}
+.pv-stage img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.pv-box {
+  position: absolute;
+  border: 3px solid #0a84ff;
+  border-radius: 3px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+.pv-nav {
+  position: absolute;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  margin-top: -22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+.pv-nav.prev {
+  left: max(12px, env(safe-area-inset-left, 0px));
+}
+.pv-nav.next {
+  right: max(12px, env(safe-area-inset-right, 0px));
+}
+/* 手機、平板用手指滑就好，箭頭不擋照片 */
+@media (hover: none) and (pointer: coarse) {
+  .pv-nav {
+    display: none;
+  }
+}
+.pv-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px calc(var(--safe-b) + 12px);
+  background: rgba(0, 0, 0, 0.7);
+}
+.pv-foot[hidden],
+.pv-cap[hidden] {
+  display: none;
+}
+.pv-cap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: 15px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.92);
+}
+.pv-cap-text {
+  overflow-wrap: anywhere;
+}
+.pv-foot .btn {
+  flex: none;
+  min-height: 44px;
+}
+/* 縮圖：看得出可以點（游標放大鏡＋右下角小放大鏡）；小於 44 的縮圖，點的範圍往外撐到 44 */
+.zoomable {
+  position: relative;
+  flex: none;
+  display: inline-block;
+  line-height: 0;
+  border-radius: 10px;
+  cursor: zoom-in;
+  -webkit-tap-highlight-color: transparent;
+}
+.zoomable::before {
+  content: '';
+  position: absolute;
+  inset: min(0px, calc((100% - 44px) / 2));
+}
+.zoomable.block {
+  display: block;
+  margin: 10px 0;
+}
+.zoomable:focus-visible,
+.q-zoom[data-zoom-src]:focus-visible {
+  outline: 3px solid var(--tint);
+  outline-offset: 2px;
+}
+.zoomable:active img,
+.q-zoom[data-zoom-src]:active svg {
+  opacity: 0.75;
+}
+.zoom-badge {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  pointer-events: none;
+  line-height: 0;
+}
+.zoomable.md .zoom-badge,
+.cap-view .zoom-badge {
+  right: 4px;
+  bottom: 4px;
+  width: 20px;
+  height: 20px;
+}
+.zoomable.lg .zoom-badge,
+.q-zoom .zoom-badge {
+  right: 8px;
+  bottom: 8px;
+  width: 30px;
+  height: 30px;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+.q-zoom[data-zoom-src] {
+  position: relative;
+  cursor: zoom-in;
+}
+.cap-view {
+  position: relative;
+  cursor: zoom-in;
+}
+/* 樣品照縮圖、產品視窗的大照片、新增樣品照 */
+.sample-thumb {
+  display: block;
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  object-fit: contain;
+  background: var(--card-2);
+}
+.sheet-photo {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  border-radius: 12px;
+  background: var(--card-2);
+}
+.sample-new {
+  text-align: center;
+  margin: 0 0 12px;
+}
+.sample-new img {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  border-radius: 12px;
 }
 .viewer .photo-wrap.viewer-photo {
   border-radius: 0;
@@ -502,7 +722,9 @@ button.row[aria-current='true'] {
 }
 .viewer-bar .zoom-label {
   flex: 1;
-  text-align: center;
+  min-width: 0;
+  padding-left: 4px;
+  text-align: left;
   color: rgba(255, 255, 255, 0.85);
   font-size: 14px;
 }
@@ -824,13 +1046,6 @@ textarea.field {
 }
 .cap-del:active span {
   background: var(--red);
-}
-.cap-preview {
-  width: 100%;
-  max-height: 60dvh;
-  object-fit: contain;
-  border-radius: 12px;
-  background: var(--card-2);
 }
 
 /* 結果清單的一列 */
