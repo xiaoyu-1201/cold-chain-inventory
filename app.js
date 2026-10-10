@@ -1831,6 +1831,8 @@ function lensPaint(S) {
     const on = Math.abs(S.pos) > 0.05 || Math.abs(S.st - 1) > 0.002
     const cross = S.st >= 1.04 ? 1.04 - (S.st - 1.04) : S.st
     S.el.style.transform = on ? `translate3d(${S.pos.toFixed(2)}px,${S.drag ? 1 : 0}px,0) scale(${S.st.toFixed(3)},${cross.toFixed(3)})` : ''
+    // JS 每一格寫 transform 時關掉 CSS 的彈簧 transition（不然每格都重新開一段 0.5 秒動畫，會慢半拍、抖）
+    S.el.classList.toggle('lens-drive', on)
     return
   }
   const X = S.axis === 'x'
@@ -1845,7 +1847,10 @@ function lensPaint(S) {
     const ic = S.self ? b : b.querySelector('.ico') // 一排按鈕：整顆按鈕放大
     if (!ic) return
     const s = 1 + S.mag * Math.max(0, 1 - Math.abs(S.homes[k] - S.pos) / pitch) * act
-    ic.style.transform = s > 1.002 ? `scale(${s.toFixed(3)})` : ''
+    // 一排按鈕拖曳中：每顆都由 JS 決定大小（連原本按下那顆的 :active 1.04 也蓋掉，鏡片滑走它就變回 1）
+    const driving = s > 1.002 || (S.self && !!S.drag?.moved)
+    ic.style.transform = driving ? `scale(${s.toFixed(3)})` : ''
+    ic.classList.toggle('lens-drive', driving)
   })
 }
 function lensStep(S, t) {
@@ -1918,15 +1923,22 @@ function dropLens(k) {
   const S = LENSES.get(k)
   if (!S) return
   cancelAnimationFrame(S.raf)
-  if (S.jelly) S.el.style.transform = ''
-  else {
+  if (S.jelly) {
+    S.el.style.transform = ''
+    S.el.classList.remove('lens-drive')
+  } else {
     S.el?.remove()
     S.box?.classList.remove('has-lens')
-    S.items?.forEach((b) => (b.style.transform = ''))
+    S.items?.forEach((b) => {
+      b.style.transform = ''
+      b.classList.remove('lens-drive')
+    })
   }
   LENSES.delete(k)
 }
 document.addEventListener('pointerdown', (e) => {
+  // 新的一次按下：上次拖完「不算 click」的時間到此為止（iOS 拖超過約 10px 不會補發 click，不然下一次正常點擊會被吃掉）
+  lensEatClick = 0
   lensCancelAll() // 上一次拖曳沒收到放開：先結束
   if (reduceMotion.matches || e.button > 0 || !e.isPrimary) return
   let box = e.target.closest?.('.tabbar .inner.has-lens, .seg.has-lens')
@@ -1940,7 +1952,8 @@ document.addEventListener('pointerdown', (e) => {
       liquidLens('row', b.parentElement, sibs, { axis: 'x', fit: 'wh', pad: 4, cls: 'row-lens', mag: 0.06, self: true, temp: true, isActive: (x) => x === b })
       box = b.parentElement
     } else {
-      const J = { jelly: true, el: b, axis: 'x', idx: 0, homes: [0], items: [], pos: 0, v: 0, target: 0, st: 1, stv: 0, raf: 0, last: 0, mag: 0 }
+      // st 從 1.04 起跳：跟 CSS :active 的放大接上，一開始拖不會先縮一下
+      const J = { jelly: true, el: b, axis: 'x', idx: 0, homes: [0], items: [], pos: 0, v: 0, target: 0, st: 1.04, stv: 0, raf: 0, last: 0, mag: 0 }
       J.drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, moved: false }
       LENSES.set('jelly', J)
       return
@@ -4958,7 +4971,8 @@ async function render() {
  * 一個字單獨掉到下一行（「秒。」「選」「號）」）：把每一段說明最後 3 個字黏在一起，不在中間換行。
  * CSS 的 text-wrap: pretty 對中文常常沒效（iPhone 的 Safari 舊版也不支援），所以畫完再處理一次；不用量字的位置，很快。
  */
-const GLUE_SEL = 'p, li, .meta, .footnote, .subtitle, .sheet-sub, .hint-card > div, .doubt-reason, .setup-card p, .pk-name, .pk-tname, .pk-rrow .title, .pk-res .title, .pk-cross-row .title'
+// .row.muted：空狀態、說明的灰字列（4.7.4 QA：「…記在這裡。」只剩「裡。」、「…連結碼。」只剩「碼。」）
+const GLUE_SEL = 'p, li, .meta, .footnote, .subtitle, .sheet-sub, .hint-card > div, .doubt-reason, .setup-card p, .row.muted, .pk-name, .pk-tname, .pk-rrow .title, .pk-res .title, .pk-cross-row .title'
 function glueTails(root) {
   for (const el of root.querySelectorAll(GLUE_SEL)) {
     if ((el.textContent || '').length < 14) continue

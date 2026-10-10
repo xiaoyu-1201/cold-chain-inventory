@@ -4048,9 +4048,13 @@ h2,
     scroll-padding: calc(var(--safe-t) + 52px) 0 calc(var(--safe-b) + 96px);
   }
 }
-/* 鏡片（共用）：按鈕在鏡片上面 */
-.has-lens {
+/* 鏡片（共用）：按鈕在鏡片上面。用 :where 讓權重是 0：容器本來是 sticky／fixed（例如首頁標題列）時不會被改成 relative */
+:where(.has-lens) {
   position: relative;
+}
+/* JS 每一格在寫 transform（鏡片放大、果凍）：先關掉 CSS 的彈簧 transition */
+.lens-drive {
+  transition: none !important;
 }
 .has-lens > button {
   position: relative;
