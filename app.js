@@ -3753,7 +3753,8 @@ function addLines(p, lines, { quiet = false } = {}) {
   const commit = async (mode) => {
     if (p._gone) return
     p.lines.push(...fresh)
-    if (mode === 'add') for (const { l, target } of dups) if (l.qty != null) target.qty = round2((target.qty || 0) + l.qty)
+    // 數量加上去：單子變多了，那一項要重新點（不然會直接變紅「少 N」）
+    if (mode === 'add') for (const { l, target } of dups) if (l.qty != null) Object.assign(target, { qty: round2((target.qty || 0) + l.qty), done: false })
     await pickSave(p)
     if (!quiet) {
       const miss = fresh.filter((l) => !l.no && !l.itemId).length
@@ -3807,6 +3808,7 @@ function addPickLine(r) {
   if (target)
     return qtySheet({ title: `已經在第 ${p.lines.indexOf(target) + 1} 項`, sub: `${esc(t.name)}：單子現在 ${esc(fmtQty(target.qty) || '？')}。要把數量加上去嗎？加幾個？`, action: '數量加上去', skip: '略過', quick: [1, 2, 3, 5, 10] }, async (n) => {
       target.qty = round2((target.qty || 0) + n)
+      target.done = false // 單子變多了，要重新點
       await pickSave(p)
       toast(`第 ${p.lines.indexOf(target) + 1} 項的單子數量改成 ${fmtQty(target.qty)}`)
       after(target.id)
@@ -3838,7 +3840,7 @@ function mergeIntoSheet(p, l, target) {
     (el, close) => {
       const finish = (add) => {
         close()
-        if (add && l.qty != null) target.qty = round2((target.qty || 0) + l.qty)
+        if (add && l.qty != null) Object.assign(target, { qty: round2((target.qty || 0) + l.qty), done: false })
         const i = p.lines.indexOf(l)
         if (i >= 0) p.lines.splice(i, 1)
         pickSave(p)
@@ -4318,10 +4320,16 @@ const round3 = (v) => Math.round(v * 1000) / 1000
  * 在手機上把框裡那一塊切出來，遮住的欄位塗黑（canvas）：只有這一塊會送給 AI。
  * 從原始照片切（比先縮小再切清楚），切完再縮到長邊 1600。
  */
-async function cropToBlob(src, r, masks = []) {
+async function cropToBlob(src, r, masks = [], expectRatio = 0) {
   const bmp = await createImageBitmap(src, { imageOrientation: 'from-image' }).catch(() => bitmapOf(src))
   const W = bmp.width
   const H = bmp.height
+  // 隱私保險（4.7.1 code review）：框和遮住的位置是畫在縮好的圖上；從原檔重新解碼時轉正方式如果不一樣，
+  // 遮住的位置會跑掉、單價金額可能漏送 → 寬高比差超過 2% 就不用原檔（呼叫的地方會改從縮好的那張切）
+  if (expectRatio && Math.abs(W / H / expectRatio - 1) > 0.02) {
+    bmp.close?.()
+    throw new Error('ratio mismatch')
+  }
   const sx = Math.round(r.x1 * W)
   const sy = Math.round(r.y1 * H)
   const sw = Math.max(1, Math.min(W - sx, Math.round((r.x2 - r.x1) * W)))
@@ -4365,13 +4373,15 @@ async function readNoteFile(file) {
   }
   const res = await cropSheet(photo.blob)
   if (!res) return
-  const cropped = await cropToBlob(file, res.rect, res.masks).catch(() => cropToBlob(photo.blob, res.rect, res.masks).catch(() => null))
+  const cropped = await cropToBlob(file, res.rect, res.masks, photo.w / photo.h).catch(() => cropToBlob(photo.blob, res.rect, res.masks).catch(() => null))
   if (!cropped) return toast('這張照片切不出來，換一張試試')
   sendNote(p, cropped)
 }
 /** 送給 AI 讀（失敗可以按「再試一次」：用剛剛切好的那張，不用重拍、重框） */
 async function sendNote(p, cropped) {
   if (p._gone) return
+  // 已經放棄的「改一下」副本：不要再叫 AI（白花額度，讀完也會丟掉）
+  if (p._copy && state.pick !== p) return toast('這次修改已經放棄了')
   if (state.pickBusyId) return toast('AI 還在讀上一張，讀完再試')
   const doneAt0 = p.doneAt
   state.pickBusyId = p.id
@@ -4459,8 +4469,13 @@ async function applyRemotePick(rec, cur, id) {
   if (cur && tOf(cur) >= t) return false
   const d = normPick(rec.d, id)
   if (!d) return false
-  const v = { ...d, updatedAt: t, _syncT: t }
+  // 這台有還沒上傳的修改（例如倉庫沒網路時改的），別台又比較晚改了同一張：不要整筆蓋掉，
+  // 用每一列的 id 合在一起（這台改過的列用這台的、雲端才有的列加進來），再傳上去（4.7.1 code review）
+  const localDirty = cur && cur.doneAt && tOf(cur) !== cur._syncT
+  const v = localDirty ? { ...mergePick(null, cur, d), id, updatedAt: Math.max(Date.now(), t + 1), _syncT: undefined } : { ...d, updatedAt: t, _syncT: t }
+  if (localDirty && !v.lines.length) return false
   await idb.picks.putRaw(v)
+  if (localDirty) scheduleSync()
   picksCache = null
   if (state.pick?.id === id) {
     if (editingCopy()) {

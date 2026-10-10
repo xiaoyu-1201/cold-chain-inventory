@@ -427,6 +427,7 @@ function syncPush(data, props, P, manager) {
     const maxT = Date.now() + 10 * 60 * 1000
     ;(data.records || []).forEach(function (r) {
       if (!r || typeof r.k !== 'string' || !r.k) return
+      if (!r.del && r.d === undefined) return // 沒有內容、也不是刪除：略過，不讓整批失敗
       r.t = Number(r.t)
       if (!(r.t > 0)) r.t = Date.now()
       if (r.t > maxT) r.t = maxT
