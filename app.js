@@ -85,7 +85,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.3（10/10・液態玻璃）'
+const VERSION = '4.7.4（10/10・玻璃按鈕）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1757,9 +1757,11 @@ function liquidLens(key, box, items, opts) {
     el.setAttribute('aria-hidden', 'true')
     box.prepend(el)
   }
+  if (opts.cls) el.classList.add(opts.cls)
+  el.classList.remove('fade')
   box.classList.add('has-lens')
   const axisChanged = S.axis !== opts.axis
-  Object.assign(S, { box, el, items, axis: opts.axis, mag: opts.mag || 0 })
+  Object.assign(S, { box, el, items, axis: opts.axis, mag: opts.mag || 0, self: !!opts.self, temp: !!opts.temp })
   const active = items.findIndex(opts.isActive)
   if (active < 0) {
     el.classList.add('off')
@@ -1770,10 +1772,12 @@ function liquidLens(key, box, items, opts) {
   el.classList.remove('off')
   const X = opts.axis === 'x'
   const a = items[active]
+  const pad = opts.pad || 0 // 一排按鈕的鏡片比按鈕大一圈
   if (opts.fit) {
-    el.style.height = a.offsetHeight + 'px'
-    if (opts.fit === 'wh') el.style.width = a.offsetWidth + 'px'
+    el.style.height = a.offsetHeight + 2 * pad + 'px'
+    if (opts.fit === 'wh') el.style.width = a.offsetWidth + 2 * pad + 'px'
   }
+  if (pad) el.style.top = a.offsetTop - pad + 'px'
   const len = X ? el.offsetWidth : el.offsetHeight
   S.len = len
   S.homes = items.map((b) => (X ? b.offsetLeft + (b.offsetWidth - len) / 2 : b.offsetTop + (b.offsetHeight - len) / 2))
@@ -1822,6 +1826,13 @@ function lensCancelAll() {
 }
 function lensPaint(S) {
   if (!S.el) return
+  if (S.jelly) {
+    // 單顆按鈕的果凍：往拖的方向移（最多 6px）、順著方向拉長、另一邊壓扁；停下來交還給 CSS（:active）
+    const on = Math.abs(S.pos) > 0.05 || Math.abs(S.st - 1) > 0.002
+    const cross = S.st >= 1.04 ? 1.04 - (S.st - 1.04) : S.st
+    S.el.style.transform = on ? `translate3d(${S.pos.toFixed(2)}px,${S.drag ? 1 : 0}px,0) scale(${S.st.toFixed(3)},${cross.toFixed(3)})` : ''
+    return
+  }
   const X = S.axis === 'x'
   const along = S.st
   const cross = Math.max(0.9, 1 - (S.st - 1) * 0.4)
@@ -1831,7 +1842,7 @@ function lensPaint(S) {
   const pitch = S.homes.length > 1 ? Math.abs(S.homes[1] - S.homes[0]) || 1 : 1
   const act = S.drag?.moved ? 1 : Math.min(1, Math.abs(S.v) / 600 + Math.abs(S.pos - S.target) / pitch)
   S.items.forEach((b, k) => {
-    const ic = b.querySelector('.ico')
+    const ic = S.self ? b : b.querySelector('.ico') // 一排按鈕：整顆按鈕放大
     if (!ic) return
     const s = 1 + S.mag * Math.max(0, 1 - Math.abs(S.homes[k] - S.pos) / pitch) * act
     ic.style.transform = s > 1.002 ? `scale(${s.toFixed(3)})` : ''
@@ -1845,12 +1856,15 @@ function lensStep(S, t) {
   S.v += (-k * (S.pos - S.target) - c * S.v) * dt
   S.pos += S.v * dt
   const sp = Math.abs(S.v)
-  S.stv += (-450 * (S.st - (1 + Math.min(0.25, sp / 2400))) - 16 * S.stv) * dt
-  S.st = Math.min(1.25, Math.max(0.94, S.st + S.stv * dt))
+  // 拉伸：鏡片看速度；單顆按鈕的果凍看拖了多遠（按住 1.04、拖到 6px 是 1.08）
+  const stT = S.jelly ? (S.drag?.moved ? 1.04 + Math.min(0.04, Math.abs(S.pos) / 150) : 1) : 1 + Math.min(0.25, sp / 2400)
+  S.stv += (-450 * (S.st - stT) - 16 * S.stv) * dt
+  S.st = Math.min(S.jelly ? 1.08 : 1.25, Math.max(0.94, S.st + S.stv * dt))
   const near = Math.abs(S.pos - S.target) < 0.8 && sp < 15
   if (!S.drag && near && Math.abs(S.st - 1) < 0.003 && Math.abs(S.stv) < 0.05) {
     Object.assign(S, { pos: S.target, v: 0, st: 1, stv: 0, raf: 0, last: 0 })
     lensPaint(S)
+    if (S.temp) S.el.classList.add('fade') // 一排按鈕的鏡片：放開、停下來就淡掉
     return
   }
   lensPaint(S)
@@ -1873,6 +1887,14 @@ function mountLenses(root = $app) {
       LENSES.delete(k)
     }
   }
+  // 重畫後：按鈕的果凍、一排按鈕的鏡片如果元素已經不在畫面上，狀態清掉（不殘留）
+  for (const k of ['row', 'jelly']) {
+    const S = LENSES.get(k)
+    if (S && !S.el?.isConnected) {
+      cancelAnimationFrame(S.raf)
+      LENSES.delete(k)
+    }
+  }
   lensRO?.disconnect()
   const nav = root.querySelector('.tabbar .inner')
   if (nav) {
@@ -1885,14 +1907,50 @@ function mountLenses(root = $app) {
     liquidLens(`seg:${state.view}:${i}`, seg, [...seg.querySelectorAll(':scope > button')], { axis: 'x', fit: 'wh', isActive: (b) => b.getAttribute('aria-selected') === 'true' })
   })
 }
+// 4.7.4 玻璃按鈕的液態效果（同一套鏡片、彈簧；事件全部在 document 一層處理，不在每顆按鈕掛 listener）
+// - 一排兩顆以上、排在同一行的按鈕：按下時那顆後面出現鏡片，手指在這排上滑，鏡片跟著走、經過的按鈕放大；
+//   放開在哪一顆就按那一顆，滑出這一排放開＝取消
+// - 單顆按鈕：按住往旁邊拖，果凍一樣往拖的方向變形；拖出按鈕放開＝取消
+// - 上下滑交給頁面捲動（按鈕 CSS：touch-action: pan-y）；不能按的按鈕、「減少動態效果」不做
+const GLASS_BTN = '.btn, .chip, .icon-btn, .pk-done'
+const btnOk = (b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true' && b.offsetParent !== null
+function dropLens(k) {
+  const S = LENSES.get(k)
+  if (!S) return
+  cancelAnimationFrame(S.raf)
+  if (S.jelly) S.el.style.transform = ''
+  else {
+    S.el?.remove()
+    S.box?.classList.remove('has-lens')
+    S.items?.forEach((b) => (b.style.transform = ''))
+  }
+  LENSES.delete(k)
+}
 document.addEventListener('pointerdown', (e) => {
   lensCancelAll() // 上一次拖曳沒收到放開：先結束
   if (reduceMotion.matches || e.button > 0 || !e.isPrimary) return
-  const box = e.target.closest?.('.has-lens')
-  const S = box && [...LENSES.values()].find((s) => s.box === box && s.idx >= 0)
+  let box = e.target.closest?.('.tabbar .inner.has-lens, .seg.has-lens')
+  if (!box) {
+    const b = e.target.closest?.(GLASS_BTN)
+    if (!b || !btnOk(b) || b.closest('.tabbar, .seg, .stepper, .viewer, .crop-wrap, .toast')) return
+    dropLens('row')
+    dropLens('jelly')
+    const sibs = [...b.parentElement.children].filter((x) => x.matches(GLASS_BTN) && btnOk(x))
+    if (sibs.length >= 2 && sibs.every((x) => x.offsetTop === b.offsetTop)) {
+      liquidLens('row', b.parentElement, sibs, { axis: 'x', fit: 'wh', pad: 4, cls: 'row-lens', mag: 0.06, self: true, temp: true, isActive: (x) => x === b })
+      box = b.parentElement
+    } else {
+      const J = { jelly: true, el: b, axis: 'x', idx: 0, homes: [0], items: [], pos: 0, v: 0, target: 0, st: 1, stv: 0, raf: 0, last: 0, mag: 0 }
+      J.drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, moved: false }
+      LENSES.set('jelly', J)
+      return
+    }
+  }
+  const S = [...LENSES.values()].find((s) => s.box === box && s.idx >= 0)
   if (!S) return
   S.drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, r: box.getBoundingClientRect(), moved: false }
 })
+const inRect = (r, e, m = 0) => e.clientX >= r.left - m && e.clientX <= r.right + m && e.clientY >= r.top - m && e.clientY <= r.bottom + m
 addEventListener(
   'pointermove',
   (e) => {
@@ -1903,12 +1961,18 @@ addEventListener(
       const off = X ? e.clientX - d.x0 : e.clientY - d.y0
       if (!d.moved) {
         if (Math.abs(off) < 8) continue
-        // 分段控制在內容裡：手指主要是上下滑 → 交給頁面捲動
+        // 在內容裡：手指主要是上下滑 → 交給頁面捲動
         if (Math.abs(X ? e.clientY - d.y0 : e.clientX - d.x0) > Math.abs(off)) {
           S.drag = null
+          if (S.temp || S.jelly) lensRun(S) // 鏡片淡掉、果凍回原狀
           continue
         }
         d.moved = true
+      }
+      if (S.jelly) {
+        S.target = Math.max(-6, Math.min(6, off * 0.25))
+        lensRun(S)
+        continue
       }
       let p = (X ? e.clientX - d.r.left : e.clientY - d.r.top) - S.len / 2
       const lo = S.homes[0]
@@ -1927,14 +1991,28 @@ function lensEnd(e) {
     if (!d || d.id !== e.pointerId) continue
     S.drag = null
     if (!d.moved) {
-      // 只是點一下：鏡片如果不在這一格（例如上次被打斷），彈回去；換頁的話等重畫再滑過去
-      if (S.idx >= 0 && S.target !== S.homes[S.idx]) {
+      // 只是點一下：瀏覽器自己會送 click。鏡片如果不在這一格（例如上次被打斷）彈回去；一排按鈕的鏡片淡掉
+      if (S.temp || S.jelly || (S.idx >= 0 && S.target !== S.homes[S.idx])) {
         S.target = S.homes[S.idx]
         lensRun(S)
       }
       continue
     }
-    lensEatClick = performance.now() + 450
+    lensEatClick = performance.now() + 450 // 瀏覽器補發的 click 不算：只觸發下面這一次
+    const tap = (b) => {
+      lensClickOk = true
+      try {
+        b?.click()
+      } finally {
+        lensClickOk = false
+      }
+    }
+    if (S.jelly) {
+      S.target = 0
+      lensRun(S)
+      if (e.type === 'pointerup' && inRect(S.el.getBoundingClientRect(), e)) tap(S.el)
+      continue
+    }
     let k = S.idx
     if (e.type === 'pointerup') {
       let best = Infinity
@@ -1944,25 +2022,31 @@ function lensEnd(e) {
     }
     S.target = S.homes[k]
     lensRun(S)
-    // 放開當下就換頁，彈簧在新畫面繼續跑完（狀態跨重畫保留）；換頁被取消的話 mountLenses() 會讓鏡片彈回來
-    if (k !== S.idx) {
-      lensClickOk = true
-      try {
-        S.items[k]?.click()
-      } finally {
-        lensClickOk = false
-      }
+    if (S.temp) {
+      // 一排按鈕：放開在這排裡面才按（按放開的那一顆），滑出去＝取消
+      if (e.type === 'pointerup' && inRect(S.box.getBoundingClientRect(), e, 4)) tap(S.items[k])
+      continue
     }
+    // 放開當下就換頁，彈簧在新畫面繼續跑完（狀態跨重畫保留）；換頁被取消的話 mountLenses() 會讓鏡片彈回來
+    if (k !== S.idx) tap(S.items[k])
   }
 }
 addEventListener('pointerup', lensEnd)
 addEventListener('pointercancel', lensEnd)
 addEventListener('blur', lensCancelAll)
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && lensCancelAll())
+// 按鈕被重畫掉（觸控會自動鎖定在按下的那顆）→ 失去鎖定時拖曳也結束
+addEventListener(
+  'lostpointercapture',
+  (e) => {
+    if ([...LENSES.values()].some((S) => S.drag?.id === e.pointerId)) lensCancelAll()
+  },
+  true,
+)
 addEventListener(
   'click',
   (e) => {
-    if (lensClickOk || performance.now() > lensEatClick || !e.target.closest?.('.has-lens')) return
+    if (lensClickOk || performance.now() > lensEatClick) return
     lensEatClick = 0
     e.preventDefault()
     e.stopImmediatePropagation()

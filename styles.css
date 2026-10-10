@@ -4268,3 +4268,217 @@ html.no-glass {
     border: 2px solid Highlight;
   }
 }
+
+/* ───────── 4.7.4 玻璃按鈕（iOS 26 的 glass button）：頁面裡的按鈕也是液態玻璃 ─────────
+ * 按鈕底下多半是實心白卡 → 重點是「玻璃感」：半透明淡色底、白色反光邊、頂端高光、很淡的斜向高光、柔和小陰影（不靠模糊）。
+ * 主要＝藍色玻璃（白字）、danger＝紅色玻璃（紅字）、次要／plain／晶片＝淡藍灰玻璃。不包括清單整列、卡片、輸入框。
+ * 按下：放大 1.04、往下壓、高光變亮；放開用有一點 overshoot 的曲線彈回（純 CSS）。
+ * 按住往旁邊拖的果凍變形、一排按鈕的鏡片：app.js 的 liquidLens()（跟分頁列同一套）。
+ */
+:root {
+  --gb-sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0) 55%);
+  --gb-tint: rgba(31, 68, 168, 0.08); /* 次要：帶一點藍灰 */
+  --gb-plain: rgba(255, 255, 255, 0.6);
+  --gb-red: rgba(207, 50, 56, 0.09);
+  --gb-ink: var(--tint);
+  --gb-edge: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+  --gb-edge-press: inset 0 1.5px 0 #ffffff, inset 0 0 0 1px rgba(255, 255, 255, 0.85);
+  --gb-shadow: 0 1px 2px rgba(16, 32, 72, 0.1), 0 4px 12px -5px rgba(16, 32, 72, 0.2);
+  --gb-blue: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0) 45%), linear-gradient(135deg, #3a62cc, #1f44a8 62%);
+  --gb-blue-press: linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.04) 50%), linear-gradient(135deg, #3159c4, #1a3c98 62%);
+  --gb-blue-edge: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.14), inset 0 -1px 0 rgba(0, 0, 0, 0.12);
+  --gb-blue-shadow: 0 1px 2px rgba(15, 30, 80, 0.2), 0 6px 16px -8px rgba(31, 68, 168, 0.7);
+  --gb-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --gb-sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 55%);
+    --gb-tint: rgba(143, 169, 255, 0.14);
+    --gb-plain: rgba(255, 255, 255, 0.08);
+    --gb-red: rgba(255, 107, 112, 0.14);
+    --gb-ink: #b3c3ff;
+    --gb-edge: inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+    --gb-edge-press: inset 0 1.5px 0 rgba(255, 255, 255, 0.32), inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+    --gb-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 12px -5px rgba(0, 0, 0, 0.6);
+    --gb-blue: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 45%), linear-gradient(135deg, #3d65d6, #2448ad 62%);
+    --gb-blue-press: linear-gradient(180deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.04) 50%), linear-gradient(135deg, #3559c4, #1f3f9c 62%);
+    --gb-blue-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 0 transparent;
+  }
+}
+.btn,
+.chip,
+.icon-btn,
+.pk-done,
+.stepper button {
+  touch-action: pan-y pinch-zoom; /* 上下滑照常捲頁面；左右拖交給果凍效果 */
+  transition: transform 0.5s var(--gb-spring), box-shadow 0.2s ease, background-color 0.12s ease, opacity 0.12s ease;
+}
+.btn {
+  background: var(--gb-blue);
+  box-shadow: var(--gb-blue-edge), var(--gb-blue-shadow);
+}
+.btn:active {
+  background: var(--gb-blue-press);
+}
+.btn.secondary {
+  background: var(--gb-sheen), var(--gb-tint);
+  color: var(--gb-ink);
+  box-shadow: var(--gb-edge), var(--gb-shadow);
+}
+.btn.plain,
+.icon-btn:not(.small),
+.chip {
+  background: var(--gb-sheen), var(--gb-plain);
+  box-shadow: var(--gb-edge), var(--gb-shadow);
+}
+.btn.plain,
+.icon-btn:not(.small) {
+  color: var(--gb-ink);
+}
+.btn.danger {
+  background: var(--gb-sheen), var(--gb-red);
+  box-shadow: var(--gb-edge), var(--gb-shadow);
+}
+.btn.secondary:active {
+  background: var(--gb-sheen), var(--gb-sheen), var(--gb-tint);
+  box-shadow: var(--gb-edge-press), var(--gb-shadow);
+}
+.btn.plain:active,
+.icon-btn:not(.small):active,
+.chip:active {
+  background: var(--gb-sheen), var(--gb-sheen), var(--gb-plain);
+  box-shadow: var(--gb-edge-press), var(--gb-shadow);
+}
+.btn.danger:active {
+  background: var(--gb-sheen), var(--gb-sheen), var(--gb-red);
+  box-shadow: var(--gb-edge-press), var(--gb-shadow);
+}
+.chip.on {
+  background: var(--gb-sheen), var(--gb-tint);
+}
+.chip[aria-pressed='true'] {
+  background: var(--gb-blue);
+  box-shadow: var(--gb-blue-edge), var(--gb-blue-shadow);
+}
+.stepper {
+  background: var(--gb-sheen), var(--gb-tint);
+  box-shadow: var(--gb-edge);
+}
+.stepper button:active {
+  background: rgba(255, 255, 255, 0.55);
+  transform: scale(1.08);
+}
+.pk-done {
+  background: var(--gb-sheen), var(--gb-tint);
+  box-shadow: var(--gb-edge);
+}
+.pk-done.on {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0) 45%), #1d8348;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+.st-bad .pk-done.on {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0) 45%), #cf3238;
+}
+/* 按下：放大一點、往下壓（放開時用 --gb-spring 彈回） */
+.btn:active,
+.chip:active,
+.icon-btn:active,
+.pk-done:active {
+  transform: translateY(1px) scale(1.04);
+  transition-duration: 0.14s;
+}
+/* 不能按：看得出來（淡、沒有陰影） */
+.btn[disabled],
+.btn[aria-disabled='true'],
+.pk-done[aria-disabled='true'] {
+  box-shadow: none;
+}
+/* 黑底（放大看照片、框選單子）上的按鈕：深色玻璃邊 */
+.viewer .btn,
+.crop-wrap .btn {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+/* 一排按鈕的鏡片：比按鈕大一圈，跟著手指在這排上滑 */
+.row-lens {
+  border-radius: 999px;
+  transition: opacity 0.2s ease;
+}
+.row-lens.fade {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn:active,
+  .chip:active,
+  .icon-btn:active,
+  .pk-done:active,
+  .stepper button:active {
+    transform: none;
+  }
+}
+/* 退路：減少透明度、高對比、不支援模糊、測試用 no-glass → 回到原本的實心樣式，邊框清楚 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --gb-sheen: none;
+    --gb-tint: var(--tint-soft);
+    --gb-plain: var(--card);
+    --gb-red: var(--red-soft);
+    --gb-edge: inset 0 0 0 1px var(--line);
+    --gb-edge-press: inset 0 0 0 1px var(--line);
+    --gb-shadow: 0 0 0 transparent;
+    --gb-blue: var(--brand);
+    --gb-blue-press: var(--brand-press);
+    --gb-blue-edge: inset 0 0 0 1px transparent;
+    --gb-blue-shadow: 0 0 0 transparent;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --gb-sheen: none;
+    --gb-tint: var(--tint-soft);
+    --gb-plain: var(--card);
+    --gb-red: var(--red-soft);
+    --gb-edge: inset 0 0 0 1px var(--line);
+    --gb-edge-press: inset 0 0 0 1px var(--line);
+    --gb-shadow: 0 0 0 transparent;
+    --gb-blue: var(--brand);
+    --gb-blue-press: var(--brand-press);
+    --gb-blue-edge: inset 0 0 0 1px transparent;
+    --gb-blue-shadow: 0 0 0 transparent;
+  }
+}
+html.no-glass {
+  --gb-sheen: none;
+  --gb-tint: var(--tint-soft);
+  --gb-plain: var(--card);
+  --gb-red: var(--red-soft);
+  --gb-edge: inset 0 0 0 1px var(--line);
+  --gb-edge-press: inset 0 0 0 1px var(--line);
+  --gb-shadow: 0 0 0 transparent;
+  --gb-blue: var(--brand);
+  --gb-blue-press: var(--brand-press);
+  --gb-blue-edge: inset 0 0 0 1px transparent;
+  --gb-blue-shadow: 0 0 0 transparent;
+}
+@media (prefers-contrast: more) {
+  :root {
+    --gb-sheen: none;
+    --gb-tint: var(--card);
+    --gb-plain: var(--card);
+    --gb-red: var(--card);
+    --gb-edge: inset 0 0 0 2px currentColor;
+    --gb-edge-press: inset 0 0 0 2px currentColor;
+    --gb-shadow: 0 0 0 transparent;
+    --gb-blue: var(--brand);
+    --gb-blue-press: var(--brand-press);
+    --gb-blue-edge: inset 0 0 0 2px var(--text);
+    --gb-blue-shadow: 0 0 0 transparent;
+  }
+}
+@media (forced-colors: active) {
+  .btn,
+  .chip,
+  .icon-btn,
+  .pk-done {
+    border: 1px solid ButtonText;
+  }
+}
