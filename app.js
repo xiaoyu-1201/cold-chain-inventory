@@ -85,7 +85,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.5（10/10・分頁列加文字）'
+const VERSION = '4.7.6（10/11・同步變快、貼上邀請）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2149,7 +2149,9 @@ async function viewHome() {
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">${icon('camera', 30)}</span><span class="grow"><b>新盤點</b><span class="meta">拍一格貨架，AI 幫你數<br>拍到 ${locTag(locations()[0]?.code || 'A-03', 'sm')} 會自動填位置</span></span>${chev}</button>`
         : syncReady()
           ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → Gemini API Key」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 Gemini API Key。</p><button class="btn small" data-go="settings">去設定</button></div></div>`
-          : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 Gemini API Key<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>只想看別台盤點的結果：到「設定 → 我收到連結碼了」貼上邀請連結就好，不用 Key。</p><button class="btn small" data-go="settings">去設定</button></div></div>`
+          : freshPhone()
+            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>同事傳了邀請給你？ <span class="badge new">新</span></b><p>在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>。<br>自己是擁有者：按<span class="nb">「去設定」</span>，貼上 <span class="nb">Gemini API Key</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
+            : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 Gemini API Key<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>只想看別台盤點的結果：到「設定 → 我收到連結碼了」貼上邀請連結就好，不用 Key。</p><button class="btn small" data-go="settings">去設定</button></div></div>`
     }
     </div>
     ${sessions.length || items.length ? homeStats(sessions, items) : ''}
@@ -2418,9 +2420,10 @@ async function viewSettings() {
     ${
       // 還沒設定任何同步的新手機：大多是被邀請的同事 →「我收到連結碼了」放最前面（以前要往下捲很久）
       freshPhone()
-        ? `<div class="hint-card stack join-first"><div><b>同事傳了邀請連結給你？</b> <span class="badge new">新</span><br>在 LINE 直接<b>點邀請連結</b>就會自動加入；點了沒反應，把整段連結貼在這裡：</div>
-        <input class="field" id="link-code" placeholder="貼上收到的邀請連結" autocomplete="off" spellcheck="false">
-        <button class="btn small" data-action="sync-link">加入</button>
+        ? `<div class="hint-card stack join-first"><div><b>同事傳了邀請給你？</b> <span class="badge new">新</span><br>在 LINE <b>長按邀請訊息 →「複製」</b>，回到這裡按下面的按鈕。</div>
+        <button class="btn" data-action="paste-invite">貼上邀請並加入</button>
+        <p class="footnote" style="margin:0">按了沒反應：把邀請貼在這裡，再按「加入」。</p>
+        <div class="row-actions"><input class="field" id="link-code" placeholder="貼上收到的邀請" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small secondary" data-action="sync-link">加入</button></div>
         <p class="footnote" style="margin:0">自己就是擁有者（管理這個 App 的人）：不用填這裡，往下設定 Gemini API Key、Google 試算表。</p></div>`
         : ''
     }
@@ -2485,8 +2488,10 @@ async function viewSettings() {
       syncReady()
         ? `${
             serverOld()
-              ? `<div class="hint-card stack" style="margin-bottom:12px"><div><b>Google 那邊的程式碼要更新</b>（新版同步只拿資料、照片打開才抓，快很多）。請<b>擁有者</b>用電腦做一次，約 3 分鐘：<ol class="steps-list" style="margin:8px 0 0"><li>按「複製試算表程式碼」。</li><li>打開當初那個 Google 試算表 → 擴充功能 → Apps Script → 全選、貼上取代 → 存檔。</li><li>右上「部署」→「<b>管理部署作業</b>」→ 鉛筆（編輯）→ 版本選「<b>新版本</b>」→ 部署。<br>（不要用「新增部署作業」，網址會變）</li></ol></div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
-              : ''
+              ? `<div class="hint-card stack" style="margin-bottom:12px"><div><b>Google 那邊的程式碼要更新</b>（新版同步只拿資料、照片打開才抓，快很多）。請<b>擁有者</b>用電腦做一次，約 3 分鐘：${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
+              : serverSlow() && myRole() === 'owner'
+                ? `<div class="hint-card stack" style="margin-bottom:12px"><div><b>同步可以快很多</b> <span class="badge new">新</span><br>更新 Google 那邊的程式碼後，上傳、下載會同時處理很多筆，不再一筆一筆來；點貨、AI 的保護也會一起生效。請用電腦做一次，約 3 分鐘：${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
+                : ''
           }<div class="group">
             <div class="row"><span class="avatar" aria-hidden="true">${esc((ls.get(LS.memberName) || '我').slice(0, 1))}</span><span class="grow"><span class="title">${esc(ls.get(LS.memberName) || '我')}（這台）</span><br><span class="meta">${ROLE_LABEL[myRole()]}・<span class="sync-text">${state.syncState === 'error' && state.syncError ? esc(state.syncError) : esc(syncLabel())}</span></span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
             <div class="row"><span class="grow"><span class="title">這台的盤點人</span><br><span class="meta">新盤點會自動記成這個人，不用每次選${canManage() ? '' : '；由擁有者或管理員設定'}</span></span>${
@@ -2509,9 +2514,9 @@ async function viewSettings() {
         ? ''
         : `<details class="steps"><summary>我收到連結碼了（被邀請的人用）</summary>
       <div class="stack" style="margin-top:8px">
-        <p class="footnote" style="margin:0">最簡單：在 LINE 直接<b>點邀請連結</b>就會自動加入。點了沒反應，再把整段連結貼在這裡。</p>
-        <input class="field" id="link-code" placeholder="貼上收到的邀請連結" autocomplete="off" spellcheck="false">
-        <button class="btn small" data-action="sync-link">加入</button>
+        <p class="footnote" style="margin:0">在 LINE 長按邀請訊息 →「複製」，再按「貼上邀請並加入」。 <span class="badge new">新</span></p>
+        <button class="btn small" data-action="paste-invite">貼上邀請並加入</button>
+        <div class="row-actions"><input class="field" id="link-code" placeholder="或貼在這裡" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small secondary" data-action="sync-link">加入</button></div>
       </div>
     </details>`
     }
@@ -6437,6 +6442,9 @@ const syncReady = () => !!(ls.get(LS.sheet) && ls.get(LS.syncKey))
 /** 雲端的程式碼是新版（照片分開存，同步只拿資料）；舊版要請擁有者重新貼程式碼、部署新版本 */
 const serverV2 = () => Number(ls.get(LS.serverVer, '0')) >= 2
 const serverOld = () => syncReady() && !!ls.get(LS.lastSync) && !serverV2()
+// 4.7.6：雲端程式碼第 3 版會同時讀寫很多筆，同步快很多；還是第 2 版就提醒擁有者更新（格式一樣，不更新也能用）
+const serverSlow = () => syncReady() && !!ls.get(LS.lastSync) && serverV2() && Number(ls.get(LS.serverVer, '0')) < 3
+const DEPLOY_STEPS = `<ol class="steps-list" style="margin:8px 0 0"><li>按「複製試算表程式碼」。</li><li>打開當初那個 Google 試算表 → 擴充功能 → Apps Script → 全選、貼上取代 → 存檔。</li><li>右上「部署」→「<b>管理部署作業</b>」→ 鉛筆（編輯）→ 版本選「<b>新版本</b>」→ 部署。<br>（不要用「新增部署作業」，網址會變）</li></ol>`
 let syncTimer = 0
 let syncing = null
 let repairing = null
@@ -6476,8 +6484,14 @@ async function fillLostPhotos(rec) {
  * 一台同時只抓一次；回傳抓到幾張。
  */
 const fetching = new Map()
+/**
+ * 雲端說「沒有這張」的照片（拍照的那台可能還沒傳上來）：10 分鐘內背景不要再要。
+ * 以前會一直重抓同一張（每次幾秒、最多 200 次），網路被占住，同步就變慢（4.7.6）
+ */
+const cloudMissing = new Map()
+const missingRecently = (sid, pid) => Date.now() - (cloudMissing.get(photoKey(sid, pid)) || 0) < 600000
 function fetchPhotos(s, { quiet = true } = {}) {
-  const want = s.photos.filter((p) => !p.blob && (p.pending || p.lost)).map((p) => p.id)
+  const want = s.photos.filter((p) => !p.blob && (p.pending || p.lost) && !(quiet && missingRecently(s.id, p.id))).map((p) => p.id)
   if (!want.length || !syncReady()) return Promise.resolve(0)
   if (fetching.has(s.id)) return fetching.get(s.id)
   const job = (async () => {
@@ -6491,7 +6505,10 @@ function fetchPhotos(s, { quiet = true } = {}) {
       const back = new Set()
       for (const rec of r.records || []) {
         back.add(rec.k)
-        if (rec.d?.b64) got[rec.k.slice(rec.k.lastIndexOf(':') + 1)] = rec.d.b64
+        if (rec.d?.b64) {
+          got[rec.k.slice(rec.k.lastIndexOf(':') + 1)] = rec.d.b64
+          cloudMissing.delete(rec.k)
+        } else cloudMissing.set(rec.k, Date.now())
       }
       keys = keys.filter((k) => !back.has(k))
       if (!r.more) break
@@ -6511,7 +6528,7 @@ async function prefetchPhotos() {
   try {
     for (let i = 0; i < 200; i++) {
       if (document.visibilityState !== 'visible' || state.view === 'analyzing' || state.busy) break
-      const s = (await db.all()).find((x) => x.photos.some((p) => p.pending))
+      const s = (await db.all()).find((x) => x.photos.some((p) => p.pending && !missingRecently(x.id, p.id)))
       if (!s) break
       try {
         await fetchPhotos(s)
@@ -7024,12 +7041,15 @@ async function syncNow(report = () => {}) {
 }
 /** 連結碼＝網址＋同步密碼（給另一台貼上） */
 const linkCode = () => `${ls.get(LS.sheet)}#k=${ls.get(LS.syncKey)}`
-/** 連結碼兩種寫法都認：舊的（試算表網址#k=密碼）、一鍵加入連結（App 網址#join=試算表代號~密碼） */
+/**
+ * 連結碼兩種寫法都認：舊的（試算表網址#k=密碼）、一鍵加入連結（App 網址#join=試算表代號~密碼）。
+ * 連結前後有別的字也認（在 LINE 長按整則訊息複製，會連「你好…」一起貼進來）。
+ */
 function parseLinkCode(text) {
   const s = String(text).trim()
-  const m = /^(https:\/\/script\.google\.com\/macros\/s\/[^#\s]+\/exec)#k=([\w-]{12,})$/.exec(s)
+  const m = /(https:\/\/script\.google\.com\/macros\/s\/[^#\s]+\/exec)#k=([\w-]{12,})(?![\w-])/.exec(s)
   if (m) return { url: m[1], key: m[2] }
-  const j = /#join=([\w-]{20,})~([\w-]{12,})$/.exec(s)
+  const j = /#join=([\w-]{20,})~([\w-]{12,})(?![\w-])/.exec(s)
   return j ? { url: `https://script.google.com/macros/s/${j[1]}/exec`, key: j[2] } : null
 }
 /**
@@ -7063,8 +7083,14 @@ async function joinWith(code) {
 }
 const inLineApp = () => /\bLine\//i.test(navigator.userAgent)
 const standalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true
-/** 點了邀請連結打開 App：跳出「加入」（不用到設定裡貼） */
-function joinSheet(code) {
+// iPad 新版的瀏覽器說自己是 Mac：用「Mac＋觸控」認出來
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+/**
+ * 點了邀請連結打開 App：跳出「加入」（不用到設定裡貼）。direct：使用者自己按「貼上邀請並加入」，不用再問一次
+ * iPhone、iPad：點連結一定開在 Safari，打不開桌面上的 App；而且桌面 App 跟 Safari 的資料是分開的
+ * → 在 Safari 打開的，請他複製邀請、到桌面的 App 按「貼上邀請並加入」（Android 的桌面 App 跟 Chrome 共用資料，照原本的做）
+ */
+function joinSheet(code, { direct = false } = {}) {
   const clean = () => history.replaceState(null, '', location.pathname) // 網址列不要留著密碼
   if (ls.get(LS.syncKey) === code.key && ls.get(LS.sheet) === code.url) {
     clean()
@@ -7072,47 +7098,106 @@ function joinSheet(code) {
   }
   if (inLineApp())
     return sheet(
-      `<h2 class="sheet-title">請用 ${/iPhone|iPad/.test(navigator.userAgent) ? 'Safari' : 'Chrome'} 打開</h2>
+      `<h2 class="sheet-title">請用 ${isIOS() ? 'Safari' : 'Chrome'} 打開</h2>
        <p class="sheet-sub">現在是在 LINE 裡面打開的。在這裡加入的話，之後從手機桌面打開會變成沒加入。</p>
-       <ol class="steps-list"><li>按右上角的「⋯」（或右下角的 <b>⤴︎</b>）。</li><li>選「用預設瀏覽器開啟」（或「在 Safari 中打開」）。</li><li>打開後按「加入」就好。</li></ol>`,
+       <ol class="steps-list"><li>按右上角的「⋯」（或右下角的 <b>⤴︎</b>）。</li><li>選「用預設瀏覽器開啟」（或「在 Safari 中打開」）。</li><li>打開後照畫面做就好。</li></ol>`,
     )
   if (ls.get(LS.syncKey)) {
     clean()
-    return sheet(`<h2 class="sheet-title">這台已經加入別的共用</h2><p class="sheet-sub">要換的話，先到「設定 → 這台退出並清除資料」，再點一次邀請連結。</p>`)
+    return sheet(`<h2 class="sheet-title">這台已經加入別的共用</h2><p class="sheet-sub">要換的話，先到「設定 → 這台退出並清除資料」，再加入一次。</p>`)
   }
   clean()
+  if (direct) {
+    toast('加入中…')
+    return joinNow(code)
+  }
+  if (isIOS() && !standalone()) return iosJoinSheet(code)
   sheet(
     `<img class="join-logo" src="logo.svg" alt="聖佳 LOGO"><h2 class="sheet-title" style="text-align:center">加入聖佳智慧庫存</h2>
      <p class="sheet-sub">你被邀請一起用「聖佳智慧庫存」。加入後，大家盤點的資料會自動同步到這支手機。</p>
      <button class="btn block" id="j-go" style="margin-top:8px">加入</button>
      <p class="footnote" style="margin-top:10px">這個邀請只給你一個人用，請不要轉傳。</p>`,
     (el, close) => {
-      el.querySelector('#j-go').onclick = async (ev) => {
+      el.querySelector('#j-go').onclick = (ev) => {
         ev.currentTarget.disabled = true
         ev.currentTarget.textContent = '加入中…'
-        try {
-          await joinWith(code)
-        } catch (err) {
-          close()
-          return toast(err.message)
-        }
-        close()
-        const ios = /iPhone|iPad/.test(navigator.userAgent)
-        sheet(
-          `<h2 class="sheet-title">加入好了</h2>
-           <p class="sheet-sub">${esc(ls.get(LS.memberName) || '')}${ls.get(LS.memberName) ? '，' : ''}資料正在下載，等一下就會出現。</p>
-           ${
-             standalone()
-               ? ''
-               : `<p class="section-title" style="margin-top:14px">把 App 放到手機桌面，之後比較好找</p>
-                  <ol class="steps-list">${ios ? '<li>按畫面下方的分享鍵（方框加箭頭 ⬆︎）。</li><li>往下滑，按「加入主畫面」→「新增」。</li>' : '<li>按右上角的「⋮」。</li><li>按「加到主畫面」或「安裝應用程式」。</li>'}<li>之後點桌面上的「聖佳庫存」就能打開。</li></ol>`
-           }
-           <button class="btn block" id="j-ok" style="margin-top:12px">知道了</button>`,
-          (el2, close2) => (el2.querySelector('#j-ok').onclick = close2),
-        )
+        joinNow(code, close)
       }
     },
   )
+}
+/** 真的加入：成功跳「加入好了」（在瀏覽器裡的 Android 教他放到桌面）；before：先關掉的視窗 */
+async function joinNow(code, before = () => {}) {
+  try {
+    await joinWith(code)
+  } catch (err) {
+    before()
+    return toast(err.message)
+  }
+  before()
+  const name = ls.get(LS.memberName) || ''
+  sheet(
+    `<h2 class="sheet-title">加入好了</h2>
+     <p class="sheet-sub">${esc(name)}${name ? '，' : ''}資料正在下載，等一下就會出現。</p>
+     ${
+       standalone() || isIOS()
+         ? ''
+         : `<p class="section-title" style="margin-top:14px">把 App 放到手機桌面，之後比較好找</p>
+            <ol class="steps-list"><li>按右上角的「⋮」。</li><li>按「加到主畫面」或「安裝應用程式」。</li><li>之後點桌面上的「聖佳庫存」就能打開。</li></ol>`
+     }
+     <button class="btn block" id="j-ok" style="margin-top:12px">知道了</button>`,
+    (el, close) => (el.querySelector('#j-ok').onclick = close),
+  )
+}
+/** iPhone、iPad 在 Safari 點了邀請連結：教他到桌面的 App 裡加入（只想在 Safari 用也可以） */
+function iosJoinSheet(code) {
+  const link = joinLinkOf(`${code.url}#k=${code.key}`, `${location.origin}${location.pathname}`)
+  sheet(
+    `<img class="join-logo" src="logo.svg" alt="聖佳 LOGO"><h2 class="sheet-title" style="text-align:center">加入聖佳智慧庫存</h2>
+     <p class="sheet-sub">iPhone 點連結只會開在 Safari，桌面上的 App 收不到。請到 App 裡加入：</p>
+     <ol class="steps-list">
+       <li>按下面的「複製邀請」。</li>
+       <li>桌面還沒有「聖佳庫存」的話：按 Safari 的<span class="nb">分享鍵 <b>⬆︎</b></span>（新版 iPhone 在「⋯」裡）→<span class="nb">「加入主畫面」</span>→<span class="nb">「新增」</span>。</li>
+       <li>打開桌面上的「聖佳庫存」，按<span class="nb">「<b>貼上邀請並加入</b>」</span>。</li>
+     </ol>
+     <button class="btn block" id="j-copy" style="margin-top:8px">複製邀請</button>
+     <button class="btn plain block" id="j-here" style="margin-top:6px">只在 Safari 用：在這裡加入</button>
+     <p class="footnote" style="margin-top:10px">這個邀請只給你一個人用，請不要轉傳。</p>`,
+    (el, close) => {
+      el.querySelector('#j-copy').onclick = async (ev) => {
+        const btn = ev.currentTarget
+        try {
+          await navigator.clipboard.writeText(link)
+          btn.textContent = '已複製：打開桌面上的「聖佳庫存」'
+          toast('已複製：打開桌面上的「聖佳庫存」，按「貼上邀請並加入」')
+        } catch {
+          toast('複製不了：回 LINE 長按邀請訊息 →「複製」，再到桌面的 App 按「貼上邀請並加入」')
+        }
+      }
+      el.querySelector('#j-here').onclick = (ev) => {
+        ev.currentTarget.disabled = true
+        ev.currentTarget.textContent = '加入中…'
+        joinNow(code, close)
+      }
+    },
+  )
+}
+/** 「貼上邀請並加入」：讀剪貼簿（iPhone 會先跳出「貼上」讓你按一下）；讀不到就請他貼在欄位裡 */
+async function pasteInvite() {
+  let text = ''
+  try {
+    text = (await navigator.clipboard?.readText?.()) || ''
+  } catch {
+    text = ''
+  }
+  const code = parseLinkCode(text)
+  if (code) return joinSheet(code, { direct: true })
+  const input = document.getElementById('link-code')
+  if (input) {
+    input.closest('details')?.setAttribute('open', '')
+    input.focus()
+  }
+  toast(text ? '複製的不是邀請連結：在 LINE 長按邀請訊息 →「複製」，再按一次' : `沒有讀到邀請：在 LINE 長按邀請訊息 →「複製」，再按一次${input ? '；或直接貼在欄位裡' : ''}`)
 }
 const newSyncKey = () => {
   const a = new Uint8Array(18)
@@ -7240,17 +7325,19 @@ function counterSheet(currentId, title, sub, onPick) {
 }
 /** 邀請完：顯示只給這個人的連結碼（關掉就看不到了，雲端只存雜湊值） */
 function linkSheet(name, role, code, appUrl) {
-  // 一鍵加入：同事在 LINE 點連結 → 自動打開 App → 按「加入」（不用自己複製、貼到設定）
+  // Android：在 LINE 點連結 → 打開 App → 按「加入」。
+  // iPhone：點連結只會開 Safari（打不開桌面的 App）→ 長按訊息複製，到桌面的 App 按「貼上邀請並加入」（整則訊息貼進去也認得）
   const link = joinLinkOf(code, appUrl)
-  const text = `${name}你好：這是公司「聖佳智慧庫存」的邀請，只給你一個人用，請不要轉傳。\n\n點這個連結就會自動加入：\n${link}\n\n打開後按「加入」就好。`
+  const text = `${name}你好：這是公司「聖佳智慧庫存」的邀請，只給你一個人用，請不要轉傳。\n\n【iPhone】長按這則訊息 →「複製」，打開手機桌面的「聖佳庫存」，按「貼上邀請並加入」。桌面還沒有的話，點下面的連結照畫面做。\n【Android】點下面的連結，按「加入」就好。\n\n${link}`
   sheet(
     `<h2 class="sheet-title">邀請「${esc(name)}」</h2>
      <p class="sheet-sub">${ROLE_LABEL[role]}：${ROLE_DESC[role]}</p>
-     <textarea class="field code" readonly rows="4">${esc(text)}</textarea>
+     <textarea class="field code" readonly rows="7">${esc(text)}</textarea>
      <div class="row-actions" style="margin-top:10px">${navigator.share ? '<button class="btn" id="lk-share" style="flex:1">傳給他（LINE）</button>' : ''}<button class="btn ${navigator.share ? 'secondary' : ''}" id="lk-copy" style="flex:1">複製</button></div>
      <ol class="steps-list">
        <li>私訊給「${esc(name)}」（不要貼在群組）。</li>
-       <li>他在 LINE <b>點那個連結</b>，App 會自己打開，按「加入」就好。不用複製、不用到設定裡貼。</li>
+       <li><b>iPhone：</b>點連結只會開 Safari，打不開桌面上的 App。請他長按訊息 →「複製」，打開桌面的「聖佳庫存」，按「貼上邀請並加入」。 <span class="badge new">新</span></li>
+       <li><b>Android：</b>在 LINE 點連結，按「加入」就好。</li>
        <li>這組只給他一個人用。他離職時，在「共用設定」移除權限就好，其他人不用改。</li>
      </ol>
      <p class="footnote">關掉之後就看不到這個邀請了（雲端只存雜湊值，比較安全）；忘了可以「重新產生連結碼」。</p>`,
@@ -8315,6 +8402,8 @@ $app.addEventListener('click', async (e) => {
       // 先問名字：大家會看到「誰盤的」
       return nameSheet('owner', '你的名字？', '大家會在盤點紀錄看到是誰盤的（例如：小宇、店長）。')
     }
+    case 'paste-invite':
+      return pasteInvite()
     case 'sync-link': {
       const raw = document.getElementById('link-code').value.trim()
       const code = parseLinkCode(raw)

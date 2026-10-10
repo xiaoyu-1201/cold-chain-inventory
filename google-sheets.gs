@@ -28,11 +28,15 @@
  * 4.6.1：共用金鑰加上費用上限（只准 Flash／Flash-Lite／Pro、每人每天 300 次、一次最多 8 MB）；
  * 編輯者不能改盲盤／複盤規則、不能匯入正航產品表、不能一次刪光盤點紀錄（雲端也擋）。
  * 更新方法：整段重新貼上 → 存檔 →「部署」→「管理部署作業」→ 鉛筆 → 版本選「新版本」→ 部署（網址不會變）。
+ *
+ * 4.7.6：同步變快——很多筆資料、照片「同時」讀寫（Drive API），不再一筆一筆來；
+ * 記住目錄檔的位置，不用每次搜尋。Drive API 用不了會自動改回舊方法（結果一樣，只是比較慢）。
+ * 第一次更新到這一版，Google 可能會再問一次授權，按允許即可。
  */
 const RAW = '盤點紀錄'
 const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID', '盤點人']
 const SYNC_ACTIONS = ['push', 'pull', 'photos', 'members', 'invite', 'remove', 'setRole', 'rename', 'reissue']
-const SYNC_VER = 2 // 同步格式版本：2＝照片分開存
+const SYNC_VER = 3 // 同步格式版本：2＝照片分開存；3＝同時讀寫（變快，格式跟 2 一樣）
 const isPhotoKey = function (k) {
   return String(k).indexOf('photo:') === 0
 }
@@ -370,18 +374,167 @@ function syncFolder(P) {
   const folder = DriveApp.createFolder('拍照盤點同步資料（不要刪）')
   props.setProperty('SYNC_FOLDER', folder.getId())
   P.SYNC_FOLDER = folder.getId()
+  delete P.SYNC_INDEX
+  props.deleteProperty('SYNC_INDEX')
   return folder
 }
-function readIndex(folder) {
-  const files = folder.getFilesByName('index.json')
+/**
+ * 讀目錄檔（4.7.6 加快）：記住 index.json 的檔案 ID，直接打開，
+ * 不用每次先開資料夾、再用檔名搜尋（每次同步省 1 秒左右）；記的檔案不見了才用舊方法找。
+ */
+function readIndex(P) {
+  if (P.SYNC_INDEX) {
+    try {
+      const f = DriveApp.getFileById(P.SYNC_INDEX)
+      return { file: f, map: JSON.parse(f.getBlob().getDataAsString() || '{}') }
+    } catch (e) {
+      /* 檔案被刪了：下面用檔名找 */
+    }
+  }
+  const files = syncFolder(P).getFilesByName('index.json')
   if (!files.hasNext()) return { file: null, map: {} }
   const file = files.next()
+  PropertiesService.getScriptProperties().setProperty('SYNC_INDEX', file.getId())
+  P.SYNC_INDEX = file.getId()
   return { file: file, map: JSON.parse(file.getBlob().getDataAsString() || '{}') }
 }
-function writeIndex(folder, idx) {
+function writeIndex(P, idx) {
   const text = JSON.stringify(idx.map)
-  if (idx.file) idx.file.setContent(text)
-  else idx.file = folder.createFile(Utilities.newBlob(text, 'application/json', 'index.json'))
+  if (idx.file) return idx.file.setContent(text)
+  idx.file = syncFolder(P).createFile(Utilities.newBlob(text, 'application/json', 'index.json'))
+  PropertiesService.getScriptProperties().setProperty('SYNC_INDEX', idx.file.getId())
+  P.SYNC_INDEX = idx.file.getId()
+}
+
+// ───────────── 一次同時讀寫很多個檔案（4.7.6：同步變快的主要原因） ─────────────
+/**
+ * 以前每一筆資料、每一張照片都要一個一個跟雲端硬碟要（一筆約 0.3～1 秒），
+ * 現在用 Drive API 同時送出去（UrlFetchApp.fetchAll），幾十筆也只要一兩秒。
+ * Drive API 用不了（例如 Google 那邊沒開）就自動改回一個一個來，結果一樣、只是比較慢；
+ * 用不了的情況會記 6 小時，不會每次都先試一次。
+ * 會用到「連到外部網站」的每日次數（一般帳號每天 2 萬次），一家店用不完。
+ */
+const DRIVE_API = 'https://www.googleapis.com/drive/v3/files'
+const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id'
+const FETCH_CHUNK = 20 // 一次同時送幾個（照片一張約 0.5 MB，不要一次太多）
+function driveApiOn() {
+  try {
+    return CacheService.getScriptCache().get('NO_DRIVE_API') !== '1'
+  } catch (e) {
+    return true
+  }
+}
+function driveApiOff(res) {
+  // 只有「Drive API 沒開、沒權限」才關掉；一時忙線（429、500）下次照樣試
+  const text = res ? String(res.getContentText()).slice(0, 2000) : ''
+  if (res && !(res.getResponseCode() === 403 && /accessNotConfigured|SERVICE_DISABLED|has not been used|is disabled|insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(text))) return
+  try {
+    CacheService.getScriptCache().put('NO_DRIVE_API', '1', 21600)
+  } catch (e) {
+    /* 記不住就算了 */
+  }
+}
+/** 同時送一批請求；Drive API 用不了就回 null（呼叫的人改用一個一個來） */
+function fetchMany(requests) {
+  if (!requests.length || !driveApiOn()) return null
+  const token = ScriptApp.getOAuthToken()
+  requests.forEach(function (r) {
+    r.headers = Object.assign({ Authorization: 'Bearer ' + token }, r.headers || {})
+    r.muteHttpExceptions = true
+  })
+  try {
+    return UrlFetchApp.fetchAll(requests)
+  } catch (e) {
+    driveApiOff(null)
+    return null
+  }
+}
+/** 讀很多個檔案：回傳 { 檔案ID: 內容文字 }，讀不到的是 null */
+function readFiles(ids) {
+  const out = {}
+  for (let at = 0; at < ids.length; at += FETCH_CHUNK) {
+    const part = ids.slice(at, at + FETCH_CHUNK)
+    const res = fetchMany(
+      part.map(function (id) {
+        return { url: DRIVE_API + '/' + encodeURIComponent(id) + '?alt=media', method: 'get' }
+      }),
+    )
+    part.forEach(function (id, i) {
+      const r = res && res[i]
+      if (r && r.getResponseCode() === 200) {
+        out[id] = r.getContentText('UTF-8')
+        return
+      }
+      if (r) driveApiOff(r)
+      try {
+        out[id] = DriveApp.getFileById(id).getBlob().getDataAsString()
+      } catch (e) {
+        out[id] = null
+      }
+    })
+  }
+  return out
+}
+/** 建很多個檔案：items＝[{ name, text }]，回傳一樣順序的檔案 ID；有一個建不起來就丟錯誤（整批不算） */
+function createFiles(P, items) {
+  const ids = []
+  let folder = null
+  for (let at = 0; at < items.length; at += FETCH_CHUNK) {
+    const part = items.slice(at, at + FETCH_CHUNK)
+    const boundary = 'b' + Utilities.getUuid().replace(/-/g, '')
+    const res =
+      P.SYNC_FOLDER && driveApiOn()
+      ? fetchMany(
+          part.map(function (it) {
+            const body =
+              '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' +
+              JSON.stringify({ name: it.name, mimeType: 'application/json', parents: [P.SYNC_FOLDER] }) +
+              '\r\n--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' +
+              it.text +
+              '\r\n--' + boundary + '--'
+            return { url: DRIVE_UPLOAD, method: 'post', contentType: 'multipart/related; boundary=' + boundary, payload: Utilities.newBlob(body).getBytes() }
+          }),
+        )
+      : null
+    part.forEach(function (it, i) {
+      const r = res && res[i]
+      let id = ''
+      if (r && r.getResponseCode() === 200) {
+        try {
+          id = JSON.parse(r.getContentText()).id || ''
+        } catch (e) {
+          id = ''
+        }
+      } else if (r) driveApiOff(r)
+      if (!id) {
+        folder = folder || syncFolder(P)
+        id = folder.createFile(Utilities.newBlob(it.text, 'application/json', it.name)).getId()
+      }
+      ids.push(id)
+    })
+  }
+  return ids
+}
+/** 把很多個舊檔案丟到垃圾桶（丟不掉就算了，不影響資料） */
+function trashFiles(ids) {
+  for (let at = 0; at < ids.length; at += FETCH_CHUNK) {
+    const part = ids.slice(at, at + FETCH_CHUNK)
+    const res = fetchMany(
+      part.map(function (id) {
+        return { url: DRIVE_API + '/' + encodeURIComponent(id), method: 'patch', contentType: 'application/json', payload: '{"trashed":true}' }
+      }),
+    )
+    part.forEach(function (id, i) {
+      const r = res && res[i]
+      if (r && (r.getResponseCode() === 200 || r.getResponseCode() === 404)) return
+      if (r) driveApiOff(r)
+      try {
+        DriveApp.getFileById(id).setTrashed(true)
+      } catch (e) {
+        /* 檔案已經不在了 */
+      }
+    })
+  }
 }
 
 /** 編輯者一次最多刪幾次盤點（「刪除全部盤點紀錄」只有擁有者、管理員能做） */
@@ -399,8 +552,8 @@ function syncPush(data, props, P, manager) {
   const lock = LockService.getScriptLock()
   lock.waitLock(30000)
   try {
-    const folder = syncFolder(P)
-    const idx = readIndex(folder)
+    const idx = readIndex(P)
+    if (!P.SYNC_FOLDER) syncFolder(P) // 第一次同步：先建資料夾（新檔案要放在裡面）
     // 順序號一定越來越大（同一毫秒兩次上傳也不會重複），下載時才不會漏；鎖住後重新讀一次，別人剛寫的才不會被蓋掉
     let seq = Math.max(Date.now(), Number(props.getProperty('SYNC_SEQ') || 0) + 1)
     let n = 0
@@ -414,13 +567,17 @@ function syncPush(data, props, P, manager) {
       (data.records || []).filter(function (r) {
         return isSessionDel(r)
       }).length > EDITOR_MAX_SESSION_DELETES
+    // 4.7.6：先決定每一筆要怎麼做，最後再一次「同時」建新檔、丟舊檔（以前一筆一筆來，幾十筆要等快一分鐘）。
+    // 順序也改了：新檔都建好、目錄寫好，才把舊檔丟到垃圾桶（以前先丟再建，建失敗會少一筆）
+    const toTrash = []
+    const toWrite = [] // { entry: 目錄裡那一格, name, text, skip }
+    const writing = {} // 同一批裡同一個鍵出現兩次：前面那次就不用建檔了
     const trash = function (e) {
-      if (!e || !e.f) return
-      try {
-        DriveApp.getFileById(e.f).setTrashed(true)
-      } catch (err) {
-        /* 檔案已經不在了 */
-      }
+      if (e && e.f) toTrash.push(e.f)
+    }
+    const unwrite = function (k) {
+      if (writing[k]) writing[k].skip = true
+      delete writing[k]
     }
     // 修改時間是裝置自己填的：最多只能比現在晚 10 分鐘（手機時鐘差一點沒關係），
     // 不然填一個很遠的未來時間，之後連管理員都蓋不掉、刪不掉（4.7.1 code review）
@@ -463,22 +620,32 @@ function syncPush(data, props, P, manager) {
         })
       }
       trash(cur)
-      let f = ''
-      if (!r.del) f = folder.createFile(Utilities.newBlob(JSON.stringify(r.d), 'application/json', r.k.replace(/[^\w-]/g, '_') + '.json')).getId()
-      idx.map[r.k] = { t: r.t, s: seq++, d: String(data.dev || ''), f: f, del: !!r.del }
+      unwrite(r.k)
+      const entry = { t: r.t, s: seq++, d: String(data.dev || ''), f: '', del: !!r.del }
+      if (!r.del) toWrite.push((writing[r.k] = { entry: entry, name: r.k.replace(/[^\w-]/g, '_') + '.json', text: JSON.stringify(r.d) }))
+      idx.map[r.k] = entry
       // 刪掉一次盤點：它的照片也一起丟掉
       if (r.del && String(r.k).indexOf('session:') === 0) {
         const prefix = 'photo:' + String(r.k).slice('session:'.length) + ':'
         Object.keys(idx.map).forEach(function (k) {
           if (k.indexOf(prefix) !== 0 || idx.map[k].del) return
           trash(idx.map[k])
+          unwrite(k)
           idx.map[k] = { t: r.t, s: seq++, d: String(data.dev || ''), f: '', del: true }
         })
       }
       n++
     })
-    writeIndex(folder, idx)
+    const jobs = toWrite.filter(function (w) {
+      return !w.skip
+    })
+    const ids = createFiles(P, jobs)
+    jobs.forEach(function (w, i) {
+      w.entry.f = ids[i]
+    })
+    writeIndex(P, idx)
     props.setProperty('SYNC_SEQ', String(seq))
+    trashFiles(toTrash)
     const why = []
     if (tooManyDeletes) why.push('一次刪超過 ' + EDITOR_MAX_SESSION_DELETES + ' 次盤點只有擁有者或管理員能做：這些刪除沒有同步，雲端和別台的紀錄還在')
     if (ignored.some(function (k) {
@@ -495,10 +662,10 @@ function syncPush(data, props, P, manager) {
   }
 }
 
-/** 下載：別台送來、比 since 新的；一次最多約 8 MB 或 60 筆，more＝還有 */
+/** 下載：別台送來、比 since 新的；一次最多約 8 MB 或 150 筆，more＝還有（4.7.6：檔案同時讀，一次可以給比較多筆） */
+const PULL_MAX = 150
 function syncPull(data, P) {
-  const folder = syncFolder(P)
-  const idx = readIndex(folder)
+  const idx = readIndex(P)
   const since = Number(data.since) || 0
   const dev = String(data.dev || '')
   const all = Object.keys(idx.map)
@@ -514,51 +681,89 @@ function syncPull(data, P) {
   const records = []
   let size = 0
   let next = since
-  let i = 0
-  for (; i < all.length; i++) {
-    const x = all[i]
-    if (records.length && (size > 8e6 || records.length >= 60)) break
-    next = x.e.s
-    if (x.e.d === dev) continue // 自己送的不用再下載
-    let d = null
-    if (!x.e.del && x.e.f) {
-      try {
-        const text = DriveApp.getFileById(x.e.f).getBlob().getDataAsString()
-        size += text.length
-        d = JSON.parse(text)
-      } catch (e) {
-        d = null
-      }
+  let i = 0 // all 裡第一筆還沒給的
+  const full = function () {
+    return records.length && (size > 8e6 || records.length >= PULL_MAX)
+  }
+  while (i < all.length && !full()) {
+    // 這一輪：往後拿到 FETCH_CHUNK 筆要給的，一起讀（自己送的不用再下載，不算）
+    const group = []
+    let want = 0
+    for (let j = i; j < all.length && want < FETCH_CHUNK && records.length + want < PULL_MAX; j++) {
+      group.push(all[j])
+      if (all[j].e.d !== dev) want++
     }
-    records.push({ k: x.k, t: x.e.t, del: !!x.e.del, d: d })
+    const texts = readFiles(
+      group
+        .filter(function (x) {
+          return x.e.d !== dev && !x.e.del && x.e.f
+        })
+        .map(function (x) {
+          return x.e.f
+        }),
+    )
+    for (const x of group) {
+      if (full()) break
+      next = x.e.s
+      i++
+      if (x.e.d === dev) continue
+      let d = null
+      const text = !x.e.del && x.e.f ? texts[x.e.f] : null
+      if (text != null) {
+        size += text.length
+        try {
+          d = JSON.parse(text)
+        } catch (e) {
+          d = null
+        }
+      }
+      records.push({ k: x.k, t: x.e.t, del: !!x.e.del, d: d })
+    }
   }
   return { ok: true, records: records, next: next, more: i < all.length }
 }
 
-/** 要照片：給一串 photo:盤點ID:照片ID，回傳有的那些（一次最多約 8 MB，more＝還有沒給的） */
+/** 要照片：給一串 photo:盤點ID:照片ID，回傳有的那些（一次最多約 8 MB，more＝還有沒給的）；4.7.6：一次同時讀 12 張 */
 function syncPhotos(data, P) {
-  const folder = syncFolder(P)
-  const idx = readIndex(folder)
+  const idx = readIndex(P)
   const keys = (data.keys || []).filter(isPhotoKey).slice(0, 200)
   const records = []
   let size = 0
   let i = 0
-  for (; i < keys.length; i++) {
-    if (records.length && size > 8e6) break
-    const e = idx.map[keys[i]]
-    if (!e || e.del || !e.f) {
-      records.push({ k: keys[i], d: null }) // 雲端沒有這張（App 不用再要）
-      continue
+  while (i < keys.length && !(records.length && size > 8e6)) {
+    const group = keys.slice(i, i + 12) // 照片一張約 0.5 MB
+    const texts = readFiles(
+      group
+        .map(function (k) {
+          return idx.map[k]
+        })
+        .filter(function (e) {
+          return e && !e.del && e.f
+        })
+        .map(function (e) {
+          return e.f
+        }),
+    )
+    for (const k of group) {
+      if (records.length && size > 8e6) break
+      i++
+      const e = idx.map[k]
+      if (!e || e.del || !e.f) {
+        records.push({ k: k, d: null }) // 雲端沒有這張（App 不用再要）
+        continue
+      }
+      let d = null
+      const text = texts[e.f]
+      if (text != null) {
+        size += text.length
+        try {
+          d = JSON.parse(text)
+        } catch (err) {
+          d = null
+        }
+      }
+      records.push({ k: k, d: d })
     }
-    let d = null
-    try {
-      const text = DriveApp.getFileById(e.f).getBlob().getDataAsString()
-      size += text.length
-      d = JSON.parse(text)
-    } catch (err) {
-      d = null
-    }
-    records.push({ k: keys[i], d: d })
   }
   return { ok: true, records: records, more: i < keys.length }
 }
