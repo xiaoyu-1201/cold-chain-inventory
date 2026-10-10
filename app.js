@@ -85,7 +85,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.4（10/10・玻璃按鈕）'
+const VERSION = '4.7.5（10/10・分頁列加文字）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1729,7 +1729,8 @@ const TABS = [
 /**
  * 手機：底部分頁列（只在四個主頁）。平板、電腦（≥768px）：同一個元素變成右邊側邊欄，每一頁都有（sub＝子頁面，手機不顯示）。
  * fresh：新加的入口，標綠色「新」（手機上變成圖示右上角的小綠點）
- * 4.7.3 液態玻璃：手機是浮起來的膠囊、只放圖示（像 Instagram）；目前那一頁的圖示後面有一顆淡灰「鏡片」（.tab-lens），換頁時滑過去
+ * 4.7.3 液態玻璃：手機是浮起來的膠囊（像 Instagram）；目前那一頁後面有一顆淡灰「鏡片」（.tab-lens），換頁時滑過去
+ * 4.7.5 使用者：「下方的那個圖示要有文字，不然不知道是什麼」→ 手機也顯示圖示下面的小字
  */
 const tabBar = (active, sub = false) => {
   return `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt=""><span class="side-name">聖佳智慧庫存</span><button class="side-toggle" data-action="side-toggle" aria-label="${sideCollapsed() ? '展開選單' : '收合選單'}" title="${sideCollapsed() ? '展開選單' : '收合選單'}">${icon('chevron-right', 20)}</button></div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''} aria-label="${t.label}${t.fresh ? '（新）' : ''}" title="${t.label}${t.fresh ? '（新）' : ''}">${icon(t.icon, 26)}<span>${t.label}</span>${t.fresh ? '<em class="tab-new" aria-hidden="true">新</em>' : ''}</button>`).join('')}</div></nav>`
