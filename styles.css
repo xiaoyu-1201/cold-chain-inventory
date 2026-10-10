@@ -3948,6 +3948,16 @@ h2,
   -webkit-backdrop-filter: var(--glass-filter);
   backdrop-filter: var(--glass-filter);
 }
+/* 點貨進度列上有紅色「少 1 個」小膠囊：底再實一點，後面是黑色時對比也有 4.5 */
+.pk-progress {
+  background: var(--glass-bg-strong);
+}
+/* 玻璃上的次要按鈕（「手動新增」「匯出」）：深色模式字亮一點（玻璃後面是白色時對比 4.5 以上） */
+.nav .btn.secondary:not(.danger),
+.toolbar .btn.secondary:not(.danger),
+.pk-progress .btn.secondary:not(.danger) {
+  color: var(--glass-icon-on);
+}
 .toolbar {
   border-top: 0;
   box-shadow: inset 0 0.5px 0 var(--line), inset 0 1px 0 var(--glass-hi);
@@ -4033,6 +4043,10 @@ h2,
   .pk-progress {
     top: calc(var(--safe-t) + 44px);
   }
+  /* 鍵盤移動焦點時，元素不會躲在標題列或懸浮列後面 */
+  html {
+    scroll-padding: calc(var(--safe-t) + 52px) 0 calc(var(--safe-b) + 96px);
+  }
 }
 /* 鏡片（共用）：按鈕在鏡片上面 */
 .has-lens {
@@ -4075,7 +4089,6 @@ h2,
   .tabbar button {
     border-radius: 999px;
   }
-  .tabbar.has-lens button[aria-current='page'],
   .tabbar .has-lens button[aria-current='page'] {
     background: none;
     color: var(--tint);
@@ -4117,6 +4130,12 @@ h2,
   background: transparent;
   box-shadow: none;
 }
+/* 深色模式：鏡片要比分段控制的底（#2c2c2e）亮 */
+@media (prefers-color-scheme: dark) {
+  .seg .tab-lens {
+    background: #3a3a3c;
+  }
+}
 
 /* 3. 彈出視窗、提示 */
 .sheet {
@@ -4125,6 +4144,14 @@ h2,
   -webkit-backdrop-filter: var(--glass-filter);
   backdrop-filter: var(--glass-filter);
   box-shadow: inset 0 1px 0 var(--glass-hi), inset 0 0 0 1px var(--glass-ring), var(--glass-shadow);
+}
+/* 手機的彈出視窗：底幾乎不透明，模糊看不出來又容易卡 → 實心（電腦、平板保留玻璃） */
+@media (max-width: 767px) {
+  .sheet {
+    background: var(--glass-solid-strong);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
 }
 .toast {
   background: var(--glass-dark);
@@ -4147,6 +4174,14 @@ h2,
 }
 .hero-btn:active {
   background: var(--brand-press);
+}
+/* 深色模式：不要藍色光暈（原本 4.6 就是 none），只留上緣反光 */
+@media (prefers-color-scheme: dark) {
+  .hero-btn {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  }
 }
 
 /* 6. 放大看照片：黑底上的深色玻璃（上下工具列、圓形按鈕） */
@@ -4216,7 +4251,8 @@ html.no-glass {
     --glass-dark-btn: #000000;
     --glass-dark-ring: #ffffff;
   }
-  .tab-lens {
+  .tab-lens,
+  .seg .tab-lens {
     box-shadow: inset 0 0 0 2px var(--tint);
   }
 }

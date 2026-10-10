@@ -1720,8 +1720,8 @@ const backBtn = (to = 'home', label = '盤點') => `<button class="back" data-go
 // 設定：手機在首頁右上角；平板、電腦放進右邊側邊欄（wide）
 // 點貨（4.7 測試版）放第二個：進出貨每天都會用，跟盤點放在一起；手機底部 4 個還放得下（iOS 最多 5 個）
 const TABS = [
-  { id: 'home', label: '盤點', icon: 'clipboard' },
-  { id: 'pick', label: '點貨', icon: 'list-check', fresh: true },
+  { id: 'home', label: '盤點', icon: 'scan' },
+  { id: 'pick', label: '點貨', icon: 'truck', fresh: true },
   { id: 'items', label: '品項', icon: 'box' },
   { id: 'lookup', label: '查型號', icon: 'search' },
   { id: 'settings', label: '設定', icon: 'settings', wide: true },
@@ -1749,7 +1749,7 @@ let lensEatClick = 0 // 拖完放開，瀏覽器補發的 click 不要算（不�
 /** box：放鏡片的容器；items：可以選的按鈕；opts：axis 'x'|'y'、fit 'h'|'wh'（鏡片高／寬跟按鈕一樣）、mag 圖示放大倍數、isActive */
 function liquidLens(key, box, items, opts) {
   let S = LENSES.get(key)
-  if (!S) LENSES.set(key, (S = { idx: -1, pos: 0, v: 0, target: 0, st: 1, stv: 0, raf: 0, last: 0, drag: null, after: null, homes: [] }))
+  if (!S) LENSES.set(key, (S = { idx: -1, pos: 0, v: 0, target: 0, st: 1, stv: 0, raf: 0, last: 0, drag: null, homes: [] }))
   let el = box.querySelector(':scope > .tab-lens')
   if (!el) {
     el = document.createElement('i')
@@ -1765,7 +1765,6 @@ function liquidLens(key, box, items, opts) {
     el.classList.add('off')
     S.idx = -1
     S.drag = null
-    S.after = null
     return
   }
   el.classList.remove('off')
@@ -1782,12 +1781,44 @@ function liquidLens(key, box, items, opts) {
   S.idx = active
   if (reduceMotion.matches || prev < 0 || axisChanged) {
     cancelAnimationFrame(S.raf)
-    Object.assign(S, { raf: 0, v: 0, st: 1, stv: 0, after: null, drag: null, pos: S.homes[active], target: S.homes[active] })
+    Object.assign(S, { raf: 0, v: 0, st: 1, stv: 0, drag: null, pos: S.homes[active], target: S.homes[active] })
   } else if (prev !== active) {
     S.target = S.homes[active] // 從現在的位置用彈簧滑過去
     lensRun(S)
-  } else if (!S.raf && !S.drag) S.pos = S.target = S.homes[active]
+  } else if (!S.drag) {
+    // 同一格：位置可能變了（換頁被取消、resize、字型晚載入）→ 彈回這一格
+    S.target = S.homes[active]
+    if (S.raf || Math.abs(S.pos - S.target) > 0.5) lensRun(S)
+    else S.pos = S.target
+  }
   lensPaint(S)
+  lensWatch(box)
+}
+// 容器大小變了（字型晚載入、捲軸晚出現、側邊欄收合）也要重新對齊；每次重畫都是新的元素，所以重新盯
+const lensSizes = new WeakMap()
+let lensRO = null
+let lensROraf = 0
+function lensWatch(box) {
+  if (typeof ResizeObserver === 'undefined') return
+  if (!lensRO)
+    lensRO = new ResizeObserver((entries) => {
+      if (!entries.some((en) => lensSizes.get(en.target) !== `${en.target.clientWidth}x${en.target.clientHeight}`)) return
+      cancelAnimationFrame(lensROraf)
+      lensROraf = requestAnimationFrame(() => mountLenses())
+    })
+  lensSizes.set(box, `${box.clientWidth}x${box.clientHeight}`)
+  lensRO.observe(box)
+}
+/** 拖到一半被打斷（沒收到放開、切到別的 App、視窗失焦）：結束拖曳，回到目前那一格 */
+function lensCancelAll() {
+  for (const S of LENSES.values()) {
+    if (!S.drag) continue
+    S.drag = null
+    if (S.idx >= 0 && S.homes.length) {
+      S.target = S.homes[S.idx]
+      lensRun(S)
+    }
+  }
 }
 function lensPaint(S) {
   if (!S.el) return
@@ -1817,11 +1848,6 @@ function lensStep(S, t) {
   S.stv += (-450 * (S.st - (1 + Math.min(0.25, sp / 2400))) - 16 * S.stv) * dt
   S.st = Math.min(1.25, Math.max(0.94, S.st + S.stv * dt))
   const near = Math.abs(S.pos - S.target) < 0.8 && sp < 15
-  if (near && S.after) {
-    const f = S.after
-    S.after = null
-    f()
-  }
   if (!S.drag && near && Math.abs(S.st - 1) < 0.003 && Math.abs(S.stv) < 0.05) {
     Object.assign(S, { pos: S.target, v: 0, st: 1, stv: 0, raf: 0, last: 0 })
     lensPaint(S)
@@ -1836,7 +1862,18 @@ function lensRun(S) {
   S.raf = requestAnimationFrame((t) => lensStep(S, t))
 }
 /** 每次畫完畫面：分頁列／側邊欄、每一個分段控制接上鏡片 */
+let lensView = ''
 function mountLenses(root = $app) {
+  // 換頁：分段控制的鏡片重新開始（不要從上次離開時的位置滑進來）
+  if (lensView !== state.view) {
+    lensView = state.view
+    for (const [k, S] of [...LENSES]) {
+      if (!k.startsWith('seg:')) continue
+      cancelAnimationFrame(S.raf)
+      LENSES.delete(k)
+    }
+  }
+  lensRO?.disconnect()
   const nav = root.querySelector('.tabbar .inner')
   if (nav) {
     const phone = phoneBar.matches
@@ -1849,6 +1886,7 @@ function mountLenses(root = $app) {
   })
 }
 document.addEventListener('pointerdown', (e) => {
+  lensCancelAll() // 上一次拖曳沒收到放開：先結束
   if (reduceMotion.matches || e.button > 0 || !e.isPrimary) return
   const box = e.target.closest?.('.has-lens')
   const S = box && [...LENSES.values()].find((s) => s.box === box && s.idx >= 0)
@@ -1871,7 +1909,6 @@ addEventListener(
           continue
         }
         d.moved = true
-        S.box.classList.add('lens-drag')
       }
       let p = (X ? e.clientX - d.r.left : e.clientY - d.r.top) - S.len / 2
       const lo = S.homes[0]
@@ -1889,8 +1926,14 @@ function lensEnd(e) {
     const d = S.drag
     if (!d || d.id !== e.pointerId) continue
     S.drag = null
-    S.box?.classList.remove('lens-drag')
-    if (!d.moved) continue
+    if (!d.moved) {
+      // 只是點一下：鏡片如果不在這一格（例如上次被打斷），彈回去；換頁的話等重畫再滑過去
+      if (S.idx >= 0 && S.target !== S.homes[S.idx]) {
+        S.target = S.homes[S.idx]
+        lensRun(S)
+      }
+      continue
+    }
     lensEatClick = performance.now() + 450
     let k = S.idx
     if (e.type === 'pointerup') {
@@ -1900,20 +1943,22 @@ function lensEnd(e) {
       })
     }
     S.target = S.homes[k]
-    if (k !== S.idx)
-      S.after = () => {
-        lensClickOk = true
-        try {
-          S.items[k]?.click()
-        } finally {
-          lensClickOk = false
-        }
-      }
     lensRun(S)
+    // 放開當下就換頁，彈簧在新畫面繼續跑完（狀態跨重畫保留）；換頁被取消的話 mountLenses() 會讓鏡片彈回來
+    if (k !== S.idx) {
+      lensClickOk = true
+      try {
+        S.items[k]?.click()
+      } finally {
+        lensClickOk = false
+      }
+    }
   }
 }
 addEventListener('pointerup', lensEnd)
 addEventListener('pointercancel', lensEnd)
+addEventListener('blur', lensCancelAll)
+document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && lensCancelAll())
 addEventListener(
   'click',
   (e) => {
@@ -3916,6 +3961,8 @@ async function viewPickResult() {
 
 // —— 數量面板（可以有小數；打 0 或看不懂不會關掉，直接在面板裡說） ——
 function qtySheet({ title, sub = '', value = '', action = '儲存', quick = [], skip = '' }, onSave, onSkip) {
+  // 連點「加入」：同一種視窗已經開著 → 不要再疊一層
+  if (document.getElementById('q-val')) return
   sheet(
     `<h2 class="sheet-title">${esc(title)}</h2>${sub ? `<p class="sheet-sub">${sub}</p>` : ''}
      <input class="field big-num" id="q-val" inputmode="decimal" autocomplete="off" value="${esc(value)}" aria-label="${esc(title)}" aria-describedby="q-err">
@@ -7775,12 +7822,12 @@ $app.addEventListener('click', async (e) => {
     // 新盤點拍了照片、還沒按「開始辨識」就要離開：照片只在記憶體裡，離開就不見 → 先問
     if (photosAtRisk() && d.go !== 'capture') {
       const n = state.session.photos.length
-      if (!confirm(`還沒按「開始辨識」：要放棄這 ${n} 張照片嗎？\n\n放棄的話照片不會留下來。要留著就按「取消」，再按下面的「開始辨識」。`)) return
+      if (!confirm(`還沒按「開始辨識」：要放棄這 ${n} 張照片嗎？\n\n放棄的話照片不會留下來。要留著就按「取消」，再按下面的「開始辨識」。`)) return mountLenses() // 取消：拖過去的鏡片彈回來
       for (const p of state.session.photos) dropUrl(p.id)
       state.session = null
     }
     // 點貨單那一頁要離開：「改一下」改了還沒按完成修改 → 先問要不要放棄；空的草稿順手刪掉
-    if (state.view === 'pick-edit' && d.go !== 'pick-edit' && !(await leavePickEdit())) return
+    if (state.view === 'pick-edit' && d.go !== 'pick-edit' && !(await leavePickEdit())) return mountLenses()
     // 首頁「該叫貨」方塊：到品項，直接開「叫貨」那一頁
     if (d.itemFilter) state.itemFilter = d.itemFilter
     return go(d.go)
