@@ -48,12 +48,15 @@ const LS = {
   sideCollapsed: 'inventory:sideCollapsed',
   // 點貨對單（4.7 測試版）：拍單子時框的位置（只在這台）、交叉比對開關（只在這台）、最後一次比對結果、更新後從雲端補拿點貨紀錄了沒
   pickCrop: 'inventory:pickCrop',
+  // 遮住的欄位（單價、金額）的位置、第一次的說明看過了沒（都只在這台）
+  pickMask: 'inventory:pickMask',
+  pickCropHelp: 'inventory:pickCropHelp',
   pickCross: 'inventory:pickCross',
   pickCrossLast: 'inventory:pickCrossLast',
   pickPullDone: 'inventory:pickPullDone',
 }
 /** 檢視者不能用的動作 */
-const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete', 'erp-import', 'erp-cats', 'erp-link', 'pk-new', 'pk-add', 'pk-step', 'pk-done', 'pk-qty', 'pk-more', 'pk-assign', 'pk-remove', 'pk-finish', 'pk-discard', 'pk-reopen', 'pk-delete'])
+const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete', 'erp-import', 'erp-cats', 'erp-link', 'pk-new', 'pk-add', 'pk-step', 'pk-done', 'pk-confirm', 'pk-qty', 'pk-more', 'pk-assign', 'pk-remove', 'pk-finish', 'pk-discard', 'pk-cancel-edit', 'pk-reopen', 'pk-delete'])
 /** 權限（跟 Google 雲端硬碟的「共用」一樣） */
 const ROLE_LABEL = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 const ROLE_DESC = { owner: '全部都可以；不能被移除', manager: '可以盤點、修改，也可以邀請、移除人', editor: '可以盤點、修改', viewer: '只能看（可以下載 Excel）' }
@@ -82,7 +85,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.0（10/10・點貨對單測試版）'
+const VERSION = '4.7.1（10/10・點貨對單：遮住金額、AI 配對要確認、改一下可以取消）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -167,7 +170,10 @@ function toast(msg, action) {
   }
   document.body.appendChild(el)
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => el.remove(), action ? 6000 : 2800)
+  // 字多的提示留久一點（最少 5 秒、最多 10 秒），不然還沒看完就不見了；點一下提示可以先關掉
+  const len = String(msg).length
+  toastTimer = setTimeout(() => el.remove(), Math.max(action ? 6000 : 2800, len > 24 ? Math.min(10000, 5000 + (len - 24) * 60) : 0))
+  el.addEventListener('click', (e) => e.target === el && el.remove())
 }
 // iPhone 的 Safari 要有 touchstart 監聽，按鈕按下去才會變色（:active）
 document.addEventListener('touchstart', () => {}, { passive: true })
@@ -219,6 +225,7 @@ const hasOldBlob = (store, v) => (store === 'sessions' ? (v.photos || []).some((
 const lostCount = (store, v) => (store === 'sessions' ? (v.photos || []).filter((p) => p.blob?._lost).length : (store === 'items' ? v.photo : v.blob)?._lost ? 1 : 0)
 
 /** sessions＝盤點紀錄；samples＝樣品照（第 2 版新增）；items＝品項庫（第 3 版新增）；erp＝正航產品表（第 4 版）；picks＝點貨紀錄（第 5 版） */
+const DB_VERSION = 5
 const idb = (() => {
   let p
   /** 舊資料（照片存成 Blob）一筆一筆轉成新存法；讀不到的照片記成「不見了」，同步時從雲端拿回來 */
@@ -250,9 +257,11 @@ const idb = (() => {
     if (lost) ls.set(LS.needRepair, '1')
   }
   const open = () => (p ??= openRaw().then(async (d) => (await migrate(d), d)))
-  const openRaw = () =>
+  // withVersion＝false：這台的資料庫比這版 App 新（例如以後的新版用過、又退回這一版）→ 不帶版本號照現況打開，
+  // 不升級、不刪資料（少的那一格用到時才會出錯，至少盤點紀錄、品項庫照常可以用）
+  const openRaw = (withVersion = true) =>
     new Promise((resolve, reject) => {
-      const req = indexedDB.open('inventory', 5)
+      const req = withVersion ? indexedDB.open('inventory', DB_VERSION) : indexedDB.open('inventory')
       req.onupgradeneeded = () => {
         const d = req.result
         if (!d.objectStoreNames.contains('sessions')) d.createObjectStore('sessions', { keyPath: 'id' })
@@ -271,7 +280,10 @@ const idb = (() => {
         req.result.onclose = () => (p = undefined)
         resolve(req.result)
       }
-      req.onerror = () => reject(req.error)
+      req.onerror = () => {
+        if (withVersion && req.error?.name === 'VersionError') return openRaw(false).then(resolve, reject)
+        reject(req.error)
+      }
     })
   const tx = async (store, mode, fn, retry = true) => {
     const d = await open()
@@ -1398,19 +1410,34 @@ const placesHtml = (pairs, max = 99) => {
  * 實盤＝每個位置「最近一次」數到的數量加起來；帳面數＝應該要有幾個（進貨加、賣出減，或拿實盤當起點）。
  */
 let itemsCache = null
+/** 品項庫改過幾次（改名、接上正航、新增、刪除）：點貨的搜尋對照表看這個決定要不要重建 */
+let itemsVer = 0
+/** 很舊的品項（或別台舊版傳來的）可能少了這些欄位：讀進來時補上，後面的程式才不會出錯（例如匯入正航時 moves.push） */
+const fixItem = (it) => {
+  if (!Array.isArray(it.moves)) it.moves = []
+  if (!it.stock || typeof it.stock !== 'object') it.stock = {}
+  if (!Array.isArray(it.aliases)) it.aliases = []
+  if (!Array.isArray(it.equiv)) it.equiv = []
+  return it
+}
 async function itemsAll(force = false) {
-  if (!itemsCache || force) itemsCache = await idb.items.all().catch(() => [])
+  if (!itemsCache || force) {
+    itemsCache = (await idb.items.all().catch(() => [])).map(fixItem)
+    itemsVer++
+  }
   return itemsCache
 }
 async function putItem(it) {
   it.updatedAt = Date.now()
-  await idb.items.put(it)
+  await idb.items.put(fixItem(it))
   if (itemsCache && !itemsCache.includes(it)) itemsCache.unshift(it)
+  itemsVer++
 }
 async function delItem(it) {
   await idb.items.del(it.id)
   tombstone(`item:${it.id}`)
   if (itemsCache) itemsCache = itemsCache.filter((x) => x !== it)
+  itemsVer++
 }
 const nextNo = (items) => `P${String(items.reduce((m, it) => Math.max(m, parseInt(String(it.no).slice(1), 10) || 0), 0) + 1).padStart(4, '0')}`
 function newItem(items, f, extra = {}) {
@@ -2311,18 +2338,21 @@ async function readTextFile(file) {
 }
 /**
  * 匯入：存成一張表；品項庫裡料號對得上的，帳面改成正航的數量。
- * 點貨交叉比對的基準（4.7）：這次報表裡有的產品，記下 at＝這次匯入的時間（qty 就是這次正航的數量）＝基準 { qty, at }；
+ * 點貨交叉比對的基準（4.7）：這次報表裡有的產品，記下 at＝報表的時間（qty 就是這次正航的數量）＝基準 { qty, at }；
  * 這次沒出現的產品照舊（基準不變）。每次都記；交叉比對開關打開才比、才顯示。
+ * reportAt：報表的時間——選檔匯入用檔案的修改時間（比匯入 App 的時間更接近正航匯出的時間）；貼上的用現在。
  */
-async function importErp(text) {
+async function importErp(text, { reportAt = 0 } = {}) {
   const parsed = parseErp(text)
   const old = await erpGet()
   const now = Date.now()
+  // 檔案時間不合理（未來、比上次基準還早一年以上）就用現在
+  const at = reportAt > 0 && reportAt <= now && reportAt > now - 365 * 86400000 ? reportAt : now
   // 兩種報表可以輪流匯：這次沒有的欄位（類別、別的產品）用上次的補
   const oldBy = new Map((old?.products || []).map((p) => [p.no, p]))
-  const products = parsed.products.map((p) => ({ ...(p.cat || !oldBy.get(p.no)?.cat ? p : { ...p, cat: oldBy.get(p.no).cat }), at: now }))
-  // 交叉比對（測試版，只有開關打開的擁有者／管理員）：用上次的基準和這次的數量，比上次匯入後的點貨紀錄
-  const cross = crossOn() ? { at: now, ...crossCheck(old?.products || [], parsed.products, await idb.picks.all().catch(() => []), now) } : null
+  const products = parsed.products.map((p) => ({ ...(p.cat || !oldBy.get(p.no)?.cat ? p : { ...p, cat: oldBy.get(p.no).cat }), at }))
+  // 交叉比對（測試版，只有開關打開的擁有者／管理員）：用上次的基準和這次的數量，比上次匯入到這張報表之間的點貨紀錄
+  const cross = crossOn() ? { at, ...crossCheck(old?.products || [], parsed.products, await idb.picks.all().catch(() => []), at) } : null
   const seen = new Set(products.map((p) => p.no))
   for (const p of old?.products || []) if (!seen.has(p.no)) products.push(p)
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
@@ -2341,7 +2371,7 @@ async function importErp(text) {
     index.link(it, p.no)
     if (it.book !== p.qty) {
       it.book = p.qty
-      it.moves.push({ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' })
+      ;(it.moves ||= []).push({ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' }) // 很舊的品項沒有進出紀錄欄位
       booked++
     }
     await putItem(it)
@@ -2419,14 +2449,25 @@ const normHay = (s) => String(s ?? '').normalize('NFKC').toLowerCase()
  * tail＝false：後面可以再接英數字＝「開頭一樣」（打到一半時列「開頭一樣的」用，不能拿來自動配對）。
  */
 const TOKEN_RE = new Map()
+/** 有數字的詞：小數點、斜線要照寫（2.5L 不是 25L、3/8 不是 38），其他分隔符號照樣不計 */
+const TOKEN_SEP_NUM = `[\\s\\-_,，、・·()（）\\[\\]【】"'“”‘’]*`
+function tokenKey(needle) {
+  const s = normHay(needle)
+  if (!/\d/.test(s)) return canon(needle)
+  return s.replace(/[\s\-_,，、・·()（）[\]【】"'“”‘’]/g, '').replace(/^[./]+|[./]+$/g, '')
+}
 function tokenRe(needle, tail = true) {
-  const c = canon(needle)
+  const c = tokenKey(needle)
   if (!c) return null
   const key = `${tail ? 1 : 0}${c}`
   let re = TOKEN_RE.get(key)
   if (!re) {
-    const body = [...c].map(reEsc).join(TOKEN_SEP)
-    re = new RegExp(`${/^[a-z0-9]/.test(c) ? '(?:^|[^a-z0-9])' : ''}${body}${tail && /[a-z0-9]$/.test(c) ? '(?![a-z0-9])' : ''}`)
+    const num = /\d/.test(c)
+    const body = [...c].map(reEsc).join(num ? TOKEN_SEP_NUM : TOKEN_SEP)
+    // 前後不能再接英數字；數字開頭、結尾的也不能接「數字＋小數點或斜線」：5L 不會對到 2.5L、8 不會對到 3/8、2 不會對到 2.5
+    const head = /^[0-9]/.test(c) ? '(?:^|[^a-z0-9./]|[^0-9][./])' : /^[a-z]/.test(c) ? '(?:^|[^a-z0-9])' : ''
+    const end = !tail ? '' : /[0-9]$/.test(c) ? '(?![a-z0-9]|[./][0-9])' : /[a-z]$/.test(c) ? '(?![a-z0-9])' : ''
+    re = new RegExp(head + body + end)
     if (TOKEN_RE.size > 2000) TOKEN_RE.clear()
     TOKEN_RE.set(key, re)
   }
@@ -2624,16 +2665,22 @@ function erpImportSheet() {
      <button class="btn block" id="ei-go" style="margin-top:12px">匯入貼上的內容</button>
      <p class="footnote">同一個產品在幾個倉庫會合併成一筆。品項庫裡料號對得上的，帳面會改成正航的數量；安全庫存、成本、售價這裡都不會讀。</p>`,
     (el, close) => {
-      const run = async (text) => {
+      const run = async (text, reportAt = 0) => {
         try {
-          const r = await importErp(text)
+          // 交叉比對開著：先同步一次，拿到別台剛點完的點貨紀錄再比（同步失敗就照常比，結果頁會寫最後同步的時間）
+          if (crossOn() && syncReady()) {
+            toast('先同步一次，拿別台的點貨紀錄…')
+            await syncNow().catch(() => {})
+          }
+          const r = await importErp(text, { reportAt })
           close()
           const msg = `匯入完成：${r.products} 種（有庫存 ${r.stocked} 種）${r.cats ? `、${r.cats} 個類別名稱` : ''}${r.booked ? `，更新 ${r.booked} 個品項的帳面` : ''}`
           state.erp = { cat: null, q: '', stocked: true, more: 0 }
           go('catalog')
           // 交叉比對開關關著：跟以前一樣，只有一行提示；開著：存下這次的比對結果，跳出「這次有 N 項要查一下」
           if (!r.cross) return toast(msg)
-          ls.set(LS.pickCrossLast, JSON.stringify(r.cross))
+          // 這次沒有可以比的（上次匯入後沒人點貨）：不要蓋掉上次的結果
+          if (r.cross.first || r.cross.checked) ls.set(LS.pickCrossLast, JSON.stringify(r.cross))
           crossDoneSheet(msg, r.cross)
         } catch (e) {
           toast(e.message)
@@ -2641,7 +2688,7 @@ function erpImportSheet() {
       }
       el.querySelector('#ei-file').onchange = async (e) => {
         const f = e.target.files?.[0]
-        if (f) run(await readTextFile(f))
+        if (f) run(await readTextFile(f), f.lastModified || 0)
       }
       el.querySelector('#ei-go').onclick = () => run(el.querySelector('#ei-text').value)
     },
@@ -2929,21 +2976,37 @@ async function viewLocations() {
 // ───────────────────────── 點貨對單（4.7 測試版） ─────────────────────────
 /**
  * 進貨（廠商送來）、出貨（送客戶前撿貨）時對單對貨：名稱對、數量對，不出錯。整個功能標「測試版」。
- * 一張點貨單（idb.picks）：{ id, kind:'in'|'out', ref 單號（選填）, createdAt, doneAt 第一次按「完成」的時間, editedAt, by／byId 誰點的,
+ * 一張點貨單（idb.picks）：{ id, kind:'in'|'out', ref 單號（選填）, createdAt, doneAt 第一次按「完成」的時間,
+ *   editedAt／editedBy 最後一次「改一下」的時間和人, by／byId 誰點的,
  *   lines:[{ id, no 正航產品編號 | itemId 品項庫的品項（還沒接正航的）, name／code／unit 加進來時的名稱（產品表換了也看得懂）,
- *            qty 單子數量, got 實拿數量, done 點好了, st 按完成時的狀態, src 'search'|'ai', read AI 讀到的字 }], ai { at, model } }
- * 不存客戶名稱、價格；點貨不改帳面（帳面以正航為準），只留紀錄。按「完成」後才同步給大家（鍵 pick:ID）。
+ *            qty 單子數量, got 實拿數量（空白＝跟單子一樣）, done 點好了, guess AI 只靠名稱配的、還沒確認,
+ *            cands 對不到時有幾個像的, st 按完成時的狀態, read AI 讀到的字 }] }
+ * 數量可以有小數（最多兩位：冷媒 kg、銅管 M）。不存客戶名稱、價格；點貨不改帳面（帳面以正航為準），只留紀錄。
+ * 按「完成」後才同步給大家（鍵 pick:ID）。「改一下」是暫存的副本：按「完成修改」才寫回、才同步。
  */
 const PICK_KIND = { in: '進貨', out: '出貨' }
 const PICK_TITLE = { in: '進貨點貨', out: '出貨撿貨' }
 const PICK_MAX_LINES = 200
-const PICK_STATE = { todo: '還沒點', ok: '對了', bad: '數量不對', none: '對不到產品' }
+const PICK_QTY_MAX = 99999
+/** 文字長度上限（加進來、AI 讀到、別台同步來的都用同一套） */
+const PICK_LEN = { ref: 40, name: 160, code: 60, spec: 60, unit: 12, by: 40, id: 60, readCode: 40, readName: 80 }
+/** 交叉比對最多列幾項（再多的只寫數量） */
+const PICK_CROSS_MAX = 300
+/** 一張單子最多遮幾欄 */
+const PICK_MASK_MAX = 6
+/** 4.7 上線前一天：更新後從這一天之後的同步紀錄再拿一次（補舊版略過的點貨紀錄） */
+const PICK_LAUNCH = Date.parse('2026-10-09T00:00:00+08:00')
+/** 同步來的時間要在合理範圍（2020 年到現在＋1 天） */
+const PICK_TIME_MIN = Date.parse('2020-01-01T00:00:00+08:00')
+const PICK_STATE = { todo: '還沒點', ok: '對了', bad: '數量不對', none: '對不到產品', guess: 'AI 配的，請確認' }
 const betaBadge = '<span class="badge beta">測試版</span>'
 /** 交叉比對（測試版）：開關只在這台、只有擁有者／管理員 */
 const crossOn = () => canManage() && ls.get(LS.pickCross) === '1'
+/** 有按完成的點貨單改過、還沒檢查要不要上傳：同步時才讀點貨紀錄（不用每 40 秒全部讀一遍） */
+let picksDirty = true
 
-// —— 對照、比對（純函式：node 驗證腳本直接從這個檔案取出來測） ——
-/** AI 讀到的字一律當資料：拿掉控制字元、空白合併、限制長度 */
+// —— 對照、比對、數量（純函式：node 驗證腳本直接從這個檔案取出來測） ——
+/** AI 讀到的字、別台傳來的字一律當資料：拿掉控制字元、空白合併、限制長度 */
 function clip(s, n) {
   return String(s ?? '')
     .replace(/[\u0000-\u001f\u007f]/g, ' ')
@@ -2951,48 +3014,72 @@ function clip(s, n) {
     .trim()
     .slice(0, n)
 }
+const round2 = (n) => Math.round(n * 100) / 100
+/** 合理的數量：0～99999，最多兩位小數 */
+const qtyOk = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= PICK_QTY_MAX && Math.abs(round2(n) - n) < 1e-9
+/** 打的數量（可以有小數、全形也認得）：「2.5」→ 2.5；負數、看不懂的 → null；超過兩位小數四捨五入 */
+function parseQty(v) {
+  const s = String(v ?? '')
+    .normalize('NFKC')
+    .replace(/[,\s]/g, '')
+  if (!/^(\d+(\.\d*)?|\.\d+)$/.test(s)) return null
+  const n = round2(Number(s))
+  return Number.isFinite(n) && n <= PICK_QTY_MAX ? n : null
+}
+const fmtQty = (n) => (n == null || n === '' ? '' : String(round2(Number(n))))
+/** 實拿：空白＝跟單子一樣（已點好的、狀態、結果頁都用這個，才不會一個說對、一個說錯） */
+const gotOf = (l) => l.got ?? l.qty
+function splitWords(text) {
+  return String(text ?? '')
+    .split(/[\s,，、;；]+/)
+    .filter((w) => canon(w))
+}
 /**
- * 點貨用的對照表：正航產品（編號 → 產品）＋品項庫裡還沒接正航的品項。
+ * 點貨用的對照表：正航產品＋品項庫裡還沒接正航的品項。
+ * byExact：編號原樣 → 那一筆；byCanon：編號整理後（大小寫、橫線不計）→ 全部符合的（T-0404、T0404 兩種都留著，不會從搜尋消失）。
  * rows：搜尋用（每一筆的字先整理好 h）；已經接上正航的品項算在那個正航產品裡（照片、位置從品項來）。
  */
 function pickIndex(products, items) {
-  const byNo = new Map()
+  const byExact = new Map()
+  const byCanon = new Map()
   const rows = []
   const linked = erpIndex(items || [])
   const taken = new Set()
   for (const p of products || []) {
     const k = canon(p.no)
-    if (!k || byNo.has(k)) continue
+    if (!k || byExact.has(p.no)) continue
     const it = linked.of(p.no)
     if (it) taken.add(it)
     const r = { no: p.no, p, it, h: normHay(`${p.no} ${p.name}`) }
-    byNo.set(k, r)
+    byExact.set(p.no, r)
+    byCanon.set(k, [...(byCanon.get(k) || []), r])
     rows.push(r)
   }
-  const itemByNo = new Map()
+  const itemByCanon = new Map()
   const itemById = new Map()
   for (const it of items || []) {
     itemById.set(it.id, it)
     if (taken.has(it)) continue
     const r = { it, h: normHay([it.no, it.label, it.brand, it.model, it.spec].join(' ')) }
     const k = canon(it.no)
-    if (k && !itemByNo.has(k)) itemByNo.set(k, r)
+    if (k) itemByCanon.set(k, [...(itemByCanon.get(k) || []), r])
     rows.push(r)
   }
-  return { byNo, itemByNo, itemById, rows, linked }
+  return { byExact, byCanon, itemByCanon, itemById, rows, linked }
 }
+const rowOfNo = (ix, no) => ix.byExact.get(no) || ix.byCanon.get(canon(no))?.[0] || null
 /** 對照到的那一筆，記在點貨單上的樣子（名稱、編號、單位也記一份：之後產品表換了也看得懂） */
 function pickTarget(r) {
-  return r.no ? { no: r.no, name: r.p.name || r.no, code: r.no, unit: r.p.unit || '' } : { itemId: r.it.id, name: itemTitle(r.it), code: r.it.no || '', unit: r.it.unit || '' }
+  return r.no
+    ? { no: r.no, name: clip(r.p.name || r.no, PICK_LEN.name), code: clip(r.no, PICK_LEN.code), unit: clip(r.p.unit, PICK_LEN.unit) }
+    : { itemId: r.it.id, name: clip(itemTitle(r.it), PICK_LEN.name), code: clip(r.it.no, PICK_LEN.code), unit: clip(r.it.unit, PICK_LEN.unit) }
 }
 /**
- * text 的每一個詞都要「完整」出現在 h 裡（h 已經 normHay）：DML 083 不會對到 DML 083S、KP 1 不會對到 KP 15。
- * 相鄰的詞先試接起來（「DML 083S」＝「DML083S」），接不起來再一個一個比。
+ * 每一個詞都要「完整」出現在 h 裡（h 已經 normHay）：DML 083 不會對到 DML 083S、KP 1 不會對到 KP15、2.5L 不會對到 25L。
+ * 相鄰的詞先試接起來（「DML 083S」＝「DML083S」），接不起來再一個一個比。ws：先拆好的詞（或一段字）
  */
-function wordsIn(h, text) {
-  const ws = String(text ?? '')
-    .split(/[\s,，、;；]+/)
-    .filter((w) => canon(w))
+function wordsIn(h, ws) {
+  if (!Array.isArray(ws)) ws = splitWords(ws)
   if (!ws.length) return false
   for (let i = 0; i < ws.length; ) {
     let j = Math.min(ws.length, i + 3)
@@ -3003,13 +3090,17 @@ function wordsIn(h, text) {
   return true
 }
 /** 打到一半：前面的詞完整出現、最後一個詞「開頭一樣」就算。只用在「開頭一樣的」那一區，讓人自己選，不拿來自動配對 */
-function prefixIn(h, text) {
-  const ws = String(text ?? '')
-    .split(/[\s,，、;；]+/)
-    .filter((w) => canon(w))
+function prefixIn(h, ws) {
+  if (!Array.isArray(ws)) ws = splitWords(ws)
   if (!ws.length) return false
-  if (ws.length > 1 && !wordsIn(h, ws.slice(0, -1).join(' '))) return false
+  if (ws.length > 1 && !wordsIn(h, ws.slice(0, -1))) return false
   return !!tokenRe(ws[ws.length - 1], false)?.test(h)
+}
+/** 名稱有沒有關係：有一個詞完整出現，或中文名稱有兩個字連在一起出現（乾燥器／乾燥過濾器）；完全不相干＝編號剛好撞號 */
+function related(h, text) {
+  if (splitWords(text).some((w) => canon(w).length >= 2 && tokenRe(w)?.test(h))) return true
+  const han = normHay(text).match(/[一-鿿]{2,}/g) || []
+  return han.some((s) => [...s].some((_, i) => i < s.length - 1 && h.includes(s.slice(i, i + 2))))
 }
 /**
  * 搜尋產品（打產品編號、品名、型號）：
@@ -3022,6 +3113,7 @@ function pickSearch(ix, q, limit = 8) {
   const out = { hits: [], near: [], more: 0 }
   const cq = canon(raw)
   if (!cq) return out
+  const ws = splitWords(raw)
   const seen = new Set()
   const add = (list, r) => {
     if (!r) return
@@ -3030,148 +3122,190 @@ function pickSearch(ix, q, limit = 8) {
     seen.add(k)
     list.push(r)
   }
-  add(out.hits, ix.byNo.get(cq))
-  add(out.hits, ix.itemByNo.get(cq))
-  for (const r of ix.rows) if (wordsIn(r.h, raw)) add(out.hits, r)
+  for (const r of ix.byCanon.get(cq) || []) add(out.hits, r)
+  for (const r of ix.itemByCanon.get(cq) || []) add(out.hits, r)
+  for (const r of ix.rows) if (wordsIn(r.h, ws)) add(out.hits, r)
   out.more = Math.max(0, out.hits.length - limit)
   out.hits = out.hits.slice(0, limit)
   if (out.hits.length < limit)
     for (const r of ix.rows) {
       if (out.near.length >= limit) break
-      if (prefixIn(r.h, raw)) add(out.near, r)
+      if (prefixIn(r.h, ws)) add(out.near, r)
     }
   return out
 }
 /**
- * AI 讀到的一列 → 哪一個產品。自動配對要很確定才配，不確定就標「對不到產品」讓人自己選：
- * 1. 產品編號一模一樣（正航料號，或品項庫料號）
- * 2. 品名＋規格的每個詞都完整出現在某一個產品的名稱裡，而且只有那一個（兩個以上都像就不猜）
+ * AI 讀到的一列 → 哪一個產品。回傳 { r 配到的, sure 確定, cands 有幾個像的 }：
+ * - 編號一樣、只有一個、名稱也有關（或單子上沒寫名稱）＝確定
+ * - 編號一樣但名稱完全不相干（廠商編號剛好撞號）、或只靠名稱配到的＝AI 猜的，要人按「是這個」才算
+ * - 名稱好幾個都像、或都不像＝對不到（cands 寫有幾個像的，讓人選）
  */
 function matchRow(ix, row) {
+  const text = [row?.name, row?.spec].filter(Boolean).join(' ')
   const c = canon(row?.code)
   if (c) {
-    const r = ix.byNo.get(c) || ix.itemByNo.get(c)
-    if (r) return r
+    const hits = [...(ix.byCanon.get(c) || []), ...(ix.itemByCanon.get(c) || [])]
+    if (hits.length) {
+      const r = hits.find((x) => x.no === row.code) || hits[0]
+      return { r, sure: hits.length === 1 && (!canon(text) || related(r.h, text)), cands: hits.length }
+    }
   }
-  const text = [row?.name, row?.spec].filter(Boolean).join(' ')
-  if (canon(text).length < 2) return null
-  let hit = null
-  for (const r of ix.rows) {
-    if (!wordsIn(r.h, text)) continue
-    if (hit) return null
-    hit = r
-  }
-  return hit
+  if (canon(text).length < 2) return { r: null, sure: false, cands: 0 }
+  const ws = splitWords(text)
+  const hits = ix.rows.filter((x) => wordsIn(x.h, ws))
+  return hits.length === 1 ? { r: hits[0], sure: false, cands: 1 } : { r: null, sure: false, cands: hits.length }
 }
-/** AI 回的 JSON → 品項列：字串一律當資料（限制長度）；數量要是 1～99999 的整數，不是就留空讓人補 */
+/** AI 回的 JSON → 品項列：字串一律當資料（限制長度）；數量要大於 0、最多兩位小數，不是就留空讓人補 */
 function cleanNoteRows(parsed) {
   const rows = Array.isArray(parsed?.rows) ? parsed.rows : []
   return rows
     .slice(0, PICK_MAX_LINES)
+    .filter((r) => r && typeof r === 'object')
     .map((r) => {
-      const n = typeof r?.qty === 'number' ? r.qty : Number(String(r?.qty ?? '').replace(/[,\s]/g, '') || NaN)
-      return { code: clip(r?.code, 40), name: clip(r?.name, 80), spec: clip(r?.spec, 60), qty: Number.isInteger(n) && n > 0 && n <= 99999 ? n : null }
+      const n = typeof r.qty === 'number' ? r.qty : parseQty(r.qty)
+      return { code: clip(r.code, PICK_LEN.readCode), name: clip(r.name, PICK_LEN.readName), spec: clip(r.spec, PICK_LEN.spec), qty: n > 0 && qtyOk(n) ? n : null }
     })
     .filter((r) => r.code || r.name)
 }
 /**
- * 別台同步來的點貨單也當資料看：種類只認 in／out，數量要是 0～99999 的整數，字串限制長度。
- * （畫面上一律 esc；這裡再把形狀整理好，壞掉的資料不會讓畫面出錯）
+ * 別台同步來的點貨單也當資料看（白名單）：不是物件就不要；id 一律用同步鍵上的 id；
+ * 種類只認 in／out；數量 0～99999、最多兩位小數；時間在 2020 年到現在＋1 天；字串限制長度；每一列的 id 不重複。
  */
-function normPick(d) {
-  const num = (v) => (Number.isInteger(v) && v >= 0 && v <= 99999 ? v : null)
-  const str = (v, n) => (v == null || v === '' ? undefined : String(v).slice(0, n))
+function normPick(d, id) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return null
+  const key = String(id ?? d.id ?? '').slice(0, PICK_LEN.id)
+  if (!key) return null
+  const time = (v) => {
+    const n = Number(v)
+    return Number.isFinite(n) && n >= PICK_TIME_MIN && n <= Date.now() + 86400000 ? n : undefined
+  }
+  const qty = (v) => (qtyOk(v) ? round2(v) : null)
+  const opt = (v, n) => (v == null || v === '' ? undefined : String(v).slice(0, n))
+  const ids = new Set()
   return {
-    ...d,
-    kind: d?.kind === 'in' ? 'in' : 'out',
-    ref: clip(d?.ref, 40),
-    by: clip(d?.by, 40),
-    createdAt: Number(d?.createdAt) || 0,
-    doneAt: Number(d?.doneAt) || undefined,
-    lines: (Array.isArray(d?.lines) ? d.lines : [])
-      .filter((l) => l && typeof l === 'object')
+    id: key,
+    kind: d.kind === 'in' ? 'in' : 'out',
+    ref: clip(d.ref, PICK_LEN.ref),
+    createdAt: time(d.createdAt) || time(d.doneAt) || 0,
+    doneAt: time(d.doneAt),
+    editedAt: time(d.editedAt),
+    editedBy: clip(d.editedBy, PICK_LEN.by) || undefined,
+    by: clip(d.by, PICK_LEN.by),
+    byId: opt(d.byId, PICK_LEN.id),
+    lines: (Array.isArray(d.lines) ? d.lines : [])
+      .filter((l) => l && typeof l === 'object' && !Array.isArray(l))
       .slice(0, PICK_MAX_LINES)
-      .map((l, i) => ({
-        ...l,
-        id: str(l.id, 40) || `l${i}`,
-        no: str(l.no, 60),
-        itemId: str(l.itemId, 60),
-        name: clip(l.name, 160),
-        code: clip(l.code, 60),
-        unit: clip(l.unit, 12),
-        qty: num(l.qty),
-        got: num(l.got),
-        done: !!l.done,
-        st: ['ok', 'bad', 'todo', 'none'].includes(l.st) ? l.st : undefined,
-        read: l.read && typeof l.read === 'object' ? { code: clip(l.read.code, 40), name: clip(l.read.name, 80), spec: clip(l.read.spec, 60) } : undefined,
-      })),
+      .map((l, i) => {
+        let lid = opt(l.id, PICK_LEN.id) || `l${i}`
+        if (ids.has(lid)) lid = `${lid}-${i}`
+        ids.add(lid)
+        return {
+          id: lid,
+          no: opt(l.no, PICK_LEN.code),
+          itemId: opt(l.itemId, PICK_LEN.id),
+          name: clip(l.name, PICK_LEN.name),
+          code: clip(l.code, PICK_LEN.code),
+          unit: clip(l.unit, PICK_LEN.unit),
+          qty: qty(l.qty),
+          got: qty(l.got),
+          done: !!l.done,
+          guess: l.guess ? true : undefined,
+          cands: Number.isInteger(l.cands) && l.cands >= 0 && l.cands < 100000 ? l.cands : undefined,
+          st: ['ok', 'bad', 'todo', 'none', 'guess'].includes(l.st) ? l.st : undefined,
+          read: l.read && typeof l.read === 'object' ? { code: clip(l.read.code, PICK_LEN.readCode), name: clip(l.read.name, PICK_LEN.readName), spec: clip(l.read.spec, PICK_LEN.spec) } : undefined,
+        }
+      }),
   }
 }
-/** 一項的狀態：none 對不到產品（琥珀）、todo 還沒點（灰）、ok 對了（綠）、bad 數量不對（紅） */
+/** 一項的狀態：none 對不到產品、guess AI 配的還沒確認（都是琥珀）、todo 還沒點（灰）、ok 對了（綠）、bad 數量不對（紅） */
 function lineState(l) {
   if (!l.no && !l.itemId) return 'none'
+  if (l.guess) return 'guess'
   if (!l.done) return 'todo'
-  return l.qty != null && l.got === l.qty ? 'ok' : 'bad'
+  const g = gotOf(l)
+  return l.qty != null && g != null && Math.abs(g - l.qty) < 0.001 ? 'ok' : 'bad'
 }
-/** 點好了的那一項實拿幾個；沒點的不算（不知道到底拿了沒） */
+/** 點好了的那一項實拿幾個；沒點的、還沒確認產品的不算（不知道到底拿了什麼） */
 function lineGot(l) {
-  return l.done ? Number(l.got ?? l.qty ?? 0) || 0 : 0
+  return l.done && !l.guess && (l.no || l.itemId) ? Number(gotOf(l)) || 0 : 0
 }
+/** 統計：none＝對不到（含 AI 配的還沒確認，guess 另外也算一份）；done＝已點（對的＋數量不對的） */
 function pickSummary(p) {
-  const s = { total: 0, done: 0, ok: 0, bad: 0, todo: 0, none: 0 }
+  const s = { total: 0, done: 0, ok: 0, bad: 0, todo: 0, none: 0, guess: 0 }
   for (const l of p?.lines || []) {
     s.total++
-    s[lineState(l)]++
-    if (l.done) s.done++
+    const st = lineState(l)
+    if (st === 'guess') s.guess++
+    s[st === 'guess' ? 'none' : st]++
   }
+  s.done = s.ok + s.bad
   return s
 }
-const round2 = (n) => Math.round(n * 100) / 100
 /**
- * 交叉比對（測試版）：上次匯入正航（基準 { qty, at }）之後有點過貨的產品，
- * 點貨的變化（進貨實拿總和 − 出貨實拿總和）≠ 正航的變化（這次數量 − 基準數量）→ 列進「要查一下」。
+ * 兩台同時改同一張（「改一下」時另一台也改了）：用每一列的 id 合併。
+ * base＝開始改的時候；mine＝這台改好的；theirs＝雲端（別台）的最新版。
+ * 這台改過的列用這台的；這台沒動、別台改過或新加的用別台的；這台刪掉的不加回來；別台刪掉、這台沒動的就刪。
+ */
+function mergePick(base, mine, theirs) {
+  const sig = (l) => JSON.stringify([l.no, l.itemId, l.qty, l.got, l.done, !!l.guess, l.name])
+  const baseBy = new Map((base?.lines || []).map((l) => [l.id, l]))
+  const theirsBy = new Map((theirs?.lines || []).map((l) => [l.id, l]))
+  const lines = []
+  const seen = new Set()
+  for (const l of mine.lines || []) {
+    seen.add(l.id)
+    const b = baseBy.get(l.id)
+    const t = theirsBy.get(l.id)
+    const untouched = b && sig(b) === sig(l)
+    if (untouched && t) lines.push(t)
+    else if (untouched && !t) continue
+    else lines.push(l)
+  }
+  for (const t of theirs?.lines || []) if (!seen.has(t.id) && !baseBy.has(t.id)) lines.push(t)
+  return { ...theirs, ...mine, ref: (mine.ref || '') !== (base?.ref || '') ? mine.ref : theirs?.ref || '', lines }
+}
+/**
+ * 交叉比對（測試版）：上次匯入正航（基準 { qty, at }）之後、這張報表之前有點過貨的產品，
+ * 點貨的變化（進貨實拿總和 − 出貨實拿總和）≠ 正航的變化（這次數量 − 基準數量）→ 列進「要查一下」（容許 0.001 的誤差）。
  * 不說誰錯：可能單子打錯、拿錯貨，或有進出貨沒用 App 點。
- * oldProducts：上次的產品表（有 at 的才有基準）；newProducts：這次報表讀到的；picks：點貨紀錄（按過完成的才算）。
+ * oldProducts：上次的產品表（有 at 的才有基準）；newProducts：這次報表讀到的；picks：點貨紀錄（按過完成的才算）；now：報表的時間。
  */
 function crossCheck(oldProducts, newProducts, picks, now) {
   const oldBy = new Map((oldProducts || []).map((p) => [p.no, p]))
   const first = !(oldProducts || []).some((p) => p.at)
-  const done = (picks || []).filter((pk) => pk.doneAt && pk.doneAt <= now)
+  // 先建好「產品 → 哪幾張點貨單、各拿幾個」，不要每一種產品都把全部點貨單掃一遍
+  const byNo = new Map()
+  for (const pk of picks || []) {
+    if (!pk?.doneAt || pk.doneAt > now) continue
+    for (const l of pk.lines || []) {
+      if (!l.no || l.guess) continue
+      let m = byNo.get(l.no)
+      if (!m) byNo.set(l.no, (m = new Map()))
+      m.set(pk, (m.get(pk) || 0) + lineGot(l))
+    }
+  }
   const items = []
   const inNew = new Set()
   let checked = 0
   for (const np of newProducts || []) {
     inNew.add(np.no)
     const op = oldBy.get(np.no)
-    if (!op?.at) continue
-    const rel = []
-    let pick = 0
-    for (const pk of done) {
-      if (pk.doneAt <= op.at) continue
-      let got = 0
-      let hit = false
-      for (const l of pk.lines || []) {
-        if (l.no !== np.no) continue
-        hit = true
-        got += lineGot(l)
-      }
-      if (!hit) continue
-      rel.push({ id: pk.id, at: pk.doneAt, ref: pk.ref || '', kind: pk.kind, got })
-      pick += pk.kind === 'in' ? got : -got
-    }
+    const m = byNo.get(np.no)
+    if (!op?.at || !m) continue
+    const rel = [...m].filter(([pk]) => pk.doneAt > op.at).map(([pk, got]) => ({ id: pk.id, at: pk.doneAt, ref: pk.ref || '', kind: pk.kind, got: round2(got) }))
     if (!rel.length) continue
     checked++
+    const pick = round2(rel.reduce((n, x) => n + (x.kind === 'in' ? x.got : -x.got), 0))
     const erp = round2((Number(np.qty) || 0) - (Number(op.qty) || 0))
-    if (round2(pick) !== erp) items.push({ no: np.no, name: np.name || op.name || '', pick: round2(pick), erp, picks: rel.sort((a, b) => a.at - b.at) })
+    if (Math.abs(pick - erp) > 0.001) items.push({ no: np.no, name: np.name || op.name || '', pick, erp, picks: rel.sort((a, b) => a.at - b.at) })
   }
   // 有點過貨、這次的正航表裡卻沒有（報表只匯了一部分？）：沒辦法比，只算數量
-  const missing = new Set()
-  for (const pk of done)
-    for (const l of pk.lines || []) {
-      const op = l.no && !inNew.has(l.no) ? oldBy.get(l.no) : null
-      if (op?.at && pk.doneAt > op.at) missing.add(l.no)
-    }
-  return { first, checked, missing: missing.size, items: items.slice(0, 300) }
+  let missing = 0
+  for (const [no, m] of byNo) {
+    const op = inNew.has(no) ? null : oldBy.get(no)
+    if (op?.at && [...m.keys()].some((pk) => pk.doneAt > op.at)) missing++
+  }
+  return { first, checked, missing, total: items.length, items: items.slice(0, PICK_CROSS_MAX) }
 }
 
 // —— 存檔 ——
@@ -3180,12 +3314,19 @@ async function picksAll(force = false) {
   if (!picksCache || force) picksCache = await idb.picks.all().catch(() => [])
   return picksCache
 }
-/** 存點貨單：還沒按完成的只存這台（不同步）；按過完成的照一般存檔，稍後同步給大家 */
+/**
+ * 存點貨單：
+ * - 「改一下」的暫存副本（_copy）：不存，按「完成修改」才寫回
+ * - 已經刪掉的（_gone，例如刪掉時 AI 還在讀）：不再存回去
+ * - 還沒按完成的：只存這台（不同步）；按過完成的：一般存檔，稍後同步給大家
+ */
 async function savePick(p) {
-  if (p._gone) return // 這張已經刪掉了（例如刪掉時 AI 還在讀）：不要再存回去
+  if (p._gone || p._copy) return
   try {
-    if (p.doneAt) await idb.picks.put(p)
-    else {
+    if (p.doneAt) {
+      await idb.picks.put(p)
+      picksDirty = true
+    } else {
       p.updatedAt = Date.now()
       await idb.picks.putRaw(p)
     }
@@ -3214,35 +3355,68 @@ function pickSave(p = state.pick) {
     })
   return pickSaving
 }
-/** 對照表：正航產品表或品項庫換了才重建（4000 多種，每次重畫都建會慢） */
-let pickIx = { erp: undefined, items: null, n: -1, ix: null }
+const clonePick = (p) => JSON.parse(JSON.stringify(p))
+const pickLine = (id) => state.pick?.lines.find((l) => l.id === id)
+/** 現在是不是在「改一下」（暫存的副本） */
+const editingCopy = () => !!(state.pick?._copy && state.pickEdit?.id === state.pick.id)
+const whoAmI = () => currentCounter()?.name || ls.get(LS.memberName) || ''
+function pickEditDirty() {
+  if (!editingCopy()) return false
+  const sig = (p) => JSON.stringify([p.ref || '', p.lines.map((l) => [l.id, l.no, l.itemId, l.qty, l.got, l.done, !!l.guess])])
+  return sig(state.pick) !== sig(state.pickEdit.base)
+}
+/** 離開點貨單那一頁：「改一下」有改 → 先問要不要放棄；什麼都沒加的草稿不留。回傳 false＝不要離開 */
+async function leavePickEdit() {
+  const p = state.pick
+  if (!p) return true
+  if (editingCopy()) {
+    if (pickEditDirty() && !confirm('放棄這次的修改？\n\n按「確定」放棄，紀錄維持原本的樣子；\n按「取消」回去繼續改，改好按「完成修改」。')) return false
+    state.pickEdit = null
+    state.pick = null
+    return true
+  }
+  if (!p.doneAt && !p.lines.length && !p.ref) {
+    p._gone = true
+    await idb.picks.del(p.id).catch(() => {})
+    picksCache = null
+  }
+  return true
+}
+/** 對照表：正航產品表換了、品項庫改過（改名、接上正航）才重建（4000 多種，每次重畫都建會慢） */
+let pickIx = { erp: undefined, ver: -1, ix: null }
 async function pickCtx() {
   const erp = await erpGet()
   const items = await itemsAll()
-  if (pickIx.erp !== erp || pickIx.items !== items || pickIx.n !== items.length) pickIx = { erp, items, n: items.length, ix: pickIndex(erp?.products || [], items) }
+  if (pickIx.erp !== erp || pickIx.ver !== itemsVer) pickIx = { erp, ver: itemsVer, ix: pickIndex(erp?.products || [], items) }
   return pickIx.ix
 }
-const pickLine = (id) => state.pick?.lines.find((l) => l.id === id)
+const pickIxNow = () => pickIx.ix || pickIndex([], [])
 
 // —— 畫面小零件 ——
 /** 一項現在的名稱、編號、照片、位置：產品表或品項庫改了就用新的；都找不到就用加進來時記的 */
 function lineInfo(ix, l) {
-  const r = l.no ? ix.byNo.get(canon(l.no)) : null
+  const r = l.no ? rowOfNo(ix, l.no) : null
   const it = r?.it || (l.no ? ix.linked.of(l.no) : null) || (l.itemId ? ix.itemById.get(l.itemId) : null) || null
   const name = r?.p.name || (it ? itemTitle(it) : '') || l.name || l.read?.name || '（沒有名稱）'
   return { it, name, code: r?.no || it?.no || l.code || '', unit: r?.p.unit || it?.unit || l.unit || '' }
 }
-const signed = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${-n}` : '0')
+const readText = (l) => (l.read ? [l.read.code, l.read.name, l.read.spec].filter(Boolean).join(' ') : '')
+const signed = (n) => {
+  const v = round2(Number(n) || 0)
+  return v > 0 ? `+${v}` : v < 0 ? `−${-v}` : '0'
+}
 function diffText(l, unit) {
-  const d = (Number(l.got) || 0) - (Number(l.qty) || 0)
+  const d = round2((Number(gotOf(l)) || 0) - (Number(l.qty) || 0))
   const u = unit || '個'
   return d < 0 ? `少 ${-d} ${u}` : d > 0 ? `多 ${d} ${u}` : ''
 }
 function stateChip(l, unit) {
   const st = lineState(l)
   const text = st === 'bad' ? (l.qty == null ? '單子數量沒填' : diffText(l, unit) || PICK_STATE.bad) : PICK_STATE[st]
-  return `<span class="pk-chip pk-state ${st}">${st === 'ok' ? icon('check', 16) : st === 'bad' || st === 'none' ? icon('warning', 16) : ''}${esc(text)}</span>`
+  return `<span class="pk-chip pk-state ${st}">${st === 'ok' ? icon('check', 16) : st === 'todo' ? '' : icon('warning', 16)}${esc(text)}</span>`
 }
+/** 數字框依位數縮字（4 位數以上不會被切掉） */
+const lenAttr = (v) => ` data-len="${Math.min(9, String(v ?? '').length)}"`
 const pickThumb = (info, size) => (info.it ? itemThumb(info.it, size) : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc([...String(info.name || '?')][0] || '?')}</span>`)
 /** 放在哪裡：只畫儲位黃標籤，不寫數量（點貨不需要帳面、實盤數，盲盤也一樣） */
 function pickPlaces(info) {
@@ -3253,36 +3427,40 @@ function lineCard(ix, l, i) {
   const info = lineInfo(ix, l)
   const st = lineState(l)
   const id = esc(l.id)
-  const readTxt = l.read ? [l.read.code, l.read.name, l.read.spec].filter(Boolean).join(' ') : ''
+  const rt = readText(l)
+  const amber = st === 'none' || st === 'guess'
   const meta = [info.code, info.unit && `單位：${info.unit}`].filter(Boolean).join('・')
+  // 對不到的：上面直接寫單子上的字（不重複寫兩次）；AI 配的：寫配到的產品，下面寫單子上的字讓人對
+  const head =
+    st === 'none'
+      ? `<span class="pk-cap">單子上寫</span><span class="pk-name">${esc(rt || l.name || '（沒有名稱）')}</span>`
+      : `<span class="pk-name">${esc(info.name)}</span>${meta ? `<span class="meta">${esc(meta)}</span>` : ''}${pickPlaces(info)}`
+  const box =
+    st === 'none'
+      ? `<div class="pk-none"><p>${l.cands > 1 ? `有 ${l.cands} 個像的，請選一個。` : '正航產品表、品項庫裡找不到一樣的：請選是哪一個產品，或刪掉這項。'}</p><div class="row-actions"><button class="btn small" data-action="pk-assign" data-id="${id}">${icon('search', 18)}選產品</button><button class="btn small plain" data-action="pk-remove" data-id="${id}">刪掉這項</button></div></div>`
+      : st === 'guess'
+        ? `<div class="pk-none"><p>AI 配的，請確認${rt ? `：單子上寫「${esc(rt)}」` : ''}。</p><div class="row-actions"><button class="btn small" data-action="pk-confirm" data-id="${id}">${icon('check', 18)}是這個</button><button class="btn small plain" data-action="pk-assign" data-id="${id}">換一個</button></div></div>`
+        : ''
+  const need = fmtQty(l.qty) || '？'
   return `<article class="pk-line st-${st}" data-line="${id}" aria-label="第 ${i + 1} 項">
     <div class="pk-top">
-      ${pickThumb(info, 56)}
-      <div class="grow">
-        ${stateChip(l, info.unit)}
-        <span class="pk-name">${esc(info.name)}</span>
-        ${meta && st !== 'none' ? `<span class="meta">${esc(meta)}</span>` : ''}
-        ${st === 'none' ? '' : pickPlaces(info)}
-      </div>
-      <button class="icon-btn small pk-more" data-action="pk-more" data-id="${id}" aria-label="這一項的其他動作：改單子數量、換產品、刪掉" title="改數量、換產品、刪掉">${icon('more', 22)}</button>
+      ${pickThumb(st === 'none' ? { it: null, name: rt || l.name } : info, 56)}
+      <div class="grow">${stateChip(l, info.unit)}${head}</div>
+      <button class="icon-btn small pk-more" data-action="pk-more" data-id="${id}" aria-label="這一項的其他動作：改單子數量、換產品、改回還沒點、刪掉" title="改數量、換產品、刪掉">${icon('more', 22)}</button>
     </div>
-    ${
-      st === 'none'
-        ? `<div class="pk-none"><p>${readTxt ? `單子上寫：「${esc(readTxt)}」。` : ''}正航產品表、品項庫裡找不到一樣的，請選是哪一個產品，或刪掉這項。</p><div class="row-actions"><button class="btn small" data-action="pk-assign" data-id="${id}">${icon('search', 18)}選產品</button><button class="btn small secondary" data-action="pk-remove" data-id="${id}">刪掉這項</button></div></div>`
-        : ''
-    }
+    ${box}
     <div class="pk-bot">
-      <div class="pk-need"><span class="pk-cap">單子</span><button class="pk-need-num" data-action="pk-qty" data-id="${id}" aria-label="單子上寫 ${esc(l.qty ?? '（沒填）')} 個，點一下可以改">${esc(l.qty ?? '？')}</button></div>
-      <div class="pk-got"><span class="pk-cap">實拿</span><span class="stepper pk-step"><button data-action="pk-step" data-id="${id}" data-d="-1" aria-label="少一個">${icon('minus', 22)}</button><input data-pk-got="${id}" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${esc(l.got ?? '')}" placeholder="${esc(l.qty ?? '')}" aria-label="實拿幾個（空白＝跟單子一樣）"><button data-action="pk-step" data-id="${id}" data-d="1" aria-label="多一個">${icon('plus', 22)}</button></span></div>
-      <button class="pk-done${l.done ? ' on' : ''}" data-action="pk-done" data-id="${id}" aria-pressed="${!!l.done}">${icon('check', 20)}<span>點好了</span></button>
+      <div class="pk-need"><span class="pk-cap">單子</span><button class="pk-need-num" data-action="pk-qty" data-id="${id}"${lenAttr(need)} aria-label="單子上寫 ${esc(need)}，點一下可以改">${esc(need)}</button></div>
+      <div class="pk-got"><span class="pk-cap">實拿</span><span class="stepper pk-step"><button data-action="pk-step" data-id="${id}" data-d="-1" aria-label="少一個">${icon('minus', 22)}</button><input data-pk-got="${id}" inputmode="decimal" autocomplete="off" value="${esc(fmtQty(l.got))}" placeholder="${esc(fmtQty(l.qty))}"${lenAttr(fmtQty(l.got) || fmtQty(l.qty))} aria-label="實拿幾個（空白＝跟單子一樣）"><button data-action="pk-step" data-id="${id}" data-d="1" aria-label="多一個">${icon('plus', 22)}</button></span></div>
+      <button class="pk-done${l.done ? ' on' : ''}${amber ? ' off' : ''}" data-action="pk-done" data-id="${id}" aria-pressed="${!!l.done}"${amber ? ' aria-disabled="true"' : ''}>${icon('check', 20)}<span>點好了</span></button>
     </div>
   </article>`
 }
 function pickProgress(p) {
   const s = pickSummary(p)
   const pct = s.total ? Math.round((s.done / s.total) * 100) : 0
-  const allOk = s.total && s.ok === s.total
-  return `<div class="pk-prog-text"><b>已點 ${s.done}／${s.total} 項</b>${s.bad ? `<span class="pk-chip bad">${s.bad} 項不對</span>` : ''}${s.none ? `<span class="pk-chip none">${s.none} 項對不到</span>` : ''}${allOk ? `<span class="pk-chip ok">${icon('check', 14)}全部對了</span>` : ''}</div><div class="pk-bar${allOk ? ' ok' : ''}" role="progressbar" aria-label="點貨進度" aria-valuemin="0" aria-valuemax="${s.total}" aria-valuenow="${s.done}"><span style="width:${pct}%"></span></div>`
+  const allOk = s.total > 0 && s.ok === s.total
+  return `<div class="pk-prog-text"><b>已點 ${s.done}／${s.total} 項</b>${s.bad ? `<span class="pk-chip bad">${s.bad} 項不對</span>` : ''}${s.none ? `<span class="pk-chip none">${s.none} 項要確認產品</span>` : ''}${allOk ? `<span class="pk-chip ok">${icon('check', 14)}全部對了</span>` : ''}</div><div class="pk-bar${allOk ? ' ok' : ''}" role="progressbar" aria-label="點貨進度" aria-valuemin="0" aria-valuemax="${s.total}" aria-valuenow="${s.done}"><span style="width:${pct}%"></span></div>`
 }
 /** 按 ＋／－、點好了、打數字：只更新那一張卡片和上面的進度（不整頁重畫，打字不會被打斷） */
 function paintLine(l) {
@@ -3293,7 +3471,10 @@ function paintLine(l) {
   const chip = card.querySelector('.pk-state')
   if (chip) chip.outerHTML = stateChip(l, lineInfo(pickIx.ix, l).unit)
   const input = card.querySelector('[data-pk-got]')
-  if (input && document.activeElement !== input) input.value = l.got ?? ''
+  if (input) {
+    if (document.activeElement !== input) input.value = fmtQty(l.got)
+    input.dataset.len = String(Math.min(9, (input.value || input.placeholder).length))
+  }
   const btn = card.querySelector('.pk-done')
   if (btn) {
     btn.classList.toggle('on', !!l.done)
@@ -3302,17 +3483,14 @@ function paintLine(l) {
   const prog = document.getElementById('pk-progress')
   if (prog) prog.innerHTML = pickProgress(state.pick)
 }
-function flashLine(id) {
+/** 閃一下那一張卡片；scroll＝false：不捲過去（加品項時留在搜尋框） */
+function flashLine(id, { scroll = true } = {}) {
   const card = document.querySelector(`.pk-line[data-line="${CSS.escape(id)}"]`)
   if (!card) return
-  card.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+  if (scroll) card.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
   document.querySelectorAll('.pk-line.flash').forEach((x) => x.classList.remove('flash'))
   void card.offsetWidth
   card.classList.add('flash')
-}
-const parseGot = (v) => {
-  const n = parseInt(String(v ?? '').normalize('NFKC').replace(/[^\d]/g, ''), 10)
-  return Number.isFinite(n) ? Math.min(99999, n) : null
 }
 /** 搜尋結果（加品項、選產品共用）；mode＝'add'：點了加進清單；'assign'：點了＝這一項是這個產品 */
 function pickResultsHtml(ix, q, mode = 'add') {
@@ -3325,52 +3503,71 @@ function pickResultsHtml(ix, q, mode = 'add') {
   }
   return `${res.hits.length ? `<div class="group">${res.hits.map(row).join('')}</div>${res.more ? `<p class="footnote">還有 ${res.more} 個也符合：打完整一點會更準。</p>` : ''}` : ''}${
     res.near.length ? `<p class="section-title">開頭一樣的（不一定是同一個）</p><div class="group">${res.near.map(row).join('')}</div>` : ''
-  }${!res.hits.length && !res.near.length ? `<div class="group"><div class="row muted">找不到「${esc(String(q).trim().slice(0, 40))}」。${ix.byNo.size ? '請確認編號、型號有沒有打錯。' : '還沒匯入正航產品表：只找得到品項庫裡的。'}</div></div>` : ''}`
+  }${!res.hits.length && !res.near.length ? `<div class="group"><div class="row muted">找不到「${esc(String(q).trim().slice(0, PICK_LEN.ref))}」。${ix.byExact.size ? '請確認編號、型號有沒有打錯。' : '還沒匯入正航產品表：只找得到品項庫裡的。'}</div></div>` : ''}`
 }
 function pickRow(p) {
   const s = pickSummary(p)
   const by = byName(p)
-  const meta = [fmtTime(p.doneAt || p.createdAt), by && `${by} 點`, `${s.total} 項`].filter(Boolean).join('・')
+  const meta = [fmtTime(p.doneAt || p.createdAt), by && `${by} 點`, `${s.total} 項`, p.editedAt && '改過'].filter(Boolean).join('・')
   const tag = !p.doneAt
     ? `<span class="pk-chip todo">點到 ${s.done}／${s.total}</span>`
-    : s.bad
-      ? `<span class="pk-chip bad">${s.bad} 項不對</span>`
-      : s.none
-        ? `<span class="pk-chip none">${s.none} 項對不到</span>`
-        : s.todo
-          ? `<span class="pk-chip todo">${s.todo} 項沒點</span>`
-          : `<span class="pk-chip ok">${icon('check', 14)}全部對</span>`
+    : !s.total
+      ? '<span class="pk-chip todo">沒有品項</span>'
+      : s.bad
+        ? `<span class="pk-chip bad">${s.bad} 項不對</span>`
+        : s.none
+          ? `<span class="pk-chip none">${s.none} 項對不到</span>`
+          : s.todo
+            ? `<span class="pk-chip todo">${s.todo} 項還沒點</span>`
+            : `<span class="pk-chip ok">${icon('check', 14)}全部對</span>`
   const kind = p.kind === 'in' ? 'in' : 'out'
-  return `<button class="row pk-row" data-action="pk-open" data-id="${esc(p.id)}"><span class="pk-kind-ico ${kind}" aria-hidden="true">${icon(kind, 22)}</span><span class="grow"><span class="title">${PICK_KIND[kind]}・${p.ref ? esc(p.ref) : '<span class="muted">沒填單號</span>'}</span><br><span class="meta">${esc(meta)}${p.doneAt ? '' : '・<span class="unfinished">還沒按完成</span>'}</span></span>${tag}${chev}</button>`
+  return `<button class="row pk-row" data-action="pk-open" data-id="${esc(p.id)}"><span class="pk-kind-ico ${kind}" aria-hidden="true">${icon(kind, 22)}</span><span class="grow"><span class="title">${PICK_KIND[kind]}・${p.ref ? esc(p.ref) : '<span class="muted">沒填單號</span>'}</span><br><span class="meta">${esc(meta)}</span></span>${tag}${chev}</button>`
 }
 function crossCard(last) {
   const when = last ? `・${fmtTime(last.at)}` : ''
-  const meta = !last ? '匯入正航產品表時會自動比對' : last.first ? `下次匯入才開始比對${when}` : last.items?.length ? `上次匯入有 ${last.items.length} 項要查一下${when}` : `上次匯入沒有要查的${when}`
-  return `<div class="group pk-cross-card"><button class="row" data-action="pk-cross-last"><span class="row-ico" aria-hidden="true">${icon('chart')}</span><span class="grow"><span class="title">交叉比對（測試版）</span><span class="badge new">新</span><br><span class="meta">${esc(meta)}</span></span>${last?.items?.length ? `<span class="pk-chip bad">${last.items.length} 項</span>` : ''}${chev}</button></div>`
+  const n = last?.total ?? last?.items?.length ?? 0
+  const meta = !last ? '匯入正航產品表時會自動比對' : last.first ? `下次匯入才開始比對${when}` : n ? `上次匯入有 ${n} 項要查一下${when}` : `上次匯入沒有要查的${when}`
+  return `<div class="group pk-cross-card"><button class="row" data-action="pk-cross-last"><span class="row-ico" aria-hidden="true">${icon('chart')}</span><span class="grow"><span class="title">交叉比對（測試版）</span><span class="badge new">新</span><br><span class="meta">${esc(meta)}</span></span>${n ? `<span class="pk-chip bad">${n} 項</span>` : ''}${chev}</button></div>`
 }
 /** 設定頁：交叉比對開關（只有擁有者、管理員看得到） */
 function pickCrossSettings() {
   const last = readJson(LS.pickCrossLast, null)
+  const n = last?.total ?? last?.items?.length ?? 0
   return `<p class="section-title">點貨（測試版） <span class="badge new">新</span></p>
     <div class="group">
       <label class="row"><span class="grow"><span class="title">匯入正航時，跟點貨紀錄交叉比對（測試版）</span><br><span class="meta">只比上次匯入後有點過貨的產品：點貨記的進出跟正航的進出不一樣，就列出來查一下。第一次只記基準，下次匯入才開始比。開關只在這台。</span></span><input type="checkbox" id="rule-pick-cross" ${ls.get(LS.pickCross) === '1' ? 'checked' : ''} style="width:22px;height:22px"></label>
-      ${last ? `<button class="row" data-action="pk-cross-last"><span class="grow"><span class="title" style="color:var(--tint)">看上次的比對結果</span><br><span class="meta">${esc(fmtTime(last.at))}・${esc(last.first ? '下次匯入才開始比對' : `${last.items?.length || 0} 項要查一下`)}</span></span>${chev}</button>` : ''}
+      ${last ? `<button class="row" data-action="pk-cross-last"><span class="grow"><span class="title" style="color:var(--tint)">看上次的比對結果</span><br><span class="meta">${esc(fmtTime(last.at))}・${esc(last.first ? '下次匯入才開始比對' : `${n} 項要查一下`)}</span></span>${chev}</button>` : ''}
     </div>`
 }
 
 // —— 三個畫面：點貨（清單）、點貨單（對貨）、結果 ——
 async function viewPick() {
   const all = await picksAll()
-  const drafts = all.filter((p) => !p.doneAt)
+  // 什麼都沒加的草稿（以前留下的）：順手清掉，不顯示
+  const empty = all.filter((p) => !p.doneAt && !p.lines.length && !p.ref)
+  if (empty.length) {
+    for (const p of empty) idb.picks.del(p.id).catch(() => {})
+    picksCache = null
+  }
+  const drafts = all.filter((p) => !p.doneAt && !empty.includes(p))
   const done = all.filter((p) => p.doneAt).sort((a, b) => b.doneAt - a.doneAt)
   const shown = done.slice(0, 30 + (state.pickMore || 0))
-  const howTo = `<details class="steps pk-howto" ${all.length ? '' : 'open'}><summary>怎麼用？</summary>
+  const open = all.length - empty.length ? '' : 'open'
+  const howTo = canEdit()
+    ? `<details class="steps pk-howto" ${open}><summary>怎麼用？</summary>
       <ol>
-        <li><b>開單：</b>按「出貨」或「進貨」；有單號就填（可以不填）。</li>
-        <li><b>加品項：</b>打產品編號、搜品名，或按「拍單子讓 AI 讀」（只會送框裡的品項，客戶名稱、金額不會送出）。</li>
+        <li><b>開單：</b>按「出貨」或「進貨」；有單號就填（可以不填，不要填客戶名稱）。</li>
+        <li><b>加品項：</b>打產品編號、搜品名，或按「拍單子讓 AI 讀」：先框出品項、遮住單價和金額那幾欄，只會送框裡、沒遮住的部分。</li>
         <li><b>點貨：</b>一項一項拿。數量跟單子一樣，直接按「點好了」；不一樣，先用 ＋／－ 改成實拿的數量，再按「點好了」。</li>
-        <li><b>看顏色：</b>綠色＝對了，紅色＝數量不對（寫出差幾個），琥珀色＝對不到產品，灰色＝還沒點。</li>
+        <li><b>看顏色：</b>綠色＝對了，紅色＝數量不對（寫出差幾個），琥珀色＝對不到產品或 AI 配的要確認，灰色＝還沒點。</li>
         <li><b>完成：</b>按「完成」看結果，可以截圖或複製文字傳給老闆。點貨不會改帳面，只留紀錄。</li>
+      </ol>
+    </details>`
+    : `<details class="steps pk-howto" ${open}><summary>怎麼看紀錄？</summary>
+      <ol>
+        <li><b>看顏色：</b>綠色「全部對」、紅色「幾項不對」、琥珀色「幾項對不到」、灰色「還沒點」。</li>
+        <li><b>點進去看結果：</b>哪幾項數量不對、差幾個，誰點的、幾點點的。</li>
+        <li><b>要傳給老闆：</b>直接截圖，或在結果頁按「複製結果」。</li>
       </ol>
     </details>`
   return `
@@ -3412,23 +3609,31 @@ async function viewPickEdit() {
     return viewPickResult()
   }
   const ix = await pickCtx()
-  const aiOk = hasAi()
+  const copy = editingCopy()
+  const busy = state.pickBusyId === p.id
   const by = byName(p)
-  const ai = state.pickBusy
-    ? `<div class="pk-ai-busy" role="status"><span class="spinner small" aria-hidden="true"></span><span class="grow"><b>AI 讀單子中…</b><br><span class="meta">大約 5～20 秒；只送框裡的品項</span></span></div>`
-    : aiOk
-      ? `<div class="pk-ai"><div class="row-actions"><label class="btn secondary pk-ai-btn">${icon('camera', 20)}拍單子讓 AI 讀<input type="file" accept="image/*" capture="environment" id="pk-cam" class="sr-only"></label><label class="btn secondary pk-ai-btn">${icon('image', 20)}從相簿選<input type="file" accept="image/*" id="pk-album" class="sr-only"></label></div><p class="pk-privacy">${icon('shield', 16)}<span>拍完先框出品項那一段，只送框裡的給 AI；客戶名稱、金額不會送出。</span></p></div>`
+  const ai = busy
+    ? `<div class="pk-ai-busy" role="status"><span class="spinner small" aria-hidden="true"></span><span class="grow"><b>AI 讀單子中…</b><br><span class="meta">大約 5～20 秒；只送框裡、沒遮住的部分</span></span></div>`
+    : hasAi()
+      ? `<div class="pk-ai"><div class="row-actions"><label class="btn secondary pk-ai-btn">${icon('camera', 20)}拍單子讓 AI 讀<input type="file" accept="image/*" capture="environment" id="pk-cam" class="sr-only"></label><label class="btn secondary pk-ai-btn">${icon('image', 20)}從相簿選<input type="file" accept="image/*" id="pk-album" class="sr-only"></label></div><p class="pk-privacy">${icon('shield', 16)}<span>拍完先框出品項、遮住單價和金額那幾欄；只會送框裡、沒遮住的部分給 AI。</span></p></div>`
       : `<div class="pk-ai off"><div class="row-actions"><button class="btn secondary pk-ai-btn" data-action="pk-no-ai" aria-disabled="true">${icon('camera', 20)}拍單子讓 AI 讀</button></div><p class="pk-privacy">${icon('warning', 16)}<span>${syncReady() ? '要先設定 AI：請擁有者到「設定」把 AI 金鑰放到雲端，或在「設定」貼上自己的 Gemini API Key。' : '要先設定 AI：到「設定」貼上 Gemini API Key。'}打編號、搜品名不用 AI。</span></p></div>`
+  const right = copy
+    ? `<button class="btn small plain" data-action="pk-cancel-edit">放棄修改</button>`
+    : p.doneAt
+      ? ''
+      : `<button class="btn small plain" data-action="pk-discard" ${busy ? 'disabled' : ''}>刪掉這張</button>`
   return `
   <main class="app">
-    <div class="nav">${backBtn('pick', '點貨')}<span class="nav-right">${p.doneAt || (!p.lines.length && !p.ref) ? '' : '<button class="btn small plain" data-action="pk-discard">刪掉這張</button>'}</span></div>
-    <h1 class="large-title">${PICK_TITLE[p.kind] || '點貨'} ${betaBadge}</h1>
+    <div class="nav">${backBtn('pick', '點貨')}<span class="nav-right">${right}</span></div>
+    <h1 class="large-title">${PICK_TITLE[p.kind] || '點貨'} ${copy ? '<span class="badge edit">改一下</span>' : ''}${betaBadge}</h1>
+    ${copy ? '<p class="subtitle">改的是暫存的副本：按「完成修改」才會存進紀錄、同步給大家；不改了按「放棄修改」。</p>' : ''}
     <div class="pk-cols">
       <div class="pk-addcol">
         <div class="group pk-meta">
-          <label class="row"><span class="pk-label">單號</span><input class="inline" id="pk-ref" value="${esc(p.ref || '')}" placeholder="選填，例如 S1131010-001" maxlength="40" autocomplete="off" spellcheck="false" enterkeyhint="done"></label>
+          <label class="row"><span class="pk-label">單號</span><input class="inline" id="pk-ref" value="${esc(p.ref || '')}" placeholder="選填，例如 S1131010-001" maxlength="${PICK_LEN.ref}" autocomplete="off" spellcheck="false" enterkeyhint="done"></label>
           ${by ? `<div class="row"><span class="pk-label">點貨人</span><span class="grow">${esc(by)}</span><span class="meta">${esc(fmtTime(p.createdAt))}</span></div>` : ''}
         </div>
+        <p class="footnote pk-ref-tip">單號只填單據號碼，不要填客戶名稱。</p>
         <p class="section-title">加品項</p>
         ${
           ix.rows.length
@@ -3446,7 +3651,7 @@ async function viewPickEdit() {
       </div>
     </div>
   </main>
-  <div class="toolbar"><div class="inner"><button class="btn" data-action="pk-finish" ${p.lines.length ? '' : 'disabled'}>${p.doneAt ? '完成修改' : '完成'}</button></div></div>`
+  <div class="toolbar"><div class="inner"><button class="btn" data-action="pk-finish" ${p.lines.length && !busy ? '' : 'disabled'}>${copy ? '完成修改' : '完成'}</button></div></div>`
 }
 async function viewPickResult() {
   const p = state.pick
@@ -3454,79 +3659,206 @@ async function viewPickResult() {
   const ix = await pickCtx()
   const s = pickSummary(p)
   const rows = p.lines.map((l) => ({ l, info: lineInfo(ix, l), st: lineState(l) }))
-  const order = { bad: 0, none: 1, todo: 2 }
+  const order = { bad: 0, guess: 1, none: 2, todo: 3 }
   const probs = rows.filter((r) => r.st !== 'ok').sort((a, b) => order[a.st] - order[b.st])
   const oks = rows.filter((r) => r.st === 'ok')
   const allOk = s.total > 0 && s.ok === s.total
   const by = byName(p)
   const kind = p.kind === 'in' ? 'in' : 'out'
   const head = [p.ref ? `單號 ${p.ref}` : '沒填單號', p.doneAt ? `${fmtTime(p.doneAt)} 完成` : `${fmtTime(p.createdAt)} 開始・還沒按完成`, by && `${by} 點`].filter(Boolean).join('・')
+  const edited = p.editedAt ? `${fmtTime(p.editedAt)} ${p.editedBy ? `${p.editedBy} ` : ''}改過` : ''
   const tile = (n, label, cls) => `<div class="pk-stat ${cls}${n ? '' : ' zero'}"><b>${n}</b><span>${label}</span></div>`
   const probRow = ({ l, info, st }) => {
-    const readTxt = st === 'none' && l.read ? [l.read.code, l.read.name, l.read.spec].filter(Boolean).join(' ') : ''
-    const meta = st === 'none' ? `單子上寫：${readTxt || info.name}・單子 ${l.qty ?? '？'}` : [info.code, `單子 ${l.qty ?? '？'}`, `實拿 ${l.done ? l.got ?? '—' : '—'}`].filter(Boolean).join('・')
-    return `<div class="row pk-rrow st-${st}">${pickThumb(info, 40)}<span class="grow"><span class="title">${esc(info.name)}</span><br><span class="meta">${esc(meta)}</span></span>${stateChip(l, info.unit)}</div>`
+    const rt = readText(l)
+    const meta =
+      st === 'none' ? `單子上寫：${rt || info.name}・單子 ${fmtQty(l.qty) || '？'}` : st === 'guess' ? `AI 配的，沒確認・單子上寫：${rt || '—'}` : [info.code, `單子 ${fmtQty(l.qty) || '？'}`, `實拿 ${l.done ? fmtQty(gotOf(l)) || '—' : '—'}`].filter(Boolean).join('・')
+    return `<div class="row pk-rrow st-${st}">${pickThumb(st === 'none' ? { it: null, name: rt || info.name } : info, 40)}<span class="grow"><span class="title">${esc(st === 'none' ? rt || info.name : info.name)}</span><br><span class="meta">${esc(meta)}</span></span>${stateChip(l, info.unit)}</div>`
   }
-  const okRow = ({ l, info }) => `<div class="row pk-rrow st-ok">${pickThumb(info, 36)}<span class="grow"><span class="title">${esc(info.name)}</span>${info.code ? `<br><span class="meta">${esc(info.code)}</span>` : ''}</span><span class="qty"><b>${esc(l.got)}</b><small>${esc(info.unit || '個')}</small></span></div>`
+  const okRow = ({ l, info }) => `<div class="row pk-rrow st-ok">${pickThumb(info, 36)}<span class="grow"><span class="title">${esc(info.name)}</span>${info.code ? `<br><span class="meta">${esc(info.code)}</span>` : ''}</span><span class="qty"><b>${esc(fmtQty(gotOf(l)))}</b><small>${esc(info.unit || '個')}</small></span></div>`
+  const verdict = !s.total ? '沒有品項' : allOk ? `全部對了・${s.total} 項` : `${probs.length} 項要處理・共 ${s.total} 項`
   return `
   <main class="app">
-    <div class="nav">${backBtn('pick', '點貨')}<span class="nav-right">${canEdit() ? '<button class="btn small secondary" data-action="pk-reopen">改一下</button>' : ''}${canManage() && p.doneAt ? `<button class="icon-btn" data-action="pk-delete" aria-label="刪除這筆點貨紀錄" title="刪除這筆點貨紀錄">${icon('trash', 22)}</button>` : ''}</span></div>
+    <div class="nav">${backBtn('pick', '點貨')}<span class="nav-right">${canEdit() && p.doneAt ? '<button class="btn small secondary" data-action="pk-reopen">改一下</button>' : ''}${canManage() && p.doneAt ? `<button class="icon-btn" data-action="pk-delete" aria-label="刪除這筆點貨紀錄" title="刪除這筆點貨紀錄">${icon('trash', 22)}</button>` : ''}</span></div>
     <div class="pk-result">
-      <section class="pk-res-card" aria-label="點貨結果">
-        <div class="pk-res-kind"><span class="pk-kind-ico ${kind}" aria-hidden="true">${icon(kind, 22)}</span><span class="grow"><b>${PICK_TITLE[kind]}結果</b> ${betaBadge}<br><span class="meta">${esc(head)}</span></span></div>
-        <h1 class="pk-verdict ${allOk ? 'ok' : 'bad'}">${icon(allOk ? 'check' : 'warning', 28)}<span>${allOk ? `全部對了・${s.total} 項` : `${probs.length} 項要處理・共 ${s.total} 項`}</span></h1>
-        <div class="pk-stats">${tile(s.ok, '對了', 'ok')}${tile(s.bad, '數量不對', 'bad')}${tile(s.todo, '沒點', 'todo')}${tile(s.none, '對不到', 'none')}</div>
-      </section>
+      <div class="pk-res-side">
+        <section class="pk-res-card" aria-label="點貨結果">
+          <div class="pk-res-kind"><span class="pk-kind-ico ${kind}" aria-hidden="true">${icon(kind, 22)}</span><span class="grow"><b>${PICK_TITLE[kind]}結果</b> ${betaBadge}<br><span class="meta">${esc(head)}</span>${edited ? `<br><span class="meta pk-edited">${icon('edit', 14)}${esc(edited)}</span>` : ''}</span></div>
+          <h1 class="pk-verdict ${allOk ? 'ok' : 'bad'}">${icon(allOk ? 'check' : 'warning', 28)}<span>${esc(verdict)}</span></h1>
+          <div class="pk-stats">${tile(s.ok, '對了', 'ok')}${tile(s.bad, '數量不對', 'bad')}${tile(s.todo, '還沒點', 'todo')}${tile(s.none, '對不到', 'none')}</div>
+        </section>
+        <div class="pk-res-actions">
+          <button class="btn secondary block" data-action="pk-copy">${icon('copy', 20)}複製結果（貼到 LINE）</button>
+          <p class="footnote">點貨不會改帳面（帳面以正航為準），只留這筆紀錄${syncReady() ? '，大家的手機都看得到' : ''}。要傳給老闆：直接截圖，或按上面複製文字。</p>
+        </div>
+      </div>
       <div class="pk-res-lists">
         ${probs.length ? `<p class="section-title">要處理的（${probs.length}）</p><div class="group">${probs.map(probRow).join('')}</div>` : ''}
         ${oks.length ? `<p class="section-title">對了（${oks.length}）</p><div class="group${oks.length >= 6 ? ' cols-2' : ''}">${oks.map(okRow).join('')}</div>` : ''}
-      </div>
-      <div class="pk-res-actions">
-        <button class="btn secondary block" data-action="pk-copy">${icon('copy', 20)}複製結果（貼到 LINE）</button>
-        <p class="footnote">點貨不會改帳面（帳面以正航為準），只留這筆紀錄${syncReady() ? '，大家的手機都看得到' : ''}。要傳給老闆：直接截圖，或按上面複製文字。</p>
       </div>
     </div>
   </main>`
 }
 
+// —— 數量面板（可以有小數；打 0 或看不懂不會關掉，直接在面板裡說） ——
+function qtySheet({ title, sub = '', value = '', action = '儲存', quick = [], skip = '' }, onSave, onSkip) {
+  sheet(
+    `<h2 class="sheet-title">${esc(title)}</h2>${sub ? `<p class="sheet-sub">${sub}</p>` : ''}
+     <input class="field big-num" id="q-val" inputmode="decimal" autocomplete="off" value="${esc(value)}" aria-label="${esc(title)}" aria-describedby="q-err">
+     <p class="q-err" id="q-err" role="alert" hidden></p>
+     ${quick.length ? `<div class="q-quick">${quick.map((n) => `<button class="chip" data-n="${n}">${n}</button>`).join('')}</div>` : ''}
+     <div class="row-actions" style="margin-top:14px"><button class="btn secondary" id="q-cancel" style="flex:1">${esc(skip || '取消')}</button><button class="btn" id="q-save" style="flex:1">${esc(action)}</button></div>`,
+    (el, close) => {
+      const input = el.querySelector('#q-val')
+      const err = el.querySelector('#q-err')
+      input.focus()
+      input.select()
+      const done = async (v) => {
+        const n = parseQty(v)
+        if (n == null || n <= 0) {
+          err.hidden = false
+          err.textContent = n === 0 ? '數量要大於 0' : '請打數字（可以有小數，最多兩位）'
+          input.focus()
+          return
+        }
+        close()
+        await onSave(n)
+      }
+      el.querySelector('#q-cancel').onclick = () => {
+        close()
+        onSkip?.()
+      }
+      el.querySelector('#q-save').onclick = () => done(input.value)
+      input.addEventListener('keydown', (e) => e.key === 'Enter' && done(input.value))
+      input.addEventListener('input', () => (err.hidden = true))
+      el.querySelectorAll('[data-n]').forEach((b) => (b.onclick = () => done(b.dataset.n)))
+    },
+    () => onSkip?.(),
+  )
+}
+
 // —— 動作 ——
-/** 從搜尋結果加一項：先問單子上寫幾個；同一個產品已經在清單裡就跳過去，不重複加 */
+const sameProduct = (a, b) => !!((a.no && a.no === b.no) || (a.itemId && a.itemId === b.itemId))
+/**
+ * 加一批品項（AI 讀到的、搜尋加的）：確定是同一個產品、已經在清單裡（或這一批裡重複）的，一次問整批：略過，還是把數量加上去。
+ * AI 猜的（guess）不算重複：產品還不確定，按「是這個」時才問。
+ */
+function addLines(p, lines, { quiet = false } = {}) {
+  const fresh = []
+  const dups = []
+  for (const l of lines) {
+    const target = !l.guess && (l.no || l.itemId) ? [...p.lines, ...fresh].find((x) => !x.guess && sameProduct(x, l)) : null
+    if (target) dups.push({ l, target })
+    else fresh.push(l)
+  }
+  const commit = async (mode) => {
+    if (p._gone) return
+    p.lines.push(...fresh)
+    if (mode === 'add') for (const { l, target } of dups) if (l.qty != null) target.qty = round2((target.qty || 0) + l.qty)
+    await pickSave(p)
+    if (!quiet) {
+      const miss = fresh.filter((l) => !l.no && !l.itemId).length
+      const guess = fresh.filter((l) => l.guess).length
+      const merged = mode === 'add' ? dups.length : 0
+      const skipped = mode === 'skip' ? dups.length : 0
+      const parts = [`加了 ${fresh.length} 項`, merged && `${merged} 項數量加到原本那一項`, skipped && `略過 ${skipped} 項重複的`, guess && `${guess} 項是 AI 配的、請確認`, miss && `${miss} 項對不到產品`, fresh.some((l) => l.qty == null) && '有數量沒讀到的，點「單子」那格補上'].filter(Boolean)
+      toast(parts.join('；'))
+    }
+    if (state.pick === p && state.view === 'pick-edit') render()
+  }
+  if (!dups.length) return commit()
+  const where = (t) => {
+    const i = p.lines.indexOf(t)
+    return i >= 0 ? `第 ${i + 1} 項` : '這次讀到的另一列'
+  }
+  const ix = pickIxNow()
+  sheet(
+    `<h2 class="sheet-title">${dups.length === 1 ? `已經在${where(dups[0].target)}` : `有 ${dups.length} 項已經在清單裡`}</h2>
+     <p class="sheet-sub">同一個產品不要重複點：要略過，還是把數量加上去？</p>
+     <div class="group">${dups
+       .slice(0, 8)
+       .map(({ l, target }) => `<div class="row"><span class="grow"><span class="title pk-tname">${esc(lineInfo(ix, target).name)}</span><br><span class="meta">${esc(where(target))}：單子 ${esc(fmtQty(target.qty) || '？')}・這次 ${esc(fmtQty(l.qty) || '？')}</span></span></div>`)
+       .join('')}${dups.length > 8 ? `<div class="row muted">還有 ${dups.length - 8} 項</div>` : ''}</div>
+     <div class="row-actions" style="margin-top:14px"><button class="btn secondary" id="dp-skip" style="flex:1">略過</button><button class="btn" id="dp-add" style="flex:1">數量加上去</button></div>`,
+    (el, close) => {
+      el.querySelector('#dp-skip').onclick = () => {
+        close()
+        commit('skip')
+      }
+      el.querySelector('#dp-add').onclick = () => {
+        close()
+        commit('add')
+      }
+    },
+    () => commit('skip'),
+  )
+}
+/** 從搜尋結果加一項：已經在清單裡 → 問要不要把數量加上去；沒有 → 問單子上寫幾個。加完留在搜尋框，新的那張卡片閃一下 */
 function addPickLine(r) {
   const p = state.pick
   if (!p || !r) return
-  if (p.lines.length >= PICK_MAX_LINES) return toast(`一張最多 ${PICK_MAX_LINES} 項`)
   const t = pickTarget(r)
-  const dup = p.lines.findIndex((l) => (t.no ? l.no === t.no : l.itemId === t.itemId))
-  if (dup >= 0) {
-    toast(`已經在清單裡（第 ${dup + 1} 項）`)
-    return flashLine(p.lines[dup].id)
-  }
-  numberSheet({ title: '單子上寫幾個？', sub: esc(t.name), value: '', action: '加進清單', quick: [1, 2, 3, 5, 10].map((n) => ({ n, label: String(n) })) }, async (n) => {
-    if (!n) return toast('單子數量要 1 以上')
-    const l = { id: uid(), ...t, qty: n, got: null, done: false, src: 'search' }
-    p.lines.push(l)
+  const target = p.lines.find((l) => !l.guess && sameProduct(l, t))
+  const after = (id) => {
     state.pickQ = ''
-    state.pickFlash = l.id
+    state.pickFlash = { id, scroll: false }
+    state.pickFocusQ = true
+    render()
+  }
+  if (target)
+    return qtySheet({ title: `已經在第 ${p.lines.indexOf(target) + 1} 項`, sub: `${esc(t.name)}：單子現在 ${esc(fmtQty(target.qty) || '？')}。要把數量加上去嗎？加幾個？`, action: '數量加上去', skip: '略過', quick: [1, 2, 3, 5, 10] }, async (n) => {
+      target.qty = round2((target.qty || 0) + n)
+      await pickSave(p)
+      toast(`第 ${p.lines.indexOf(target) + 1} 項的單子數量改成 ${fmtQty(target.qty)}`)
+      after(target.id)
+    })
+  if (p.lines.length >= PICK_MAX_LINES) return toast(`一張最多 ${PICK_MAX_LINES} 項`)
+  qtySheet({ title: '單子上寫幾個？', sub: esc(t.name), action: '加進清單', quick: [1, 2, 3, 5, 10] }, async (n) => {
+    const l = { id: uid(), ...t, qty: n, got: null, done: false }
+    p.lines.push(l)
     await pickSave(p)
     toast(`已加入：${t.name}`)
+    after(l.id)
   })
 }
 function editLineQty(l, then) {
-  numberSheet({ title: '單子上寫幾個？', sub: esc(lineInfo(pickIx.ix || pickIndex([], []), l).name), value: l.qty ?? '', action: '儲存' }, async (n) => {
-    if (!n) return toast('單子數量要 1 以上')
+  qtySheet({ title: '單子上寫幾個？', sub: esc(lineInfo(pickIxNow(), l).name), value: fmtQty(l.qty), action: '儲存' }, async (n) => {
     l.qty = n
     then?.()
     await pickSave()
+    render()
   })
 }
-/** 選產品（對不到的、對錯的）：搜尋框先帶入 AI 讀到的編號或品名 */
+/** 這一項跟清單裡另一項是同一個產品：把數量加過去（合併成一項），或刪掉這一項 */
+function mergeIntoSheet(p, l, target) {
+  const n = p.lines.indexOf(target) + 1
+  sheet(
+    `<h2 class="sheet-title">已經在第 ${n} 項</h2>
+     <p class="sheet-sub">${esc(lineInfo(pickIxNow(), target).name)}：第 ${n} 項單子 ${esc(fmtQty(target.qty) || '？')}、這一項單子 ${esc(fmtQty(l.qty) || '？')}。要略過（刪掉這一項），還是把數量加到第 ${n} 項？</p>
+     <div class="row-actions" style="margin-top:14px"><button class="btn secondary" id="mg-skip" style="flex:1">略過</button><button class="btn" id="mg-add" style="flex:1">數量加上去</button></div>`,
+    (el, close) => {
+      const finish = (add) => {
+        close()
+        if (add && l.qty != null) target.qty = round2((target.qty || 0) + l.qty)
+        const i = p.lines.indexOf(l)
+        if (i >= 0) p.lines.splice(i, 1)
+        pickSave(p)
+        state.pickFlash = { id: target.id, scroll: true }
+        render()
+        toast(add ? `已合併到第 ${p.lines.indexOf(target) + 1} 項：單子 ${fmtQty(target.qty)}` : '已略過（刪掉這一項）')
+      }
+      el.querySelector('#mg-skip').onclick = () => finish(false)
+      el.querySelector('#mg-add').onclick = () => finish(true)
+    },
+  )
+}
+/** 選產品（對不到的、AI 配的換一個、對錯的）：搜尋框先帶入 AI 讀到的編號或品名 */
 async function assignLine(l) {
   const ix = await pickCtx()
-  const readTxt = l.read ? [l.read.code, l.read.name, l.read.spec].filter(Boolean).join(' ') : ''
+  const rt = readText(l)
   const q0 = (l.no || l.itemId ? '' : l.read?.code || l.read?.name) || ''
   sheet(
     `<h2 class="sheet-title">這是哪一個產品？</h2>
-     <p class="sheet-sub">${readTxt ? `單子上寫：「${esc(readTxt)}」。` : `現在是：${esc(lineInfo(ix, l).name)}。`}打產品編號，或品名、型號找。</p>
+     <p class="sheet-sub">${rt ? `單子上寫：「${esc(rt)}」。` : `現在是：${esc(lineInfo(ix, l).name)}。`}打產品編號，或品名、型號找。</p>
      <input class="field search" id="pp-q" type="search" placeholder="打產品編號，或品名、型號" autocomplete="off" spellcheck="false" enterkeyhint="search" value="${esc(q0)}">
      <div id="pp-results" style="margin-top:10px">${pickResultsHtml(ix, q0, 'assign')}</div>`,
     (el, close) => {
@@ -3543,21 +3875,35 @@ async function assignLine(l) {
       box.addEventListener('click', (e) => {
         const b = e.target.closest('[data-pp]')
         if (!b) return
-        const r = b.dataset.no ? ix.byNo.get(canon(b.dataset.no)) : ix.itemById.get(b.dataset.iid) ? { it: ix.itemById.get(b.dataset.iid) } : null
+        const r = b.dataset.no ? rowOfNo(ix, b.dataset.no) : ix.itemById.get(b.dataset.iid) ? { it: ix.itemById.get(b.dataset.iid) } : null
         if (!r) return
         close()
+        const p = state.pick
         const t = pickTarget(r)
-        const dup = state.pick?.lines.findIndex((x) => x !== l && (t.no ? x.no === t.no : x.itemId === t.itemId)) ?? -1
         delete l.no
         delete l.itemId
+        delete l.guess
+        delete l.cands
         Object.assign(l, t)
+        // 選的產品清單裡已經有了：問要合併還是略過
+        const target = p?.lines.find((x) => x !== l && !x.guess && sameProduct(x, l))
+        if (target) return mergeIntoSheet(p, l, target)
         pickSave()
         render()
-        toast(`已對到：${t.name}${dup >= 0 ? `（清單第 ${dup + 1} 項也是這個產品）` : ''}`)
+        toast(`已對到：${t.name}`)
       })
       if (!q0) input.focus()
     },
   )
+}
+/** AI 配的 → 按「是這個」才算確認（清單裡已經有同一個產品就問要不要合併） */
+function confirmLine(l) {
+  const p = state.pick
+  delete l.guess
+  const target = p?.lines.find((x) => x !== l && !x.guess && sameProduct(x, l))
+  if (target) return mergeIntoSheet(p, l, target)
+  pickSave()
+  render()
 }
 function removeLine(l) {
   const p = state.pick
@@ -3577,13 +3923,15 @@ function removeLine(l) {
   })
 }
 function lineMoreSheet(l) {
-  const info = lineInfo(pickIx.ix || pickIndex([], []), l)
+  const info = lineInfo(pickIxNow(), l)
+  const amber = ['none', 'guess'].includes(lineState(l))
   sheet(
-    `<h2 class="sheet-title">${esc(info.name)}</h2>${info.code ? `<p class="sheet-sub">${esc(info.code)}</p>` : ''}
+    `<h2 class="sheet-title">${esc(amber ? readText(l) || info.name : info.name)}</h2>${info.code && !amber ? `<p class="sheet-sub">${esc(info.code)}</p>` : ''}
      <div class="group">
-       <button class="row" id="lm-qty"><span class="grow"><span class="title">改單子數量</span><br><span class="meta">現在：${esc(l.qty ?? '沒填')}</span></span>${chev}</button>
-       <button class="row" id="lm-swap"><span class="grow"><span class="title">換產品</span><br><span class="meta">對錯產品時用</span></span>${chev}</button>
-       <button class="row" id="lm-del"><span class="grow"><span class="title" style="color:var(--red)">刪掉這項</span><br><span class="meta">刪掉後幾秒內可以復原</span></span>${chev}</button>
+       <button class="row" id="lm-qty"><span class="grow"><span class="title">改單子數量</span><br><span class="meta">現在：${esc(fmtQty(l.qty) || '沒填')}</span></span>${chev}</button>
+       <button class="row" id="lm-swap"><span class="grow"><span class="title">${amber ? '選產品' : '換產品'}</span><br><span class="meta">${amber ? '選是哪一個產品' : '對錯產品時用'}</span></span>${chev}</button>
+       ${l.done ? `<button class="row" id="lm-undo"><span class="grow"><span class="title">改回還沒點</span><br><span class="meta">拿錯了、要重點的時候用</span></span>${chev}</button>` : ''}
+       <button class="row" id="lm-del"><span class="grow"><span class="title" style="color:var(--red-ink)">刪掉這項</span><br><span class="meta">刪掉後幾秒內可以復原</span></span>${chev}</button>
      </div>`,
     (el, close) => {
       el.querySelector('#lm-qty').onclick = () => {
@@ -3594,6 +3942,20 @@ function lineMoreSheet(l) {
         close()
         assignLine(l)
       }
+      el.querySelector('#lm-undo')?.addEventListener('click', () => {
+        close()
+        l.done = false
+        paintLine(l)
+        pickSave()
+        toast('已改回還沒點', {
+          label: '復原',
+          run: () => {
+            l.done = true
+            paintLine(l)
+            pickSave()
+          },
+        })
+      })
       el.querySelector('#lm-del').onclick = () => {
         close()
         removeLine(l)
@@ -3601,17 +3963,17 @@ function lineMoreSheet(l) {
     },
   )
 }
-/** 按「完成」：還有沒點的先提醒（回去點／還是完成） */
+/** 按「完成」：還有還沒點的先提醒（回去點／還是完成） */
 function finishPickSheet(p) {
-  const ix = pickIx.ix || pickIndex([], [])
-  const undone = p.lines.filter((l) => !l.done)
-  const none = undone.filter((l) => lineState(l) === 'none').length
+  const ix = pickIxNow()
+  const undone = p.lines.filter((l) => !l.done || ['none', 'guess'].includes(lineState(l)))
+  const amber = undone.filter((l) => ['none', 'guess'].includes(lineState(l))).length
   sheet(
-    `<h2 class="sheet-title">還有 ${undone.length} 項沒點</h2>
-     <p class="sheet-sub">還是完成的話，這些會記成「沒點」${none ? `（其中 ${none} 項對不到產品）` : ''}。</p>
+    `<h2 class="sheet-title">還有 ${undone.length} 項還沒點</h2>
+     <p class="sheet-sub">還是完成的話，這些會記成「還沒點」${amber ? `（其中 ${amber} 項還沒確認是哪一個產品，記成「對不到」）` : ''}。</p>
      <div class="group">${undone
        .slice(0, 6)
-       .map((l) => `<div class="row"><span class="grow"><span class="title pk-tname">${esc(lineInfo(ix, l).name)}</span><br><span class="meta">單子 ${esc(l.qty ?? '？')}</span></span>${stateChip(l, lineInfo(ix, l).unit)}</div>`)
+       .map((l) => `<div class="row"><span class="grow"><span class="title pk-tname">${esc(lineInfo(ix, l).name)}</span><br><span class="meta">單子 ${esc(fmtQty(l.qty) || '？')}</span></span>${stateChip(l, lineInfo(ix, l).unit)}</div>`)
        .join('')}${undone.length > 6 ? `<div class="row muted">還有 ${undone.length - 6} 項</div>` : ''}</div>
      <div class="row-actions" style="margin-top:14px"><button class="btn secondary" id="pf-back" style="flex:1">回去點</button><button class="btn" id="pf-go" style="flex:1">還是完成</button></div>`,
     (el, close) => {
@@ -3626,48 +3988,69 @@ function finishPickSheet(p) {
     },
   )
 }
+/**
+ * 完成：
+ * - 第一次完成：記完成時間、存進紀錄、同步
+ * - 「改一下」完成修改：至少要留 1 項；雲端在這段時間被別台改過 → 用每一列的 id 合併兩邊；記誰、幾點改的
+ */
 async function finishPick(p) {
+  if (p._gone) return toast('這張在另一台被刪掉了')
+  if (state.pickBusyId === p.id) return toast('AI 還在讀單子，讀完再按完成')
   const now = Date.now()
-  const again = !!p.doneAt
-  if (again) p.editedAt = now
-  else p.doneAt = now
-  // 每一項的狀態也記一份（ok 對了／bad 數量不對／todo 沒點／none 對不到）：紀錄自己就看得懂，之後要匯出也方便
-  for (const l of p.lines) l.st = lineState(l)
+  const copy = editingCopy() && state.pick === p
+  let out = p
+  let merged = false
+  if (copy) {
+    if (!p.lines.length) return toast('完成的紀錄至少要留 1 項；整張都不要了，請擁有者或管理員在結果頁刪除')
+    const base = state.pickEdit.base
+    const latest = await idb.picks.get(p.id).catch(() => null)
+    if (!latest) return toast('這張在另一台被刪掉了，沒辦法存')
+    const { _copy, ...mine } = p
+    merged = (latest.updatedAt || 0) !== (base.updatedAt || 0)
+    out = merged ? mergePick(base, mine, latest) : mine
+    out.doneAt = base.doneAt || now
+    out.editedAt = now
+    out.editedBy = whoAmI()
+  } else out.doneAt = out.doneAt || now
+  // 每一項的狀態也記一份（ok 對了／bad 數量不對／todo 還沒點／none 對不到／guess AI 配的沒確認）：紀錄自己就看得懂
+  for (const l of out.lines) l.st = lineState(l)
   if (pickSaving) await pickSaving
   try {
-    await savePick(p)
+    await savePick(out)
   } catch {
-    if (!again) delete p.doneAt
+    if (!copy) delete out.doneAt
     return
   }
-  state.pick = p
+  state.pick = out
+  state.pickEdit = null
   state.pickQ = ''
   go('pick-result')
-  toast(again ? '改好了：已更新這筆點貨紀錄' : '點完了：已存成點貨紀錄（不會改帳面）')
+  toast(copy ? (merged ? '改好了：另一台也改了這張，已經把兩邊的修改合在一起' : '改好了：已更新這筆點貨紀錄') : '點完了：已存成點貨紀錄（不會改帳面）')
   if (syncReady()) syncNow().catch((err) => toast(`同步沒成功：${err.message}；有網路時會再自動試`))
 }
 /** 複製結果（貼到 LINE 給老闆）：不寫客戶、價格（本來就沒存） */
 function pickText(p, ix) {
   const s = pickSummary(p)
   const rows = p.lines.map((l) => ({ l, info: lineInfo(ix, l), st: lineState(l) }))
-  const one = ({ l, info }) => `・${info.name}${info.code ? `（${info.code}）` : ''}：單子 ${l.qty ?? '？'}，實拿 ${l.done ? l.got ?? '—' : '—'}`
-  const sec = (title, st, extra = () => '') => {
-    const xs = rows.filter((x) => x.st === st)
+  const one = ({ l, info, st }) => `・${st === 'none' ? readText(l) || info.name : info.name}${info.code && st !== 'none' ? `（${info.code}）` : ''}：單子 ${fmtQty(l.qty) || '？'}，實拿 ${l.done ? fmtQty(gotOf(l)) || '—' : '—'}`
+  const sec = (title, sts, extra = () => '') => {
+    const xs = rows.filter((x) => sts.includes(x.st))
     return xs.length ? [`【${title}】`, ...xs.map((x) => one(x) + extra(x))] : []
   }
   return [
     `${PICK_TITLE[p.kind] || '點貨'}結果（測試版）`,
     `單號：${p.ref || '沒填'}`,
     `時間：${fmtTime(p.doneAt || p.createdAt)}${byName(p) ? `　點貨人：${byName(p)}` : ''}`,
-    `對了 ${s.ok} 項・數量不對 ${s.bad} 項・沒點 ${s.todo} 項・對不到 ${s.none} 項`,
-    ...sec('數量不對', 'bad', ({ l, info }) => `（${l.qty == null ? '單子數量沒填' : diffText(l, info.unit)}）`),
-    ...sec('沒點', 'todo'),
-    ...sec('對不到產品', 'none'),
-    ...sec('對了', 'ok'),
+    ...(p.editedAt ? [`改過：${fmtTime(p.editedAt)}${p.editedBy ? ` ${p.editedBy}` : ''}`] : []),
+    `對了 ${s.ok} 項・數量不對 ${s.bad} 項・還沒點 ${s.todo} 項・對不到 ${s.none} 項`,
+    ...sec('數量不對', ['bad'], ({ l, info }) => `（${l.qty == null ? '單子數量沒填' : diffText(l, info.unit)}）`),
+    ...sec('還沒點', ['todo']),
+    ...sec('對不到產品', ['none', 'guess'], ({ st }) => (st === 'guess' ? '（AI 配的，沒確認）' : '')),
+    ...sec('對了', ['ok']),
   ].join('\n')
 }
 
-// —— 拍單子讓 AI 讀：先框出品項那一段，只送框裡的 ——
+// —— 拍單子讓 AI 讀：先框出品項那一段、遮住單價和金額，只送框裡、沒遮住的部分 ——
 const NOTE_SCHEMA = {
   type: 'OBJECT',
   properties: {
@@ -3679,7 +4062,7 @@ const NOTE_SCHEMA = {
           code: { type: 'STRING', description: '產品編號（料號），照單子原樣；沒有就空字串' },
           name: { type: 'STRING', description: '品名，照單子原樣' },
           spec: { type: 'STRING', description: '規格：型號、尺寸；沒有就空字串' },
-          qty: { type: 'NUMBER', description: '數量，整數；看不清楚填 0' },
+          qty: { type: 'NUMBER', description: '數量；可以有小數（例如 2.5）；看不清楚填 0' },
         },
         required: ['code', 'name', 'spec', 'qty'],
       },
@@ -3687,53 +4070,101 @@ const NOTE_SCHEMA = {
   },
   required: ['rows'],
 }
-const NOTE_PROMPT = `照片是一張出貨單或進貨單裡「品項」那一段（上面的客戶資料、下面的金額合計已經裁掉）。
+const NOTE_PROMPT = `照片是一張出貨單或進貨單裡「品項」那一段（上面的客戶資料、下面的金額合計已經裁掉；黑色長條是遮住的欄位，不用讀）。
 請一列一列讀出每一個品項：code＝產品編號、name＝品名、spec＝規格（型號、尺寸）、qty＝數量。
 規則：
 1. 只讀品項的產品編號、品名、規格、數量。客戶名稱、地址、電話、統一編號、單價、金額、小計、合計、稅額、備註一律忽略，不要寫進任何欄位。
 2. 照單子上的字原樣抄；看不清楚的欄位留空字串，不要猜。
-3. qty 只填數量那一欄的整數；看不清楚填 0。
+3. qty 只填數量那一欄的數字（可以有小數，例如冷媒 2.5）；看不清楚填 0。
 4. 品名和規格寫在同一格的：品名放 name，型號、尺寸放 spec。
 5. 標題列、空白列、合計列不是品項，不要列出來。
 只回 JSON。`
 /** 預設的框：單子中間的品項區（上面約 22% 是公司、客戶資料，下面約 18% 是金額合計、簽名） */
 const CROP_DEFAULT = { x1: 0.03, y1: 0.22, x2: 0.97, y2: 0.82 }
 const CROP_MIN = 0.08
+const MASK_MIN = 0.02
 function cropRect() {
   const r = readJson(LS.pickCrop, null)
   const ok = r && ['x1', 'y1', 'x2', 'y2'].every((k) => Number.isFinite(r[k])) && r.x1 >= 0 && r.y1 >= 0 && r.x2 <= 1 && r.y2 <= 1 && r.x2 - r.x1 >= CROP_MIN && r.y2 - r.y1 >= CROP_MIN
   return ok ? { x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 } : { ...CROP_DEFAULT }
 }
-const CROP_HANDLES = { nw: '拖曳左上角', ne: '拖曳右上角', sw: '拖曳左下角', se: '拖曳右下角', n: '拖曳上邊', s: '拖曳下邊' }
+/** 遮住的欄位（直的長條，左右位置用照片寬度的比例）：跟框一樣記在這台 */
+function cropMasks() {
+  const list = readJson(LS.pickMask, [])
+  return (Array.isArray(list) ? list : [])
+    .filter((m) => m && Number.isFinite(m.x1) && Number.isFinite(m.x2) && m.x1 >= 0 && m.x2 <= 1 && m.x2 - m.x1 >= MASK_MIN)
+    .slice(0, PICK_MASK_MAX)
+    .map((m) => ({ x1: m.x1, x2: m.x2 }))
+}
+const CROP_HANDLES = { nw: '拖曳左上角', ne: '拖曳右上角', sw: '拖曳左下角', se: '拖曳右下角', n: '拖曳上邊', s: '拖曳下邊', w: '拖曳左邊', e: '拖曳右邊' }
+/** 第一次用的示意圖（自己畫的，不是真的單子）：黃框框住品項那幾列、黑色長條遮住單價和金額 */
+const CROP_HELP_SVG = `<svg class="crop-help-svg" viewBox="0 0 300 196" role="img" aria-label="示意圖：黃框框住品項那幾列，黑色長條遮住單價、金額兩欄">
+  <rect x="58" y="4" width="184" height="188" rx="6" fill="#ffffff" stroke="#c7c7cc"/>
+  <rect x="70" y="14" width="160" height="28" rx="3" fill="#f6dada"/><text x="150" y="33" text-anchor="middle" font-size="11" fill="#a3191f">客戶名稱、地址、電話</text>
+  <g font-size="10" fill="#3a3a3c"><text x="78" y="60">品名規格</text><text x="148" y="60">數量</text><text x="178" y="60">單價</text><text x="206" y="60">金額</text></g>
+  <g fill="#8e8e93">${[72, 88, 104, 120, 136].map((y) => `<rect x="78" y="${y}" width="52" height="5" rx="2"/><rect x="150" y="${y}" width="12" height="5" rx="2"/><rect x="178" y="${y}" width="18" height="5" rx="2"/><rect x="206" y="${y}" width="22" height="5" rx="2"/>`).join('')}</g>
+  <rect x="70" y="154" width="160" height="28" rx="3" fill="#dde3f6"/><text x="150" y="172" text-anchor="middle" font-size="11" fill="#1f44a8">合計、稅額、簽名</text>
+  <rect x="172" y="48" width="58" height="98" fill="#000000" fill-opacity="0.85"/><text x="201" y="101" text-anchor="middle" font-size="11" fill="#ffffff">遮住</text>
+  <rect x="72" y="48" width="158" height="98" fill="none" stroke="#ffd60a" stroke-width="3"/>
+  <g font-size="10" fill="#ffffff"><text x="52" y="100" text-anchor="end">黃框</text><text x="52" y="113" text-anchor="end">只框品項</text></g>
+  <path d="M54 104h14" stroke="#ffd60a" stroke-width="2"/>
+</svg>`
 /**
- * 框出品項：照片上自動框好一個長方形（上次框的位置，記在這台），四個角、上下邊可以拖（手指範圍 44px），框裡面拖＝整個移動。
- * 回傳框的位置（0～1 的比例），取消回傳 null。
+ * 框出品項、遮住單價和金額：照片上自動框好一個長方形（上次框的位置，記在這台），
+ * 四個角、四個邊可以拖（手指範圍 44px），框裡面拖＝整個移動；按「遮住欄位」後，在框裡左右拖＝畫一條要塗黑的直條。
+ * 回傳 { rect 框（0～1 的比例）, masks 遮住的直條 }，取消回傳 null。
  */
 function cropSheet(blob) {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(blob)
     const r = cropRect()
+    let masks = cropMasks()
+    let maskMode = false
     const el = document.createElement('div')
     el.className = 'crop-wrap'
     el.setAttribute('role', 'dialog')
     el.setAttribute('aria-modal', 'true')
     el.setAttribute('aria-label', '框出單子上的品項')
-    el.innerHTML = `<div class="crop-bar"><button type="button" class="btn small crop-plain" data-c="cancel">取消</button><b class="crop-title">框出品項那一段</b><button type="button" class="btn small crop-plain" data-c="reset">重設</button></div>
-      <p class="crop-tip">拖曳四個角或上下邊，只框住品項那幾列；不要框到客戶名稱、金額。</p>
-      <div class="crop-stage"><div class="crop-img"><img src="${url}" alt="拍到的單子" draggable="false"><div class="crop-dim" aria-hidden="true"><div class="crop-hole"></div></div><div class="crop-rect" data-h="move">${Object.entries(CROP_HANDLES)
+    el.innerHTML = `<div class="crop-bar"><button type="button" class="btn small crop-plain" data-c="cancel">取消</button><b class="crop-title">框出品項、遮住金額</b><button type="button" class="btn small crop-plain" data-c="help">怎麼框？</button></div>
+      <p class="crop-tip" id="crop-tip"></p>
+      <div class="crop-stage"><div class="crop-img"><img src="${url}" alt="拍到的單子" draggable="false"><div class="crop-dim" aria-hidden="true"><div class="crop-hole"></div></div><div class="crop-area" data-h="move"></div><div class="crop-masks"></div><div class="crop-rect">${Object.entries(CROP_HANDLES)
         .map(([h, label]) => `<button type="button" class="crop-h ${h}" data-h="${h}" aria-label="${label}（可以用方向鍵）"><span></span></button>`)
         .join('')}</div></div></div>
-      <div class="crop-foot"><p class="crop-note">${icon('shield', 18)}<span>只會送框裡的品項；客戶名稱、金額不會送出。</span></p><button type="button" class="btn block" data-c="send">送出，請 AI 讀框裡的品項</button></div>`
+      <div class="crop-foot"><div class="crop-tools"><button type="button" class="btn small crop-plain" data-c="mask" aria-pressed="false">遮住欄位</button><button type="button" class="btn small crop-plain" data-c="clear">清掉遮罩</button><button type="button" class="btn small crop-plain" data-c="reset">重設框</button></div>
+      <p class="crop-note" id="crop-note"></p><button type="button" class="btn block" data-c="send">送出，請 AI 讀</button></div>
+      <div class="crop-help" hidden><div class="crop-help-card" role="document"><b class="crop-help-title">先框、再遮</b>${CROP_HELP_SVG}<ol><li><b>黃框</b>只框住品項那幾列：上面的客戶、下面的合計框在外面。</li><li>單價、金額跟品項在同一列：按「<b>遮住欄位</b>」，在框裡左右拖，把那幾欄塗黑。</li><li>框和遮的位置記在這台，下次自動套用；看一眼按「送出」就好。</li></ol><button type="button" class="btn block" data-c="help-ok">知道了</button></div></div>`
     document.body.append(el)
     document.body.classList.add('no-scroll')
-    glueTails(el)
     const box = el.querySelector('.crop-rect')
+    const area = el.querySelector('.crop-area')
     const hole = el.querySelector('.crop-hole')
+    const maskBox = el.querySelector('.crop-masks')
     const imgBox = el.querySelector('.crop-img')
+    const help = el.querySelector('.crop-help')
+    const tip = el.querySelector('#crop-tip')
+    const note = el.querySelector('#crop-note')
+    const pos = (n, a) => Object.assign(n.style, { left: `${a.x1 * 100}%`, top: `${a.y1 * 100}%`, width: `${(a.x2 - a.x1) * 100}%`, height: `${(a.y2 - a.y1) * 100}%` })
+    const paintMasks = () => [...maskBox.children].forEach((n, i) => masks[i] && pos(n, { x1: masks[i].x1, x2: masks[i].x2, y1: r.y1, y2: r.y2 }))
+    const renderMasks = () => {
+      maskBox.innerHTML = masks.map((_, i) => `<div class="crop-mask" data-m="${i}"><button type="button" class="crop-mh l" data-mh="l" data-m="${i}" aria-label="拖曳遮罩的左邊（可以用方向鍵）"><span></span></button><span class="crop-mlabel">遮住</span><button type="button" class="crop-mx" data-mx="${i}" aria-label="拿掉這個遮罩">${icon('x', 16)}</button><button type="button" class="crop-mh r" data-mh="r" data-m="${i}" aria-label="拖曳遮罩的右邊（可以用方向鍵）"><span></span></button></div>`).join('')
+      paintMasks()
+      words()
+    }
+    const words = () => {
+      tip.textContent = maskMode ? '在黃框裡左右拖，畫出要塗黑的欄位（單價、金額）；黑條的兩邊可以拉、× 可以拿掉。' : '拖曳黃框的四個角或四個邊，只框住品項那幾列。'
+      note.innerHTML = `${icon('shield', 18)}<span>${masks.length ? '只會送框裡、沒遮住的部分給 AI。' : '只會送框裡的部分給 AI。單價、金額在框裡的話，請按「遮住欄位」塗掉。'}</span>`
+      const mb = el.querySelector('[data-c="mask"]')
+      mb.setAttribute('aria-pressed', String(maskMode))
+      mb.classList.toggle('on', maskMode)
+      area.classList.toggle('drawing', maskMode)
+      el.querySelector('[data-c="clear"]').disabled = !masks.length
+    }
     const paint = () => {
-      for (const n of [box, hole]) Object.assign(n.style, { left: `${r.x1 * 100}%`, top: `${r.y1 * 100}%`, width: `${(r.x2 - r.x1) * 100}%`, height: `${(r.y2 - r.y1) * 100}%` })
+      for (const n of [box, hole, area]) pos(n, r)
+      paintMasks()
     }
     paint()
+    renderMasks()
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
     const apply = (h, s, dx, dy) => {
       let { x1, y1, x2, y2 } = s
@@ -3753,23 +4184,61 @@ function cropSheet(blob) {
       Object.assign(r, { x1, y1, x2, y2 })
       paint()
     }
+    const moveMask = (i, kind, s, dx) => {
+      const m = masks[i]
+      if (!m) return
+      if (kind === 'move') {
+        const w = s.x2 - s.x1
+        m.x1 = clamp(s.x1 + dx, 0, 1 - w)
+        m.x2 = m.x1 + w
+      } else if (kind === 'l') m.x1 = clamp(s.x1 + dx, 0, s.x2 - MASK_MIN)
+      else if (kind === 'r') m.x2 = clamp(s.x2 + dx, s.x1 + MASK_MIN, 1)
+      paintMasks()
+    }
     let drag = null
     el.addEventListener('pointerdown', (e) => {
-      const t = e.target.closest('[data-h]')
-      if (!t) return
+      if (e.target.closest('[data-mx], .crop-help')) return
+      const mh = e.target.closest('[data-mh]')
+      const mk = e.target.closest('.crop-mask')
+      const h = e.target.closest('[data-h]')
+      if (!mh && !mk && !h) return
       e.preventDefault()
       const rect = imgBox.getBoundingClientRect()
-      drag = { h: t.dataset.h, x: e.clientX, y: e.clientY, w: rect.width || 1, ht: rect.height || 1, s: { ...r }, id: e.pointerId }
+      const base = { x: e.clientX, y: e.clientY, w: rect.width || 1, ht: rect.height || 1, id: e.pointerId }
+      if (mh || mk) {
+        const i = Number((mh || mk).dataset.m)
+        drag = { ...base, type: 'mask', i, kind: mh ? mh.dataset.mh : 'move', s: { ...masks[i] } }
+      } else if (h.dataset.h === 'move' && maskMode) {
+        if (masks.length >= PICK_MASK_MAX) return toast(`最多遮 ${PICK_MASK_MAX} 欄`)
+        const fx = clamp((e.clientX - rect.left) / base.w, 0, 1)
+        masks.push({ x1: fx, x2: fx })
+        renderMasks()
+        drag = { ...base, type: 'new', i: masks.length - 1, fx }
+      } else drag = { ...base, type: 'rect', h: h.dataset.h, s: { ...r } }
       try {
-        t.setPointerCapture(e.pointerId)
+        e.target.setPointerCapture(e.pointerId)
       } catch {}
       box.classList.add('dragging')
     })
     el.addEventListener('pointermove', (e) => {
-      if (drag && e.pointerId === drag.id) apply(drag.h, drag.s, (e.clientX - drag.x) / drag.w, (e.clientY - drag.y) / drag.ht)
+      if (!drag || e.pointerId !== drag.id) return
+      const dx = (e.clientX - drag.x) / drag.w
+      const dy = (e.clientY - drag.y) / drag.ht
+      if (drag.type === 'rect') apply(drag.h, drag.s, dx, dy)
+      else if (drag.type === 'mask') moveMask(drag.i, drag.kind, drag.s, dx)
+      else if (drag.type === 'new') {
+        const cur = clamp(drag.fx + dx, 0, 1)
+        masks[drag.i] = { x1: Math.min(drag.fx, cur), x2: Math.max(drag.fx, cur) }
+        paintMasks()
+      }
     })
     const end = (e) => {
       if (!drag || e.pointerId !== drag.id) return
+      // 只點一下、沒有拖：不要留下一條細細的遮罩
+      if (drag.type === 'new' && masks[drag.i] && masks[drag.i].x2 - masks[drag.i].x1 < MASK_MIN) {
+        masks.splice(drag.i, 1)
+        renderMasks()
+      } else words()
       drag = null
       box.classList.remove('dragging')
     }
@@ -3782,49 +4251,111 @@ function cropSheet(blob) {
       URL.revokeObjectURL(url)
       resolve(v)
     }
-    // 鍵盤也能調：選到某個角，按方向鍵移 1%（Shift 5%）；Esc 取消
+    const showHelp = (on) => {
+      help.hidden = !on
+      if (on) help.querySelector('[data-c="help-ok"]').focus({ preventScroll: true })
+      else el.querySelector('[data-c="send"]').focus({ preventScroll: true })
+    }
+    // 鍵盤也能調：選到某個角或遮罩的邊，按方向鍵移 1%（Shift 5%）；Esc 取消（說明打開時先關說明）
     const onKey = (e) => {
-      if (e.key === 'Escape') return done(null)
-      const t = e.target.closest?.('.crop-wrap [data-h]')
+      if (e.key === 'Escape') return help.hidden ? done(null) : showHelp(false)
       const step = e.shiftKey ? 0.05 : 0.01
       const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key]
-      if (!t || !d) return
-      e.preventDefault()
-      apply(t.dataset.h, { ...r }, d[0], d[1])
+      if (!d) return
+      const mh = e.target.closest?.('.crop-wrap [data-mh]')
+      const t = e.target.closest?.('.crop-wrap [data-h]')
+      if (mh) {
+        e.preventDefault()
+        const i = Number(mh.dataset.m)
+        moveMask(i, mh.dataset.mh, { ...masks[i] }, d[0])
+      } else if (t) {
+        e.preventDefault()
+        apply(t.dataset.h, { ...r }, d[0], d[1])
+      }
     }
     document.addEventListener('keydown', onKey)
     el.addEventListener('click', (e) => {
+      const mx = e.target.closest('[data-mx]')
+      if (mx) {
+        masks.splice(Number(mx.dataset.mx), 1)
+        return renderMasks()
+      }
       const c = e.target.closest('[data-c]')?.dataset.c
       if (c === 'cancel') done(null)
-      else if (c === 'reset') {
+      else if (c === 'help') showHelp(true)
+      else if (c === 'help-ok') {
+        ls.set(LS.pickCropHelp, '1')
+        showHelp(false)
+      } else if (c === 'reset') {
         Object.assign(r, CROP_DEFAULT)
         paint()
+      } else if (c === 'clear') {
+        masks = []
+        renderMasks()
+      } else if (c === 'mask') {
+        maskMode = !maskMode
+        // 第一次按、還沒有遮罩：先在框的右邊放一條（單價、金額通常在右邊），拉一拉就好
+        if (maskMode && !masks.length) {
+          const w = r.x2 - r.x1
+          masks.push({ x1: round3(r.x1 + w * 0.7), x2: round3(r.x2) })
+          renderMasks()
+        } else words()
       } else if (c === 'send') {
-        const keep = Object.fromEntries(Object.entries(r).map(([k, v]) => [k, Math.round(v * 1000) / 1000]))
+        const keep = Object.fromEntries(Object.entries(r).map(([k, v]) => [k, round3(v)]))
+        const ms = masks.filter((m) => m.x2 - m.x1 >= MASK_MIN).map((m) => ({ x1: round3(m.x1), x2: round3(m.x2) }))
         ls.set(LS.pickCrop, JSON.stringify(keep))
-        done({ ...r })
+        ls.set(LS.pickMask, JSON.stringify(ms))
+        done({ rect: { ...r }, masks: ms })
       }
     })
-    el.querySelector('[data-c="send"]').focus({ preventScroll: true })
+    glueTails(el)
+    // 第一次用：先看示意圖
+    showHelp(ls.get(LS.pickCropHelp) !== '1')
   })
 }
-/** 在手機上把框裡那一塊切出來（canvas）：只有這一塊會送給 AI */
-async function cropToBlob(blob, r) {
-  const bmp = await bitmapOf(blob)
+const round3 = (v) => Math.round(v * 1000) / 1000
+/**
+ * 在手機上把框裡那一塊切出來，遮住的欄位塗黑（canvas）：只有這一塊會送給 AI。
+ * 從原始照片切（比先縮小再切清楚），切完再縮到長邊 1600。
+ */
+async function cropToBlob(src, r, masks = []) {
+  const bmp = await createImageBitmap(src, { imageOrientation: 'from-image' }).catch(() => bitmapOf(src))
   const W = bmp.width
   const H = bmp.height
   const sx = Math.round(r.x1 * W)
   const sy = Math.round(r.y1 * H)
   const sw = Math.max(1, Math.min(W - sx, Math.round((r.x2 - r.x1) * W)))
   const sh = Math.max(1, Math.min(H - sy, Math.round((r.y2 - r.y1) * H)))
-  const out = await drawToBlob(bmp, sx, sy, sw, sh, MAX_SIDE)
+  const scale = Math.min(1, MAX_SIDE / Math.max(sw, sh))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(sw * scale))
+  canvas.height = Math.max(1, Math.round(sh * scale))
+  const g = canvas.getContext('2d')
+  g.drawImage(bmp, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
   bmp.close?.()
-  return out
+  g.fillStyle = '#000'
+  for (const m of masks) {
+    const a = Math.max(m.x1, r.x1)
+    const b = Math.min(m.x2, r.x2)
+    if (b <= a) continue
+    // 往外多塗 2px：邊緣不會留下一條沒塗到的
+    const x = Math.max(0, Math.floor((a - r.x1) * W * scale) - 2)
+    g.fillRect(x, 0, Math.min(canvas.width, Math.ceil((b - r.x1) * W * scale) + 2) - x, canvas.height)
+  }
+  return new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.85))
 }
-/** 拍單子 → 框 → 切 → AI 讀 → 每一列對到產品（對不到的標琥珀色，讓人選或刪） */
+/** AI 讀到的一列 → 點貨單的一項（確定的直接對上；AI 猜的標 guess；對不到的記有幾個像的） */
+function lineFromRow(ix, row) {
+  const m = matchRow(ix, row)
+  const read = { code: row.code, name: row.name, spec: row.spec }
+  if (m.r) return { id: uid(), ...pickTarget(m.r), qty: row.qty, got: null, done: false, ...(m.sure ? {} : { guess: true }), read }
+  return { id: uid(), name: clip([row.name, row.spec].filter(Boolean).join(' ') || row.code, PICK_LEN.name), qty: row.qty, got: null, done: false, cands: m.cands, read }
+}
+/** 拍單子 → 框、遮 → 切 → AI 讀 → 每一列對到產品 */
 async function readNoteFile(file) {
   const p = state.pick
   if (!p || !canEdit() || !hasAi()) return
+  if (state.pickBusyId) return toast('AI 還在讀上一張，讀完再拍')
   if (p.lines.length >= PICK_MAX_LINES) return toast(`一張最多 ${PICK_MAX_LINES} 項`)
   let photo
   try {
@@ -3832,39 +4363,46 @@ async function readNoteFile(file) {
   } catch {
     return toast('這張照片讀不進來，換一張試試')
   }
-  const r = await cropSheet(photo.blob)
-  if (!r) return
-  state.pickBusy = true
+  const res = await cropSheet(photo.blob)
+  if (!res) return
+  const cropped = await cropToBlob(file, res.rect, res.masks).catch(() => cropToBlob(photo.blob, res.rect, res.masks).catch(() => null))
+  if (!cropped) return toast('這張照片切不出來，換一張試試')
+  sendNote(p, cropped)
+}
+/** 送給 AI 讀（失敗可以按「再試一次」：用剛剛切好的那張，不用重拍、重框） */
+async function sendNote(p, cropped) {
+  if (p._gone) return
+  if (state.pickBusyId) return toast('AI 還在讀上一張，讀完再試')
+  const doneAt0 = p.doneAt
+  state.pickBusyId = p.id
   if (state.view === 'pick-edit') render()
   try {
-    const cropped = await cropToBlob(photo.blob, r)
     const res = await askJson([{ inline_data: { mime_type: 'image/jpeg', data: await blobToBase64(cropped) } }, { text: NOTE_PROMPT }], NOTE_SCHEMA, 40000)
     const rows = cleanNoteRows(res)
-    if (p._gone) return // 讀的時候這張被刪掉了
+    // 讀的時候：這張被刪掉了、按完成了、或「改一下」已經放棄 → 讀到的不加進去
+    if (p._gone) return
+    if (p.doneAt !== doneAt0 || (p._copy && state.pick !== p)) return toast('這張已經不在編輯中，讀到的品項沒有加進去')
     if (!rows.length) return toast('AI 沒讀到品項：框要框住品項那幾列，再拍一次（拍正、不要反光）')
     const ix = await pickCtx()
-    const lines = rows.slice(0, PICK_MAX_LINES - p.lines.length).map((row) => {
-      const m = matchRow(ix, row)
-      return { id: uid(), ...(m ? pickTarget(m) : { name: [row.name, row.spec].filter(Boolean).join(' ') || row.code }), qty: row.qty, got: null, done: false, src: 'ai', read: { code: row.code, name: row.name, spec: row.spec } }
-    })
-    p.lines.push(...lines)
-    p.ai = { at: Date.now(), model: clip(res.aiModel, 60) }
-    await pickSave(p)
-    const miss = lines.filter((l) => !l.no && !l.itemId).length
-    const noQty = lines.filter((l) => l.qty == null).length
-    toast(`讀到 ${lines.length} 項${miss ? `：${miss} 項對不到產品（琥珀色），請選產品或刪掉` : '，都對到產品了'}${noQty ? `；${noQty} 項數量沒讀到，點「單子」那格補上` : ''}`)
+    addLines(p, rows.slice(0, PICK_MAX_LINES - p.lines.length).map((row) => lineFromRow(ix, row)))
   } catch (e) {
-    toast(e.message || 'AI 沒讀到，請再拍一次')
+    toast(e.message || 'AI 沒讀到', { label: '再試一次', run: () => sendNote(p, cropped) })
   } finally {
-    state.pickBusy = false
+    if (state.pickBusyId === p.id) state.pickBusyId = null
     if (state.view === 'pick-edit') render()
   }
 }
 /** 匯入正航完成、交叉比對開著：跳出「這次有 N 項要查一下」，可以打開清單 */
 function crossDoneSheet(msg, c) {
-  const n = c.items?.length || 0
-  const head = c.first ? '下次匯入才開始比對' : n ? `這次有 ${n} 項要查一下` : '這次沒有要查的'
-  const sub = c.first ? '這次先記下每個產品的正航數量（基準）。之後用 App 點貨，下次匯入正航時就會比。' : n ? '上次匯入後有點過貨的產品裡，點貨記的進出跟正航的進出不一樣。' : `上次匯入後點過貨的 ${c.checked} 項，點貨跟正航的進出都一樣。`
+  const n = c.total ?? c.items?.length ?? 0
+  const head = c.first ? '下次匯入才開始比對' : n ? `這次有 ${n} 項要查一下` : c.checked ? '這次沒有要查的' : '這次沒有可以比的'
+  const sub = c.first
+    ? '這次先記下每個產品的正航數量（基準）。之後用 App 點貨，下次匯入正航時就會比。'
+    : n
+      ? '上次匯入後有點過貨的產品裡，點貨記的進出跟正航的進出不一樣。'
+      : c.checked
+        ? `上次匯入後點過貨的 ${c.checked} 項，點貨跟正航的進出都一樣。`
+        : '上次匯入後沒有點過貨的產品（或點貨紀錄還沒同步到這台）。上次的比對結果保留著。'
   sheet(
     `<h2 class="sheet-title">匯入完成</h2><p class="sheet-sub">${esc(msg)}</p>
      <div class="pk-cross-sum ${n ? 'bad' : 'ok'}"><span class="pk-cross-k">交叉比對（測試版） <span class="badge new">新</span></span><b>${esc(head)}</b><p>${esc(sub)}</p></div>
@@ -3879,7 +4417,7 @@ function crossDoneSheet(msg, c) {
   )
 }
 function crossListSheet(c) {
-  const n = c.items?.length || 0
+  const n = c.total ?? c.items?.length ?? 0
   const head = c.first ? '下次匯入才開始比對' : n ? `這次有 ${n} 項要查一下` : '這次沒有要查的'
   const rows = (c.items || [])
     .map(
@@ -3888,15 +4426,16 @@ function crossListSheet(c) {
         <span class="pk-cross-picks">${(x.picks || []).map((pk) => `<button class="chip" data-cross-pick="${esc(pk.id)}">${esc(PICK_KIND[pk.kind] || '點貨')} ${esc(fmtTime(pk.at))}${pk.ref ? `・${esc(pk.ref)}` : ''}・${esc(signed(pk.kind === 'in' ? pk.got : -pk.got))}</button>`).join('')}</span></span></div>`,
     )
     .join('')
+  const synced = syncReady() ? `這台最後同步：${ls.get(LS.lastSync) ? fmtTime(Number(ls.get(LS.lastSync))) : '還沒同步過'}（別台還沒同步上來的點貨不會算進來）` : ''
   sheet(
     `<h2 class="sheet-title">交叉比對 ${betaBadge}</h2>
-     <p class="sheet-sub">${esc(fmtTime(c.at))} 匯入正航・${esc(head)}</p>
+     <p class="sheet-sub">${esc(fmtTime(c.at))} 的正航報表・${esc(head)}${synced ? `<br>${esc(synced)}` : ''}</p>
      ${
        n
-         ? `<div class="hint-card">不一定是誰錯：可能單子打錯、拿錯貨，或有進出貨沒用 App 點。</div><div class="group" style="margin-top:12px">${rows}</div>`
+         ? `<div class="hint-card">不一定是誰錯：可能單子打錯、拿錯貨，或有進出貨沒用 App 點。</div><div class="group" style="margin-top:12px">${rows}</div>${n > (c.items || []).length ? `<p class="footnote">共 ${n} 項，這裡只列前 ${(c.items || []).length} 項。</p>` : ''}`
          : `<div class="group"><div class="row muted">${c.first ? '這次先記下基準（每個產品的正航數量）；下次匯入正航時，才會跟這段時間的點貨紀錄比。' : `上次匯入後點過貨的 ${c.checked} 項，點貨跟正航的進出都一樣。`}</div></div>`
      }
-     <p class="footnote">怎麼算：上次匯入正航之後按「完成」的點貨單，進貨實拿加起來、減掉出貨實拿＝點貨記的；這次正航的數量減掉上次的＝正航變了。兩個不一樣才列出來。${c.missing ? `另外有 ${c.missing} 項點過貨、但這次的正航表裡沒有，沒辦法比。` : ''}</p>
+     <p class="footnote">怎麼算：上次匯入正航之後、這張報表之前按「完成」的點貨單，進貨實拿加起來、減掉出貨實拿＝點貨記的；這次正航的數量減掉上次的＝正航變了。兩個不一樣才列出來。${c.missing ? `另外有 ${c.missing} 項點過貨、但這次的正航表裡沒有，沒辦法比。` : ''}</p>
      <button class="btn block secondary" id="cx-ok" style="margin-top:12px">知道了</button>`,
     (el, close) => {
       el.querySelector('#cx-ok').onclick = close
@@ -3907,18 +4446,38 @@ function crossListSheet(c) {
             if (!p) return toast('找不到這筆點貨紀錄（可能被刪掉了）')
             close()
             state.pick = p
+            state.pickEdit = null
             go('pick-result')
           }),
       )
     },
   )
 }
+/** 別台傳來的點貨單：比這台新才用；正在「改一下」同一張 → 提示，按「完成修改」時合併 */
+async function applyRemotePick(rec, cur, id) {
+  const t = Math.min(Number(rec.t) || 0, Date.now() + 86400000)
+  if (cur && tOf(cur) >= t) return false
+  const d = normPick(rec.d, id)
+  if (!d) return false
+  const v = { ...d, updatedAt: t, _syncT: t }
+  await idb.picks.putRaw(v)
+  picksCache = null
+  if (state.pick?.id === id) {
+    if (editingCopy()) {
+      if (!state.pickEdit.warned) {
+        state.pickEdit.warned = true
+        toast('另一台也改了這張：按「完成修改」時，會把兩邊的修改合在一起')
+      }
+    } else if (state.view !== 'pick-edit') state.pick = v
+  }
+  return true
+}
 /** 點貨單那一頁的輸入框（render 之後綁） */
 function bindPickInputs() {
   if (state.view !== 'pick-edit' || !state.pick) return
   const p = state.pick
   document.getElementById('pk-ref')?.addEventListener('input', (e) => {
-    p.ref = clip(e.target.value, 40)
+    p.ref = clip(e.target.value, PICK_LEN.ref)
     pickSave(p)
   })
   const q = document.getElementById('pk-q')
@@ -3934,6 +4493,10 @@ function bindPickInputs() {
         glueTails(box)
       }, 120)
     })
+    if (state.pickFocusQ) {
+      state.pickFocusQ = false
+      q.focus({ preventScroll: true })
+    }
   }
   for (const id of ['pk-cam', 'pk-album'])
     document.getElementById(id)?.addEventListener('change', (e) => {
@@ -3942,19 +4505,37 @@ function bindPickInputs() {
       if (f) readNoteFile(f)
     })
   document.querySelectorAll('[data-pk-got]').forEach((input) => {
+    const line = () => p.lines.find((x) => x.id === input.dataset.pkGot)
     input.addEventListener('input', () => {
-      const l = p.lines.find((x) => x.id === input.dataset.pkGot)
+      const l = line()
       if (!l) return
-      l.got = parseGot(input.value)
+      const v = input.value.trim()
+      // 打到一半（例如「2.」）還看不懂：先不改，等打完
+      if (!v) l.got = null
+      else {
+        const n = parseQty(v)
+        if (n == null) return
+        l.got = n
+      }
       paintLine(l)
       pickSave(p)
     })
     input.addEventListener('focus', () => input.select())
+    // 離開輸入框：看不懂的字還原；已點好的空白＝跟單子一樣（顯示出來，結果才一致）
+    input.addEventListener('change', () => {
+      const l = line()
+      if (!l) return
+      if (input.value.trim() && parseQty(input.value) == null) input.value = fmtQty(l.got)
+      if (l.done && l.got == null) l.got = l.qty
+      input.value = fmtQty(l.got)
+      paintLine(l)
+      pickSave(p)
+    })
   })
   if (state.pickFlash) {
-    const id = state.pickFlash
+    const { id, scroll } = state.pickFlash
     state.pickFlash = null
-    requestAnimationFrame(() => flashLine(id))
+    requestAnimationFrame(() => flashLine(id, { scroll }))
   }
 }
 
@@ -5229,8 +5810,13 @@ function fullPull({ quiet = false } = {}) {
     for (let round = 0; round < 200; round++) {
       const r = await postSync({ action: 'pull', since: cursor, dev: 'full-pull' })
       for (const rec of r.records) {
-        if (await applyRemote(rec)) records++
-        else photos += await fillLostPhotos(rec)
+        // 一筆壞掉的不能卡住全部
+        try {
+          if (await applyRemote(rec)) records++
+          else photos += await fillLostPhotos(rec)
+        } catch (e) {
+          console.error('fullPull', rec?.k, e)
+        }
       }
       cursor = r.next
       if (!r.more) break
@@ -5323,6 +5909,11 @@ async function postSync(body, opt = {}) {
     ls.set(LS.memberRole, data.me.role)
     ls.set(LS.memberName, data.me.name || '')
     ls.set(LS.memberId, data.me.id || '')
+    // 不再是擁有者／管理員：交叉比對的結果（有產品名稱、只有管理的人看）和開關一起清掉
+    if (!canManage()) {
+      ls.set(LS.pickCrossLast, '')
+      ls.set(LS.pickCross, '')
+    }
     if (changed) {
       toast(`你的權限：${ROLE_LABEL[data.me.role]}（${ROLE_DESC[data.me.role]}）`)
       setTimeout(render, 0)
@@ -5352,6 +5943,7 @@ async function wipeLocal(msg) {
   itemsCache = null
   picksCache = null
   state.pick = null
+  state.pickEdit = null
   state.session = null
   toast(msg)
   go('home')
@@ -5378,7 +5970,7 @@ async function encodeRecord(kind, v, { full = false } = {}) {
   return { ...v, blob: undefined, b64: await blobToBase64(v.blob) }
 }
 function decodeRecord(kind, d) {
-  if (kind === 'pick') return normPick(d)
+  if (kind === 'pick') return normPick(d, d?.id)
   if (kind === 'session')
     return {
       ...d,
@@ -5468,15 +6060,21 @@ async function applyRemote(rec) {
     }
     if (kind === 'pick') {
       picksCache = null
-      if (state.pick?.id === id && ['pick-edit', 'pick-result'].includes(state.view)) {
-        toast('這筆點貨紀錄在另一台被刪掉了')
-        state.pick = null
-        go('pick')
+      if (state.pick?.id === id) {
+        // 正在看或正在改這張：標成已刪（AI 讀完、存檔都不會再把它存回去）
+        state.pick._gone = true
+        if (['pick-edit', 'pick-result'].includes(state.view)) {
+          toast('這筆點貨紀錄在另一台被刪掉了')
+          state.pick = null
+          state.pickEdit = null
+          go('pick')
+        }
       }
     }
     return true
   }
   if (!rec.d) return false
+  if (kind === 'pick') return applyRemotePick(rec, cur, id)
   // 品項：兩台都改過（例如兩個人同時盤到同一種、在不同格）→ 合併，不要互相蓋掉
   if (kind === 'item' && cur) {
     const remote = { ...decodeRecord('item', rec.d), updatedAt: rec.t }
@@ -5515,11 +6113,6 @@ async function applyRemote(rec) {
     state.session = v
     if (state.view === 'review') toast('另一台更新了這次盤點')
   }
-  if (kind === 'pick') {
-    picksCache = null
-    // 正在看結果：換成新的；正在點（改）同一張：不打斷，這台存檔時以比較晚改的為準
-    if (state.pick?.id === id && state.view !== 'pick-edit') state.pick = v
-  }
   // 別台匯入了新的正航產品表：下次用的時候重新讀（以前要重新打開 App 才看得到）
   if (kind === 'erp') erpCache = undefined
   return true
@@ -5547,8 +6140,10 @@ async function syncNow(report = () => {}) {
     for (const it of await itemsAll(true)) if (tOf(it) !== it._syncT) jobs.push(['item', it])
     for (const sm of await idb.samples.all().catch(() => [])) if (tOf(sm) !== sm._syncT) jobs.push(['sample', sm])
     for (const e of await idb.erp.all().catch(() => [])) if (tOf(e) !== e._syncT) jobs.push(['erp', e])
-    // 點貨紀錄：按過「完成」的才傳（點到一半的只在這台）
-    for (const pk of await idb.picks.all().catch(() => [])) if (pk.doneAt && tOf(pk) !== pk._syncT) jobs.push(['pick', pk])
+    // 點貨紀錄：按過「完成」的才傳（點到一半的只在這台）；有改過才讀（不用每 40 秒把全部點貨紀錄讀一遍）
+    const scanPicks = picksDirty
+    picksDirty = false
+    if (scanPicks) for (const pk of await idb.picks.all().catch(() => [])) if (pk.doneAt && tOf(pk) !== pk._syncT) jobs.push(['pick', pk])
     const settingsAt = Number(ls.get(LS.settingsAt, '0'))
     const settingsDirty = settingsAt && String(settingsAt) !== ls.get(LS.settingsSyncT)
     const deleted = readJson(LS.deleted, [])
@@ -5566,7 +6161,7 @@ async function syncNow(report = () => {}) {
       // 雲端沒收（只有擁有者、管理員能改的）：告訴使用者；被擋下的刪除，等一下從雲端把紀錄拿回來，跟大家一致
       if (r.ignored?.length) {
         if (r.ignoredMsg) toast(r.ignoredMsg)
-        if (r.ignored.some((k) => String(k).startsWith('session:'))) ls.set(LS.needRepair, '1')
+        if (r.ignored.some((k) => /^(session|pick):/.test(String(k)))) ls.set(LS.needRepair, '1')
       }
       sent += batch.length
       onProgress(`上傳 ${sent}／${total}`)
@@ -5629,6 +6224,13 @@ async function syncNow(report = () => {}) {
       })
     await flush()
     // 2. 下載：別台送上去、比上次新的
+    // 點貨紀錄（4.7）：更新前的舊版 App 下載到別人的點貨紀錄會略過、之後也不會再下載 → 更新後做一次：
+    // 把「下載到哪裡」退回 4.7 上線前（雲端的順序號就是收到的毫秒時間），從那天之後的再拿一次；
+    // 這台已經有的、比較新的不會被蓋掉，也不會跳提示
+    if (ls.get(LS.pickPullDone) !== '1') {
+      ls.set(LS.pulled, String(Math.min(Number(ls.get(LS.pulled, '0')) || 0, PICK_LAUNCH)))
+      ls.set(LS.pickPullDone, '1')
+    }
     let cursor = Number(ls.get(LS.pulled, '0'))
     const fromStart = cursor === 0 // 剛加入、第一次：本來就是從頭拿全部
     let got = 0
@@ -5637,7 +6239,12 @@ async function syncNow(report = () => {}) {
       onProgress(got ? `下載了 ${got} 筆，還有…` : fromStart ? `下載中（第一次會比較久${serverV2() ? '' : '，照片都要抓下來'}）` : '下載中…')
       const r = await postSync({ action: 'pull', since: cursor })
       for (const rec of r.records) {
-        if (await applyRemote(rec)) changed = true
+        // 一筆壞掉的資料不能卡住後面全部：跳過那一筆、記在主控台
+        try {
+          if (await applyRemote(rec)) changed = true
+        } catch (e) {
+          console.error('applyRemote', rec?.k, e)
+        }
         got++
         onProgress(`下載 ${got} 筆…`)
       }
@@ -5647,20 +6254,12 @@ async function syncNow(report = () => {}) {
     }
     ls.set(LS.lastSync, String(Date.now()))
     // 剛從頭下載過一次，就不用再「重新下載全部」（不然剛加入的人會下載兩次，等很久）
-    if (fromStart) {
-      ls.set(LS.fullPullDone, '1')
-      ls.set(LS.pickPullDone, '1')
-    }
-    // 點貨紀錄（4.7）：更新前的舊版 App 下載到別人的點貨紀錄會略過、而且不會再下載一次 → 更新後從頭補拿一次
-    // （只在雲端是新版程式碼時做：新版不帶照片，很快；舊版雲端從頭拿會連照片一起下載，太慢）
-    const needPicks = ls.get(LS.pickPullDone) !== '1' && serverV2()
-    if (!serverV2()) ls.set(LS.pickPullDone, '1')
+    if (fromStart) ls.set(LS.fullPullDone, '1')
     // 自動從雲端重新下載一次全部：這台有照片不見了（轉新存法時發現），或剛更新到 4.0.7（之前同步卡住，這台可能少了資料）
-    if (ls.get(LS.needRepair) === '1' || ls.get(LS.fullPullDone) !== '1' || needPicks) {
+    if (ls.get(LS.needRepair) === '1' || ls.get(LS.fullPullDone) !== '1') {
       onProgress('檢查有沒有少的紀錄…')
       ls.set(LS.needRepair, '')
       ls.set(LS.fullPullDone, '1')
-      ls.set(LS.pickPullDone, '1')
       const r = await fullPull({ quiet: true }).catch(() => null)
       if (r?.records || r?.photos) changed = true
     }
@@ -5679,6 +6278,7 @@ async function syncNow(report = () => {}) {
     .catch((e) => {
       state.syncState = 'error'
       state.syncError = e.message
+      picksDirty = true // 這次沒傳成功：下次再檢查一次點貨紀錄
       if (state.view === 'home') render()
       throw e
     })
@@ -6592,6 +7192,8 @@ $app.addEventListener('click', async (e) => {
       for (const p of state.session.photos) dropUrl(p.id)
       state.session = null
     }
+    // 點貨單那一頁要離開：「改一下」改了還沒按完成修改 → 先問要不要放棄；空的草稿順手刪掉
+    if (state.view === 'pick-edit' && d.go !== 'pick-edit' && !(await leavePickEdit())) return
     // 首頁「該叫貨」方塊：到品項，直接開「叫貨」那一頁
     if (d.itemFilter) state.itemFilter = d.itemFilter
     return go(d.go)
@@ -7334,6 +7936,7 @@ $app.addEventListener('click', async (e) => {
       // 先不存：加了品項或填了單號才存（按進來又返回，不會留下一張空的）
       const c = currentCounter()
       state.pick = { id: uid(), kind: d.kind === 'in' ? 'in' : 'out', ref: '', createdAt: Date.now(), by: c?.name || '', byId: c?.id || '', lines: [] }
+      state.pickEdit = null
       state.pickQ = ''
       return go('pick-edit')
     }
@@ -7341,6 +7944,7 @@ $app.addEventListener('click', async (e) => {
       const p = await idb.picks.get(d.id)
       if (!p) return toast('找不到這筆點貨紀錄（可能在別台被刪掉了）')
       state.pick = p
+      state.pickEdit = null
       state.pickQ = ''
       return go(!p.doneAt && canEdit() ? 'pick-edit' : 'pick-result')
     }
@@ -7349,34 +7953,43 @@ $app.addEventListener('click', async (e) => {
       return render()
     case 'pk-add': {
       const ix = await pickCtx()
-      const r = d.no ? ix.byNo.get(canon(d.no)) : ix.itemById.get(d.iid) ? { it: ix.itemById.get(d.iid) } : null
+      const r = d.no ? rowOfNo(ix, d.no) : ix.itemById.get(d.iid) ? { it: ix.itemById.get(d.iid) } : null
       if (!r) return toast('找不到這個產品，請重新搜尋')
       return addPickLine(r)
     }
     case 'pk-step': {
       const l = pickLine(d.id)
       if (!l) return
-      l.got = Math.max(0, Math.min(99999, (l.got ?? l.qty ?? 0) + Number(d.d || 0)))
+      l.got = Math.max(0, Math.min(PICK_QTY_MAX, round2((gotOf(l) ?? 0) + Number(d.d || 0))))
       paintLine(l)
       return pickSave()
     }
     case 'pk-done': {
       const l = pickLine(d.id)
       if (!l) return
-      if (l.done) l.done = false
-      else {
-        // 單子數量沒讀到（AI 看不清楚）：先補數量，再算點好了
-        if (l.qty == null)
-          return editLineQty(l, () => {
-            if (l.got == null) l.got = l.qty
-            l.done = true
-          })
-        // 實拿沒改＝跟單子一樣
-        if (l.got == null) l.got = l.qty
-        l.done = true
+      const st = lineState(l)
+      // 琥珀色（對不到、AI 配的還沒確認）：先選產品／確認，才能點好了
+      if (st === 'none' || st === 'guess') {
+        flashLine(l.id, { scroll: false })
+        return toast(st === 'guess' ? '先確認是不是這個產品（按「是這個」或「換一個」），才能點好了' : '先選是哪一個產品，才能點好了')
       }
+      // 已經點好了：再按不會取消（連點兩下也不會不小心取消）；要改回去用 ⋯
+      if (l.done) return toast('已經點好了。要改回「還沒點」，按這一項右上的 ⋯')
+      // 單子數量沒讀到（AI 看不清楚）：先補數量，再算點好了
+      if (l.qty == null)
+        return editLineQty(l, () => {
+          if (l.got == null) l.got = l.qty
+          l.done = true
+        })
+      // 實拿沒改＝跟單子一樣
+      if (l.got == null) l.got = l.qty
+      l.done = true
       paintLine(l)
       return pickSave()
+    }
+    case 'pk-confirm': {
+      const l = pickLine(d.id)
+      return l && confirmLine(l)
     }
     case 'pk-qty': {
       const l = pickLine(d.id)
@@ -7397,13 +8010,15 @@ $app.addEventListener('click', async (e) => {
     case 'pk-finish': {
       const p = state.pick
       if (!p) return
-      if (!p.lines.length) return toast('還沒有品項：先把單子上的品項加進來')
-      if (p.lines.some((l) => !l.done)) return finishPickSheet(p)
+      if (state.pickBusyId === p.id) return toast('AI 還在讀單子，讀完再按完成')
+      if (!p.lines.length) return toast(editingCopy() ? '完成的紀錄至少要留 1 項；整張都不要了，請擁有者或管理員在結果頁刪除' : '還沒有品項：先把單子上的品項加進來')
+      if (p.lines.some((l) => !l.done || ['none', 'guess'].includes(lineState(l)))) return finishPickSheet(p)
       return finishPick(p)
     }
     case 'pk-discard': {
       const p = state.pick
-      if (!p) return go('pick')
+      if (!p || editingCopy()) return go('pick')
+      if (state.pickBusyId === p.id) return toast('AI 還在讀單子，讀完再刪')
       if (p.lines.length && !confirm(`刪掉這張點貨單？已經加的 ${p.lines.length} 項都會刪掉。`)) return
       p._gone = true
       if (pickSaving) await pickSaving
@@ -7411,13 +8026,26 @@ $app.addEventListener('click', async (e) => {
       if (p._syncT) tombstone(`pick:${p.id}`)
       picksCache = null
       state.pick = null
-      toast('已刪掉這張點貨單')
+      toast(p.lines.length || p.ref ? '已刪掉這張點貨單' : '已刪掉（還沒有品項）')
       return go('pick')
     }
-    case 'pk-reopen':
-      if (!state.pick) return go('pick')
+    case 'pk-cancel-edit': {
+      // 放棄「改一下」：回到原本的紀錄（沒有改到任何東西）
+      const id = state.pick?.id
+      if (!(await leavePickEdit())) return
+      const stored = id ? await idb.picks.get(id).catch(() => null) : null
+      state.pick = stored
+      return go(stored ? 'pick-result' : 'pick')
+    }
+    case 'pk-reopen': {
+      // 改一下＝暫存的副本：按「完成修改」才寫回紀錄、才同步；中途離開會問要不要放棄
+      const p = state.pick
+      if (!p?.doneAt) return go('pick')
+      state.pickEdit = { id: p.id, base: clonePick(p) }
+      state.pick = { ...clonePick(p), _copy: true }
       state.pickQ = ''
       return go('pick-edit')
+    }
     case 'pk-delete': {
       if (!canManage()) return toast('只有擁有者或管理員可以刪點貨紀錄')
       const p = state.pick
@@ -7543,7 +8171,7 @@ const safeToReload = () =>
   ['home', 'items', 'lookup', 'settings', 'report', 'catalog', 'locations', 'quality', 'pick', 'pick-result'].includes(state.view) &&
   !photosAtRisk() &&
   !state.busy &&
-  !state.pickBusy &&
+  !state.pickBusyId &&
   !document.querySelector('.crop-wrap') &&
   !state.refining &&
   !state.lookup?.busy &&

@@ -391,6 +391,8 @@ const EDITOR_MAX_SESSION_DELETES = 20
  * manager＝擁有者或管理員。編輯者送來的這些會被忽略（放在 ignored 回給 App）：
  * - 正航產品表（erp:…）：匯入會改大家的帳面數
  * - 一次刪超過 20 次盤點（等於刪光大家的紀錄）
+ * - 刪除點貨紀錄（pick:…）：編輯者可以新增、修改，不能刪（4.7.1）
+ * 每筆的修改時間 t 最多只能比現在晚 10 分鐘。
  * 共用設定（settings）裡的盲盤、複盤規則：編輯者送來的不算，保留雲端原本的（儲位、品項清單照常收）。
  */
 function syncPush(data, props, P, manager) {
@@ -405,7 +407,7 @@ function syncPush(data, props, P, manager) {
     const skipped = []
     const ignored = []
     const isSessionDel = function (r) {
-      return r.del && String(r.k).indexOf('session:') === 0
+      return !!r && r.del && String(r.k).indexOf('session:') === 0
     }
     const tooManyDeletes =
       !manager &&
@@ -420,15 +422,22 @@ function syncPush(data, props, P, manager) {
         /* 檔案已經不在了 */
       }
     }
+    // 修改時間是裝置自己填的：最多只能比現在晚 10 分鐘（手機時鐘差一點沒關係），
+    // 不然填一個很遠的未來時間，之後連管理員都蓋不掉、刪不掉（4.7.1 code review）
+    const maxT = Date.now() + 10 * 60 * 1000
     ;(data.records || []).forEach(function (r) {
+      if (!r || typeof r.k !== 'string' || !r.k) return
+      r.t = Number(r.t)
+      if (!(r.t > 0)) r.t = Date.now()
+      if (r.t > maxT) r.t = maxT
       const cur = idx.map[r.k]
       // 照片不會改：雲端已經有這張就不用再存一次（算成功，App 才會記成「傳過了」）
       if (isPhotoKey(r.k) && !r.del && cur && cur.f && !cur.del) {
         n++
         return
       }
-      // 只有擁有者、管理員能改的：編輯者送來的不寫
-      if (!manager && (String(r.k).indexOf('erp:') === 0 || (tooManyDeletes && isSessionDel(r)))) {
+      // 只有擁有者、管理員能改的：編輯者送來的不寫（點貨紀錄：編輯者可以新增、修改，不能刪）
+      if (!manager && (String(r.k).indexOf('erp:') === 0 || (tooManyDeletes && isSessionDel(r)) || (r.del && r.k.indexOf('pick:') === 0))) {
         ignored.push(r.k)
         return
       }
@@ -475,6 +484,10 @@ function syncPush(data, props, P, manager) {
       return String(k).indexOf('erp:') === 0
     }))
       why.push('正航產品表只有擁有者或管理員能匯入：這次沒有同步給大家')
+    if (ignored.some(function (k) {
+      return String(k).indexOf('pick:') === 0
+    }))
+      why.push('點貨紀錄只有擁有者或管理員能刪：這些刪除沒有同步，雲端和別台的紀錄還在')
     return { ok: true, n: n, skipped: skipped, ignored: ignored, ignoredMsg: why.join('；') }
   } finally {
     lock.releaseLock()

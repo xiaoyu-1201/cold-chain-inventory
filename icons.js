@@ -33,7 +33,6 @@ const PATHS = {
   shield: '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6"/><path d="M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/>',
-  crop: '<path d="M8 4v11a1 1 0 0 0 1 1h11"/><path d="M4 8h11a1 1 0 0 1 1 1v11"/>',
 }
 
 /** icon('camera')、icon('box', 28) → SVG 字串（放進 innerHTML 用） */
