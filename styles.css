@@ -622,6 +622,11 @@ button.row[aria-current='true'] {
   flex: none;
   min-height: 44px;
 }
+/* 黑底上的「刪掉這張」：淺色模式的深紅字對比不夠 → 亮一點的紅（約 6:1） */
+.pv .btn.danger {
+  background: rgba(255, 107, 107, 0.16);
+  color: #ff6b6b;
+}
 /* 縮圖：看得出可以點（游標放大鏡＋右下角小放大鏡）；小於 44 的縮圖，點的範圍往外撐到 44 */
 .zoomable {
   position: relative;
@@ -635,7 +640,8 @@ button.row[aria-current='true'] {
 .zoomable::before {
   content: '';
   position: absolute;
-  inset: min(0px, calc((100% - 44px) / 2));
+  /* 36、40px 的縮圖：點得到的範圍往外撐到 48px（外觀不變）；大的縮圖不用撐 */
+  inset: min(0px, calc((100% - 48px) / 2));
 }
 .zoomable.block {
   display: block;
@@ -737,6 +743,11 @@ button.row[aria-current='true'] {
 }
 body.no-scroll {
   overflow: hidden;
+}
+/* 電腦版 html 有 scrollbar-gutter: stable，全螢幕放大檢視右邊會留 15px 縫（新版 Chrome 的 100vw 也扣掉這一條）
+   → 放大檢視開著的時候（後面整頁被蓋住、本來就不能捲）先不留捲軸位置 */
+html:has(> body.no-scroll) {
+  scrollbar-gutter: auto;
 }
 /* 按下去有回饋 */
 .btn:active:not(:disabled),

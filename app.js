@@ -1551,11 +1551,11 @@ const itemUrl = (it) => {
   return url
 }
 /** 品項放大看時下面的說明：品名・料號，加上放在哪幾格（黃標籤） */
-const itemZoom = (it) => zoomAttrs(itemUrl(it), [itemTitle(it), it.no].filter(Boolean).join('・'), { places: [...new Set(liveStock(it).map(([, st]) => st.place).filter(Boolean))].slice(0, 6) })
-/** 品項縮圖：有照片的點一下就放大看（不會觸發那一列原本的點擊）；沒照片的灰色字母方塊不用 */
-const itemThumb = (it, size = 44) =>
+const itemZoom = (it, inRow = false) => zoomAttrs(itemUrl(it), [itemTitle(it), it.no].filter(Boolean).join('・'), { places: [...new Set(liveStock(it).map(([, st]) => st.place).filter(Boolean))].slice(0, 6), inRow })
+/** 品項縮圖：有照片的點一下就放大看（不會觸發那一列原本的點擊）；沒照片的灰色字母方塊不用。inRow：包在 <button class="row"> 裡 */
+const itemThumb = (it, size = 44, inRow = false) =>
   it.photo
-    ? zoomWrap(`<img class="thumb" src="${itemUrl(it)}" alt="" loading="lazy" decoding="async" style="width:${size}px;height:${size}px">`, itemZoom(it), size >= 56 ? 'md' : '')
+    ? zoomWrap(`<img class="thumb" src="${itemUrl(it)}" alt="" loading="lazy" decoding="async" style="width:${size}px;height:${size}px">`, itemZoom(it, inRow), size >= 56 ? 'md' : '')
     : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc(it.label.slice(0, 1))}</span>`
 
 /**
@@ -1820,7 +1820,7 @@ async function viewHome() {
               const on = sel && state.selected.has(s.id)
               const sessImg = s.photos[0]?.blob ? `<img class="sess-thumb" src="${urlOf(s.photos[0])}" alt="" loading="lazy" decoding="async">` : ''
               // 縮圖點一下：放大看這次的照片（好幾張可以左右換）；多選的時候點哪裡都是勾選
-              const sessZoom = () => zoomWrap(sessImg, zoomAttrs(s.photos.filter((p) => p.blob).map(urlOf).join('\n'), [summaryOf(s), fmtTime(s.createdAt)].filter(Boolean).join('・'), { places: s.place ? [s.place] : [] }), 'md')
+              const sessZoom = () => zoomWrap(sessImg, zoomAttrs(s.photos.filter((p) => p.blob).map(urlOf).join('\n'), [summaryOf(s), fmtTime(s.createdAt)].filter(Boolean).join('・'), { places: s.place ? [s.place] : [], inRow: true }), 'md')
               const body = `${sessImg ? (sel ? sessImg : sessZoom()) : `<span class="thumb-lost ${s.photos[0]?.pending ? 'pending' : ''}" aria-hidden="true"></span>`}<span class="grow">${s.place ? `<span class="sess-place">${placeHtml(s.place, { name: false })}</span>` : ''}<span class="title">${esc(failed ? '沒有辨識成功（點進去再試一次）' : summaryOf(s))}</span><br><span class="meta">${esc(meta)}${s.linkedAt ? '' : `${meta ? '・' : ''}<span class="unfinished">還沒按完成</span>`}</span></span>`
               return sel
                 ? `<button class="row ${on ? 'picked' : ''}" data-pick="${esc(s.id)}" aria-pressed="${on}"><span class="pick" aria-hidden="true">${on ? icon('check', 16) : ''}</span>${body}</button>`
@@ -2207,7 +2207,7 @@ const itemRow = (it) => {
   const pairs = live.sort((a, b) => b.count - a.count).map((st) => [st.place, st.count])
   const search = canon([it.no, it.label, it.brand, it.model, it.spec, ...live.map((st) => st.place)].join(' '))
   return `<button class="row item-row" data-item-open="${esc(it.id)}" data-search="${esc(search)}">
-    ${itemThumb(it)}
+    ${itemThumb(it, 44, true)}
     <span class="grow"><span class="title">${esc(itemTitle(it))}</span>${itemBadges(it)}<br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</span>${pairs.length ? placesHtml(pairs, 4) : ''}</span>
     <span class="qty"><b>${onHand(it)}</b>${it.book != null && !blindMe() ? `<small>帳面 ${it.book}</small>` : ''}</span>${chev}</button>`
 }
@@ -2436,7 +2436,7 @@ async function erpUnlink(id, prev, no) {
   await putItem(it)
   return true
 }
-const erpSearchKey = (p) => canon(`${p.no} ${p.name}`)
+const erpSearchKey = (p) => canon(`${p.no ?? ''} ${p.name ?? ''}`)
 /** 只留英文和數字（型號比對用）：「DML 083S」→「dml083s」 */
 const alnum = (s) => canon(s).replace(/[^a-z0-9]/g, '')
 /** 比對時可以忽略的分隔符號（跟 canon 拿掉的一樣） */
@@ -2546,8 +2546,8 @@ function erpListHtml(erp, items, catList) {
   const rowOf = (p) => {
     const it = index.of(p.no)
     const places = it ? liveStock(it).map(([, s]) => [s.place, null]).filter(([pl]) => pl) : []
-    const meta = [p.no, p.unit, blindMe() ? '' : `庫存 ${p.qty}`].filter(Boolean).join('・')
-    return `<button class="row" data-erp-no="${esc(p.no)}">${it ? itemThumb(it, 40) : `<span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(erpCat(p))}</span>`}<span class="grow"><span class="title">${esc(p.name)}</span><br><span class="meta">${esc(meta)}</span>${places.length ? placesHtml(places, 3) : ''}</span>${it ? '<span class="badge ok">品項</span>' : ''}${chev}</button>`
+    const meta = [p.no, p.unit, blindMe() ? '' : `庫存 ${p.qty ?? 0}`].filter(Boolean).join('・')
+    return `<button class="row" data-erp-no="${esc(p.no)}">${it ? itemThumb(it, 40, true) : `<span class="thumb ph" style="width:40px;height:40px" aria-hidden="true">${esc(erpCat(p))}</span>`}<span class="grow"><span class="title">${esc(p.name)}</span><br><span class="meta">${esc(meta)}</span>${places.length ? placesHtml(places, 3) : ''}</span>${it ? '<span class="badge ok">品項</span>' : ''}${chev}</button>`
   }
   const list = (arr, label) => {
     const shown = arr.slice(0, PAGE + st.more)
@@ -2576,7 +2576,7 @@ async function erpProductSheet(no) {
      <p class="sheet-sub">${esc(p.no)}・${esc(erpCatLabel(erp, erpCat(p)))}${p.unit ? `・單位：${esc(p.unit)}` : ''}</p>
      ${it?.photo ? zoomWrap(`<img class="sheet-photo" src="${itemUrl(it)}" alt="${esc(p.name)}的照片">`, itemZoom(it), 'block lg') : ''}
      <div class="group" style="margin-top:10px">
-       ${blindMe() ? '' : `<div class="row"><span class="grow"><span class="title">正航庫存</span><br><span class="meta">${Object.entries(p.wh).map(([w, n]) => `倉庫 ${esc(w)}：${n}`).join('・') || '沒有倉庫資料'}</span></span><b>${p.qty}</b></div>`}
+       ${blindMe() ? '' : `<div class="row"><span class="grow"><span class="title">正航庫存</span><br><span class="meta">${Object.entries(p.wh || {}).map(([w, n]) => `倉庫 ${esc(w)}：${esc(n)}`).join('・') || '沒有倉庫資料'}</span></span><b>${esc(p.qty ?? 0)}</b></div>`}
        <div class="row"><span class="grow"><span class="title">放在哪裡</span><br>${stock.length ? placesHtml(stock.map(([, s]) => [s.place, s.count])) : `<span class="meta">${it ? '還沒盤點到' : '還沒記進品項庫，盤點到才知道'}</span>`}</span></div>
      </div>
      ${it ? `<button class="btn block" id="e-open" style="margin-top:12px">打開品項（照片、盤點紀錄）</button>` : `<button class="btn block edit-only" id="e-link" style="margin-top:12px">加入品項庫</button><div id="e-dup" hidden></div><p class="footnote">加入後：盤點到會記位置、可以放樣品照、看差異。</p>`}`,
@@ -2613,7 +2613,7 @@ async function erpProductSheet(no) {
         const box = el.querySelector('#e-dup')
         box.hidden = false
         box.innerHTML = `<p class="section-title" style="margin-top:14px">品項庫裡可能已經有了</p>
-          <div class="group">${similar.map(({ it: x, nameOnly }) => `<button class="row" data-into="${esc(x.id)}">${itemThumb(x, 40)}<span class="grow"><span class="title">合併到 ${esc(x.no)}</span>${nameOnly ? '<span class="badge low">只對到品名</span>' : ''}<br><span class="meta">${esc(itemTitle(x))}${x.model ? `・${esc(x.model)}` : ''}・實盤 ${onHand(x)}</span></span>${chev}</button>`).join('')}</div>
+          <div class="group">${similar.map(({ it: x, nameOnly }) => `<button class="row" data-into="${esc(x.id)}">${itemThumb(x, 40, true)}<span class="grow"><span class="title">合併到 ${esc(x.no)}</span>${nameOnly ? '<span class="badge low">只對到品名</span>' : ''}<br><span class="meta">${esc(itemTitle(x))}${x.model ? `・${esc(x.model)}` : ''}・實盤 ${onHand(x)}</span></span>${chev}</button>`).join('')}</div>
           <p class="footnote">合併：正航料號 ${esc(no)} 接到那一筆，${blind ? '帳面數改成正航的數量' : `帳面數改成正航的 ${esc(p.qty)}`}。${similar.some((x) => x.nameOnly) ? '「只對到品名」的不一定是同一個產品，請看清楚型號、規格。' : ''}</p>
           <button class="btn plain block" id="e-new" style="margin-top:8px">不一樣，還是新增一筆</button>`
         el.querySelector('#e-link').hidden = true
@@ -3425,7 +3425,7 @@ function stateChip(l, unit) {
 }
 /** 數字框依位數縮字（4 位數以上不會被切掉） */
 const lenAttr = (v) => ` data-len="${Math.min(9, String(v ?? '').length)}"`
-const pickThumb = (info, size) => (info.it ? itemThumb(info.it, size) : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc([...String(info.name || '?')][0] || '?')}</span>`)
+const pickThumb = (info, size, inRow = false) => (info.it ? itemThumb(info.it, size, inRow) : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc([...String(info.name || '?')][0] || '?')}</span>`)
 /** 放在哪裡：只畫儲位黃標籤，不寫數量（點貨不需要帳面、實盤數，盲盤也一樣） */
 function pickPlaces(info) {
   const pairs = info.it ? liveStock(info.it).map(([, s]) => [s.place, null]).filter(([pl]) => pl) : []
@@ -3507,7 +3507,7 @@ function pickResultsHtml(ix, q, mode = 'add') {
   const row = (r) => {
     const t = pickTarget(r)
     const info = { it: r.it || null, name: t.name }
-    return `<button class="row pk-res" ${mode === 'add' ? 'data-action="pk-add"' : 'data-pp=""'} ${r.no ? `data-no="${esc(r.no)}"` : `data-iid="${esc(r.it.id)}"`}>${pickThumb(info, 40)}<span class="grow"><span class="title">${esc(t.name)}</span><br><span class="meta">${esc([t.code, t.unit].filter(Boolean).join('・') || '品項庫')}</span>${info.it ? pickPlaces(info) : ''}</span>${mode === 'add' ? `<span class="pk-add-ico" aria-hidden="true">${icon('plus', 20)}</span>` : chev}</button>`
+    return `<button class="row pk-res" ${mode === 'add' ? 'data-action="pk-add"' : 'data-pp=""'} ${r.no ? `data-no="${esc(r.no)}"` : `data-iid="${esc(r.it.id)}"`}>${pickThumb(info, 40, true)}<span class="grow"><span class="title">${esc(t.name)}</span><br><span class="meta">${esc([t.code, t.unit].filter(Boolean).join('・') || '品項庫')}</span>${info.it ? pickPlaces(info) : ''}</span>${mode === 'add' ? `<span class="pk-add-ico" aria-hidden="true">${icon('plus', 20)}</span>` : chev}</button>`
   }
   return `${res.hits.length ? `<div class="group">${res.hits.map(row).join('')}</div>${res.more ? `<p class="footnote">還有 ${res.more} 個也符合：打完整一點會更準。</p>` : ''}` : ''}${
     res.near.length ? `<p class="section-title">開頭一樣的（不一定是同一個）</p><div class="group">${res.near.map(row).join('')}</div>` : ''
@@ -4594,12 +4594,12 @@ async function render() {
                                 ? await viewPickResult()
                                 : await viewSettings()
   // 放大看照片時，重畫畫面不要讓位置跳回左上角
-  const vs = document.querySelector('.viewer-scroll')
+  const vs = $app.querySelector('.viewer-scroll')
   const keep = vs ? { x: vs.scrollLeft / Math.max(1, vs.scrollWidth), y: vs.scrollTop / Math.max(1, vs.scrollHeight) } : null
   // 平板、電腦：每一頁都有左邊側邊欄（子頁面在手機上不顯示）；body 記住現在哪一頁，給寬版排版用
   document.body.dataset.view = state.view
   $app.innerHTML = html.includes('class="tabbar') ? html : html + tabBar(TAB_OF[state.view] || 'home', true)
-  const nv = document.querySelector('.viewer-scroll')
+  const nv = $app.querySelector('.viewer-scroll')
   if (keep && nv) {
     nv.scrollLeft = keep.x * nv.scrollWidth
     nv.scrollTop = keep.y * nv.scrollHeight
@@ -4675,10 +4675,11 @@ const clampZoom = (z) => Math.max(1, Math.min(ZOOM_MAX, z))
 /**
  * 縮圖的屬性字串：src 可以用換行分開放好幾張（例如一次盤點的所有照片）；
  * group：同一組的縮圖放大後可以左右換張（例如樣品照）；places：儲位代號（畫成黃標籤）；box：打開時直接放大到這一框。
+ * inRow：縮圖包在 <button class="row"> 裡面 → 報讀器、Tab 只認那一列（不念兩次）；滑鼠、手指照樣點縮圖放大
  */
-const zoomAttrs = (src, cap = '', { group = '', places = [], box = null, color = '' } = {}) =>
+const zoomAttrs = (src, cap = '', { group = '', places = [], box = null, color = '', inRow = false } = {}) =>
   src
-    ? ` data-zoom-src="${esc(src)}"${cap ? ` data-zoom-cap="${esc(cap)}"` : ''}${group ? ` data-zoom-group="${esc(group)}"` : ''}${places.length ? ` data-zoom-places="${esc(places.join('\n'))}"` : ''}${box ? ` data-zoom-box="${esc(box.join(','))}"` : ''}${color ? ` data-zoom-color="${esc(color)}"` : ''} role="button" tabindex="0" aria-label="放大看照片${cap ? `：${esc(cap)}` : ''}"`
+    ? ` data-zoom-src="${esc(src)}"${cap ? ` data-zoom-cap="${esc(cap)}"` : ''}${group ? ` data-zoom-group="${esc(group)}"` : ''}${places.length ? ` data-zoom-places="${esc(places.join('\n'))}"` : ''}${box ? ` data-zoom-box="${esc(box.join(','))}"` : ''}${color ? ` data-zoom-color="${esc(color)}"` : ''}${inRow ? ' aria-hidden="true"' : ` role="button" tabindex="0" aria-label="放大看照片${cap ? `（${esc(cap)}）` : ''}"`}`
     : ''
 /** 包一層可以點的框（右下角小放大鏡，看得出可以點） */
 const zoomWrap = (inner, attrs, cls = '') => `<span class="zoomable${cls ? ` ${cls}` : ''}"${attrs}>${inner}<span class="zoom-badge" aria-hidden="true">${icon('zoom-in', cls.includes('lg') ? 16 : cls.includes('md') ? 13 : 11)}</span></span>`
@@ -4721,8 +4722,8 @@ function pinchZoom(scroll, get, set, end) {
 /**
  * 全螢幕看照片：黑底、照片完整顯示；兩指放大、拖曳看細節；點兩下放大／還原。
  * 右上 ×、Esc、點照片旁邊、往下滑都會關；好幾張時左右滑、按 ←／→ 或兩邊的箭頭換張。
- * list：[{ src, cap, places, box, color }]；opts.action：下面多一顆按鈕 { label, icon, cls, run(entry, close) }；
- * opts.revoke：關掉時要放掉的網址（只有另外產生的才給，縮圖共用的網址不能放）
+ * list：[{ src, cap, places, box, color }]；opts.action：下面多一顆按鈕 { label, icon, cls, run(entry, close) }
+ * （照片網址都是縮圖共用的，關掉時不能放掉）
  */
 function photoViewer(list, start = 0, opts = {}) {
   list = list.filter((x) => x?.src)
@@ -4730,6 +4731,8 @@ function photoViewer(list, start = 0, opts = {}) {
   let i = Math.max(0, Math.min(start, list.length - 1))
   let z = 1
   let fitted = false // 這一張排好了沒（圖已經在快取裡時 load 也會再來一次，不要把放大到框的倍數蓋掉）
+  // 連點兩下縮圖：第二下會落在剛打開的黑色區域 → 打開後一下子之內點黑色的地方不關
+  const openedAt = Date.now()
   const opener = document.activeElement
   const el = document.createElement('div')
   el.className = 'viewer pv'
@@ -4739,7 +4742,7 @@ function photoViewer(list, start = 0, opts = {}) {
   const multi = list.length > 1
   el.innerHTML = `
     <div class="viewer-bar">
-      <span class="zoom-label" aria-live="polite"></span>
+      <span class="zoom-label"></span>
       <button class="btn small secondary" data-z="-1" aria-label="縮小">${icon('minus', 20)}</button>
       <button class="btn small secondary" data-z="1" aria-label="放大">${icon('plus', 20)}</button>
       <button class="viewer-close" aria-label="關閉">${icon('x', 22)}</button>
@@ -4836,13 +4839,19 @@ function photoViewer(list, start = 0, opts = {}) {
     el.remove()
     window.removeEventListener('keydown', onKey, true)
     window.removeEventListener('resize', onResize)
-    for (const u of opts.revoke || []) URL.revokeObjectURL(u)
     document.body.classList.toggle('no-scroll', !!document.querySelector('.viewer'))
-    if (opener?.isConnected) opener.focus?.({ preventScroll: true })
+    // 焦點回到原本的縮圖；原本在輸入框的不還原（iPhone 會跳出鍵盤）
+    if (opener?.isConnected && !opener.matches?.('input, textarea, select, [contenteditable]')) opener.focus?.({ preventScroll: true })
   }
   const onResize = () => layout(z)
   const onKey = (e) => {
     const k = e.key
+    // 按住 Enter／空白鍵打開時，重複送出的按鍵不要按到 ×
+    if (e.repeat && (k === 'Enter' || k === ' ')) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      return
+    }
     if (k === 'Escape') close()
     else if (multi && k === 'ArrowLeft' && z <= 1.01) show(i - 1)
     else if (multi && k === 'ArrowRight' && z <= 1.01) show(i + 1)
@@ -4850,7 +4859,7 @@ function photoViewer(list, start = 0, opts = {}) {
     else if (k === '-') layout(z - 1)
     else if (k === 'Tab') {
       // 焦點留在放大檢視裡面
-      const f = [...el.querySelectorAll('button:not(:disabled)')]
+      const f = [...el.querySelectorAll('button:not(:disabled)')].filter((b) => b.getClientRects().length) // 手機藏起來的左右箭頭不算
       const at = f.indexOf(document.activeElement)
       const next = e.shiftKey ? (at <= 0 ? f.length - 1 : at - 1) : at < 0 || at >= f.length - 1 ? 0 : at + 1
       f[next]?.focus()
@@ -4873,7 +4882,7 @@ function photoViewer(list, start = 0, opts = {}) {
   let dragged = false
   scroll.addEventListener('click', (e) => {
     if (dragged) return (dragged = false)
-    if (e.target !== img && !e.target.closest('.pv-box')) return close()
+    if (e.target !== img && !e.target.closest('.pv-box')) return Date.now() - openedAt < 350 ? undefined : close()
     const now = Date.now()
     if (now - lastTap < 320) {
       const r = scroll.getBoundingClientRect()
@@ -4888,10 +4897,11 @@ function photoViewer(list, start = 0, opts = {}) {
     sw = e.touches.length === 1 && z <= 1.01 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, dx: 0, dy: 0 } : null
   }, { passive: true })
   scroll.addEventListener('touchmove', (e) => {
-    if (!sw || e.touches.length !== 1) return (sw = null), (pad.style.transform = '')
+    if (!sw || e.touches.length !== 1) return (sw = null), (pad.style.transition = ''), (pad.style.transform = '')
     sw.dx = e.touches[0].clientX - sw.x
     sw.dy = e.touches[0].clientY - sw.y
     const down = sw.dy > 0 && Math.abs(sw.dy) > Math.abs(sw.dx)
+    pad.style.transition = 'none' // 手指拖的時候照片要跟著手指，不要慢半拍；放開才用動畫彈回
     pad.style.transform = down ? `translateY(${sw.dy}px)` : multi ? `translateX(${sw.dx}px)` : ''
     el.style.setProperty('--pv-dim', down ? String(Math.max(0.35, 1 - sw.dy / 400)) : '1')
   }, { passive: true })
@@ -4899,6 +4909,7 @@ function photoViewer(list, start = 0, opts = {}) {
     if (!sw) return
     const { dx, dy } = sw
     sw = null
+    pad.style.transition = ''
     pad.style.transform = ''
     el.style.setProperty('--pv-dim', '1')
     if (dy > 90 && Math.abs(dy) > Math.abs(dx)) close()
@@ -4944,8 +4955,13 @@ function bindReviewPinch(scroll) {
       ph.style.width = `${nz * 100}%`
       scroll.scrollLeft = fx * ph.offsetWidth - cx
       scroll.scrollTop = fy * ph.offsetHeight - cy
-      const lb = document.querySelector('.viewer .zoom-label')
+      const lb = $app.querySelector('.viewer .zoom-label')
       if (lb) lb.textContent = reviewZoomLabel()
+      // ctrl＋滾輪縮放不會重畫：＋／－ 能不能按，這裡直接更新
+      const out = $app.querySelector('.viewer [data-action="zoom-out"]')
+      const inn = $app.querySelector('.viewer [data-action="zoom-in"]')
+      if (out) out.disabled = nz <= 1
+      if (inn) inn.disabled = nz >= ZOOM_MAX
     },
     () => render(),
   )
@@ -4953,9 +4969,20 @@ function bindReviewPinch(scroll) {
 // 結果頁的放大檢視：Esc 關掉（上面有開視窗時，Esc 先關視窗）
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || !state.viewer || document.querySelector('.sheet-backdrop, .viewer.pv')) return
-  state.viewer = false
-  render()
+  closeReviewViewer()
 })
+/** 結果頁的放大檢視：打開後焦點移進去（右上 ×）；關掉後回到照片右下的放大鈕 */
+async function openReviewViewer() {
+  state.viewer = true
+  state.zoom = 2
+  await render()
+  $app.querySelector('.viewer .viewer-close')?.focus({ preventScroll: true })
+}
+async function closeReviewViewer() {
+  state.viewer = false
+  await render()
+  $app.querySelector('.photo-zoom')?.focus({ preventScroll: true })
+}
 /** 從縮圖打開：同一組（data-zoom-group）的照片一起放進去，可以左右換張 */
 function openZoom(t) {
   const g = t.dataset.zoomGroup
@@ -4979,8 +5006,15 @@ document.addEventListener('click', (e) => {
   e.stopPropagation()
   openZoom(t)
 }, true)
+// 鍵盤：Enter 按下就開（按住重複的不算）；空白鍵等放開才開（放開那一下才不會按到剛出現的 ×，Firefox 會）
 document.addEventListener('keydown', (e) => {
   if ((e.key !== 'Enter' && e.key !== ' ') || !e.target.matches?.('[data-zoom-src]')) return
+  e.preventDefault()
+  e.stopPropagation()
+  if (e.key === 'Enter' && !e.repeat) openZoom(e.target)
+}, true)
+document.addEventListener('keyup', (e) => {
+  if (e.key !== ' ' || !e.target.matches?.('[data-zoom-src]')) return
   e.preventDefault()
   e.stopPropagation()
   openZoom(e.target)
@@ -5275,7 +5309,7 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
           <h2 class="sheet-title">${doubt ? '這一個一樣嗎？' : '這一個是哪一種？'}</h2>
           <span class="q-count"><span class="nb">${doubt ? '要確認的' : ''}第 ${cur + 1} / ${order.length} 個</span>${s.photos.length > 1 ? `・<span class="nb">第 ${pi + 1} 張照片</span>` : ''}</span>
         </div>
-        <div class="q-zoom"${zoomAttrs(urlOf(photo), `這一個：${o.label}${s.photos.length > 1 ? `・第 ${pi + 1} 張照片` : ''}`, { box: o.box, color: mine?.color })}></div>
+        <div class="q-zoom"${zoomAttrs(urlOf(photo), `框起來的這一個・${o.label}${s.photos.length > 1 ? `・第 ${pi + 1} 張照片` : ''}`, { box: o.box, color: mine?.color })}></div>
         ${reason ?`<p class="doubt-reason">為什麼要看：${esc(reason)}</p>` : ''}
         <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${detailHtml(o)}` : ''}` : esc(o.label)}</p>
         ${doubt ? `<button class="btn block" id="q-same" style="margin-bottom:12px">${icon('check', 20)}一樣，就是「${esc(mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label)}」</button><p class="sheet-sub" style="margin:0 0 8px">不一樣的話，選它是哪一種：</p>` : ''}
@@ -5516,7 +5550,7 @@ function pickItem(title, sub, exclude, onPick) {
     `<h2 class="sheet-title">${esc(title)}</h2><p class="sheet-sub">${esc(sub)}</p>
      <input class="field search" id="pick-q" type="search" placeholder="搜尋品名、型號、料號" autocomplete="off">
      <div class="group" style="margin-top:10px">${
-       items.map((it) => `<button class="row" data-pick="${esc(it.id)}" data-search="${esc(canon([it.no, it.label, it.brand, it.model, it.spec].join(' ')))}">${itemThumb(it, 36)}<span class="grow"><span class="title">${esc(itemTitle(it))}</span><br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</span></span></button>`).join('') ||
+       items.map((it) => `<button class="row" data-pick="${esc(it.id)}" data-search="${esc(canon([it.no, it.label, it.brand, it.model, it.spec].join(' ')))}">${itemThumb(it, 36, true)}<span class="grow"><span class="title">${esc(itemTitle(it))}</span><br><span class="meta">${esc([it.no, it.brand, it.model].filter(Boolean).join('・'))}</span></span></button>`).join('') ||
        '<div class="row muted">品項庫裡沒有其他品項</div>'
      }</div>`,
     (el, close) => {
@@ -7657,9 +7691,13 @@ $app.addEventListener('click', async (e) => {
         label: '刪掉這張',
         icon: 'trash',
         cls: 'danger',
-        run: (en, close) => {
+        run: async (en, close) => {
           close()
           document.querySelector(`[data-remove-photo="${en.k}"]`)?.click()
+          // 原本的縮圖刪掉了：焦點放到同一個位置的下一張（沒有了就前一張）
+          await new Promise((r) => setTimeout(r, 60))
+          const left = state.session?.photos.length || 0
+          if (left) $app.querySelector(`[data-preview-photo="${Math.min(en.k, left - 1)}"]`)?.focus({ preventScroll: true })
         },
       },
     })
@@ -8071,9 +8109,7 @@ $app.addEventListener('click', async (e) => {
       state.addMode = false
       return render()
     case 'zoom':
-      state.viewer = true
-      state.zoom = 2
-      return render()
+      return openReviewViewer()
     case 'zoom-in':
       state.zoom = clampZoom(Math.floor(state.zoom) + 1)
       return render()
@@ -8081,8 +8117,7 @@ $app.addEventListener('click', async (e) => {
       state.zoom = clampZoom(Math.ceil(state.zoom) - 1)
       return render()
     case 'zoom-close':
-      state.viewer = false
-      return render()
+      return closeReviewViewer()
     case 'del-sample':
       if (!confirm('刪掉這張樣品照？')) return
       await idb.samples.del(d.id)
@@ -8519,6 +8554,7 @@ const safeToReload = () =>
   !state.busy &&
   !state.pickBusyId &&
   !document.querySelector('.crop-wrap') &&
+  !document.querySelector('.viewer.pv') && // 正在放大看照片
   !state.refining &&
   !state.lookup?.busy &&
   !state.moving &&
