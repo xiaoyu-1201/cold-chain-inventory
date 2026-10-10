@@ -46,9 +46,14 @@ const LS = {
   serverVer: 'inventory:serverVer',
   // 電腦、平板的側邊選單收起來了沒
   sideCollapsed: 'inventory:sideCollapsed',
+  // 點貨對單（4.7 測試版）：拍單子時框的位置（只在這台）、交叉比對開關（只在這台）、最後一次比對結果、更新後從雲端補拿點貨紀錄了沒
+  pickCrop: 'inventory:pickCrop',
+  pickCross: 'inventory:pickCross',
+  pickCrossLast: 'inventory:pickCrossLast',
+  pickPullDone: 'inventory:pickPullDone',
 }
 /** 檢視者不能用的動作 */
-const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete', 'erp-import', 'erp-cats', 'erp-link'])
+const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete', 'erp-import', 'erp-cats', 'erp-link', 'pk-new', 'pk-add', 'pk-step', 'pk-done', 'pk-qty', 'pk-more', 'pk-assign', 'pk-remove', 'pk-finish', 'pk-discard', 'pk-reopen', 'pk-delete'])
 /** 權限（跟 Google 雲端硬碟的「共用」一樣） */
 const ROLE_LABEL = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 const ROLE_DESC = { owner: '全部都可以；不能被移除', manager: '可以盤點、修改，也可以邀請、移除人', editor: '可以盤點、修改', viewer: '只能看（可以下載 Excel）' }
@@ -77,7 +82,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.6.1（10/10・修正檢查找到的問題）'
+const VERSION = '4.7.0（10/10・點貨對單測試版）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -184,6 +189,7 @@ async function packBlob(b) {
 const PENDING = { _pending: true }
 const unpackBlob = (v) => (v?._buf instanceof ArrayBuffer ? new Blob([v._buf], { type: v._type }) : v?._lost || v?._pending ? undefined : v)
 async function packRecord(store, v) {
+  if (store === 'picks') return v // 點貨紀錄：純資料，沒有照片
   if (store === 'sessions')
     return {
       ...v,
@@ -196,7 +202,7 @@ async function packRecord(store, v) {
 }
 /** 讀出來：照片變回 Blob；沒有照片的：pending＝還沒下載（打開會抓）、lost＝這台弄丟了（畫面顯示「從雲端拿回」） */
 function unpackRecord(store, v) {
-  if (!v) return v
+  if (!v || store === 'picks') return v
   if (store === 'sessions')
     return {
       ...v,
@@ -212,7 +218,7 @@ function unpackRecord(store, v) {
 const hasOldBlob = (store, v) => (store === 'sessions' ? (v.photos || []).some((p) => p.blob instanceof Blob) : (store === 'items' ? v.photo : v.blob) instanceof Blob)
 const lostCount = (store, v) => (store === 'sessions' ? (v.photos || []).filter((p) => p.blob?._lost).length : (store === 'items' ? v.photo : v.blob)?._lost ? 1 : 0)
 
-/** sessions＝盤點紀錄；samples＝樣品照（第 2 版新增）；items＝品項庫（第 3 版新增） */
+/** sessions＝盤點紀錄；samples＝樣品照（第 2 版新增）；items＝品項庫（第 3 版新增）；erp＝正航產品表（第 4 版）；picks＝點貨紀錄（第 5 版） */
 const idb = (() => {
   let p
   /** 舊資料（照片存成 Blob）一筆一筆轉成新存法；讀不到的照片記成「不見了」，同步時從雲端拿回來 */
@@ -246,11 +252,12 @@ const idb = (() => {
   const open = () => (p ??= openRaw().then(async (d) => (await migrate(d), d)))
   const openRaw = () =>
     new Promise((resolve, reject) => {
-      const req = indexedDB.open('inventory', 4)
+      const req = indexedDB.open('inventory', 5)
       req.onupgradeneeded = () => {
         const d = req.result
         if (!d.objectStoreNames.contains('sessions')) d.createObjectStore('sessions', { keyPath: 'id' })
         if (!d.objectStoreNames.contains('erp')) d.createObjectStore('erp', { keyPath: 'id' }) // 第 4 版：正航產品表（一筆就是整張表）
+        if (!d.objectStoreNames.contains('picks')) d.createObjectStore('picks', { keyPath: 'id' }) // 第 5 版：點貨紀錄（只加新的一格，舊資料不動）
         if (!d.objectStoreNames.contains('samples')) d.createObjectStore('samples', { keyPath: 'id' })
         if (!d.objectStoreNames.contains('items')) d.createObjectStore('items', { keyPath: 'id' })
       }
@@ -335,7 +342,7 @@ const idb = (() => {
     del: (id) => tx(store, 'readwrite', (s) => s.delete(id)),
     clear: () => tx(store, 'readwrite', (s) => s.clear()),
   })
-  return { sessions: storeOf('sessions'), samples: storeOf('samples'), items: storeOf('items'), erp: storeOf('erp') }
+  return { sessions: storeOf('sessions'), samples: storeOf('samples'), items: storeOf('items'), erp: storeOf('erp'), picks: storeOf('picks') }
 })()
 const db = idb.sessions
 
@@ -1679,17 +1686,20 @@ const chev = '<svg class="chev" width="10" height="17" viewBox="0 0 10 17" aria-
 const backBtn = (to = 'home', label = '盤點') => `<button class="back" data-go="${to}"><svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><path d="M10 2 2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>${esc(label)}</button>`
 /** 底部分頁列（像 iOS 的 Tab Bar）：盤點／品項／查型號（圖示用 icons.js 同一套線條） */
 // 設定：手機在首頁右上角；平板、電腦放進右邊側邊欄（wide）
+// 點貨（4.7 測試版）放第二個：進出貨每天都會用，跟盤點放在一起；手機底部 4 個還放得下（iOS 最多 5 個）
 const TABS = [
   { id: 'home', label: '盤點', icon: 'clipboard' },
+  { id: 'pick', label: '點貨', icon: 'list-check', fresh: true },
   { id: 'items', label: '品項', icon: 'box' },
   { id: 'lookup', label: '查型號', icon: 'search' },
   { id: 'settings', label: '設定', icon: 'settings', wide: true },
 ]
 /**
- * 手機：底部分頁列（只在三個主頁）。平板、電腦（≥768px）：同一個元素變成左邊側邊欄，每一頁都有（sub＝子頁面，手機不顯示）。
+ * 手機：底部分頁列（只在四個主頁）。平板、電腦（≥768px）：同一個元素變成右邊側邊欄，每一頁都有（sub＝子頁面，手機不顯示）。
+ * fresh：新加的入口，標綠色「新」
  */
 const tabBar = (active, sub = false) =>
-  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt=""><span class="side-name">聖佳智慧庫存</span><button class="side-toggle" data-action="side-toggle" aria-label="${sideCollapsed() ? '展開選單' : '收合選單'}" title="${sideCollapsed() ? '展開選單' : '收合選單'}">${icon('chevron-right', 20)}</button></div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''} title="${t.label}">${icon(t.icon, 26)}<span>${t.label}</span></button>`).join('')}</div></nav>`
+  `<nav class="tabbar${sub ? ' sub' : ''}" aria-label="主選單"><div class="side-head wide-only"><img class="brand-logo" src="logo.svg" alt=""><span class="side-name">聖佳智慧庫存</span><button class="side-toggle" data-action="side-toggle" aria-label="${sideCollapsed() ? '展開選單' : '收合選單'}" title="${sideCollapsed() ? '展開選單' : '收合選單'}">${icon('chevron-right', 20)}</button></div><div class="inner">${TABS.map((t) => `<button data-go="${t.id}" ${t.wide ? 'class="wide-only"' : ''} ${t.id === active ? 'aria-current="page"' : ''} title="${t.label}${t.fresh ? '（新）' : ''}">${icon(t.icon, 26)}<span>${t.label}</span>${t.fresh ? '<em class="tab-new" aria-hidden="true">新</em>' : ''}</button>`).join('')}</div></nav>`
 /** 電腦、平板的右側選單收合（只剩圖示）；記在這台 */
 // 沒按過收合鈕：平板直放（不到 1000px 寬）預設收起來，內容才不會被擠到只剩七成
 const sideCollapsed = () => {
@@ -1705,7 +1715,7 @@ addEventListener('resize', () => {
   if (b) b.setAttribute('aria-label', !was ? '展開選單' : '收合選單')
 })
 /** 子頁面屬於哪一個主頁（側邊欄標哪一個） */
-const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', catalog: 'items', lookup: 'lookup', settings: 'settings' }
+const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', catalog: 'items', lookup: 'lookup', settings: 'settings', pick: 'pick', 'pick-edit': 'pick', 'pick-result': 'pick' }
 
 /**
  * 首頁的大數字方塊（4.6）：今天盤了幾件、要確認幾個、該叫貨幾種、要複盤幾項；點了直接去處理。
@@ -2122,6 +2132,7 @@ async function viewSettings() {
       <label class="row"><span class="grow"><span class="title">有差異先複盤</span><br><span class="meta">盤到的跟帳面不一樣：請另一個人再數一次，兩次一樣才確定，再選原因，由擁有者或管理員決定要不要調整帳面。</span></span><input type="checkbox" id="rule-recount" ${recountOn() ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
     </div>
     <p class="footnote">${canManage() ? '改了會同步給大家。' : '由擁有者或管理員設定。'}</p>
+    ${canManage() ? pickCrossSettings() : ''}
     ${canManage() ? `<details class="steps"><summary>資料安全嗎？（公司資產）</summary>
       <ol>
         <li><b>資料放在哪：</b>只在擁有者的 Google 雲端硬碟「拍照盤點同步資料」資料夾和試算表。可以先用個人帳號，之後在「共用設定 → 搬到另一個 Google 帳號」搬到公司帳號（大家自動跟過去）。GitHub 上只有程式，沒有任何盤點資料。</li>
@@ -2298,18 +2309,25 @@ async function readTextFile(file) {
     return new TextDecoder('big5').decode(buf)
   }
 }
-/** 匯入：存成一張表；品項庫裡料號對得上的，帳面改成正航的數量 */
+/**
+ * 匯入：存成一張表；品項庫裡料號對得上的，帳面改成正航的數量。
+ * 點貨交叉比對的基準（4.7）：這次報表裡有的產品，記下 at＝這次匯入的時間（qty 就是這次正航的數量）＝基準 { qty, at }；
+ * 這次沒出現的產品照舊（基準不變）。每次都記；交叉比對開關打開才比、才顯示。
+ */
 async function importErp(text) {
   const parsed = parseErp(text)
   const old = await erpGet()
+  const now = Date.now()
   // 兩種報表可以輪流匯：這次沒有的欄位（類別、別的產品）用上次的補
   const oldBy = new Map((old?.products || []).map((p) => [p.no, p]))
-  const products = parsed.products.map((p) => (p.cat || !oldBy.get(p.no)?.cat ? p : { ...p, cat: oldBy.get(p.no).cat }))
+  const products = parsed.products.map((p) => ({ ...(p.cat || !oldBy.get(p.no)?.cat ? p : { ...p, cat: oldBy.get(p.no).cat }), at: now }))
+  // 交叉比對（測試版，只有開關打開的擁有者／管理員）：用上次的基準和這次的數量，比上次匯入後的點貨紀錄
+  const cross = crossOn() ? { at: now, ...crossCheck(old?.products || [], parsed.products, await idb.picks.all().catch(() => []), now) } : null
   const seen = new Set(products.map((p) => p.no))
   for (const p of old?.products || []) if (!seen.has(p.no)) products.push(p)
   const cmp = new Intl.Collator('zh-Hant', { numeric: true }).compare
   products.sort((a, b) => cmp(a.no, b.no))
-  await erpPut({ id: ERP_ID, createdAt: old?.createdAt || Date.now(), at: Date.now(), products, cats: { ...(old?.cats || {}), ...parsed.cats } })
+  await erpPut({ id: ERP_ID, createdAt: old?.createdAt || now, at: now, products, cats: { ...(old?.cats || {}), ...parsed.cats } })
   const items = await itemsAll(true)
   const index = erpIndex(items)
   let booked = 0
@@ -2328,7 +2346,7 @@ async function importErp(text) {
     }
     await putItem(it)
   }
-  return { products: products.length, stocked: products.filter((p) => p.qty > 0).length, booked, cats: Object.keys(parsed.cats).length }
+  return { products: products.length, stocked: products.filter((p) => p.qty > 0).length, booked, cats: Object.keys(parsed.cats).length, cross }
 }
 /** 從產品表把一個產品記進品項庫（料號＝產品編號、帳面＝正航數量） */
 async function erpLink(no, intoId = '') {
@@ -2390,12 +2408,29 @@ const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
  * needle 有沒有「完整」出現在 hay 裡：中間的空白、橫線不計（DML083＝DML 083），
  * 但前後不能再接英文或數字——「KP 1」不會對到「KP15」、「DML 083」不會對到「DML083S」（S＝焊接，是另一種產品）。
  */
-function hasToken(hay, needle) {
+function hasToken(hay, needle, tail = true) {
+  const re = tokenRe(needle, tail)
+  return !!re && re.test(normHay(hay))
+}
+/** 比對前先把要找的那段字整理好（全形→半形、大寫→小寫）；點貨搜尋 4000 多種產品時每種只整理一次 */
+const normHay = (s) => String(s ?? '').normalize('NFKC').toLowerCase()
+/**
+ * 「完整出現」的比對規則（hasToken 用）：同一個詞只建一次（點貨搜尋每打一個字要比 4000 多種產品）。
+ * tail＝false：後面可以再接英數字＝「開頭一樣」（打到一半時列「開頭一樣的」用，不能拿來自動配對）。
+ */
+const TOKEN_RE = new Map()
+function tokenRe(needle, tail = true) {
   const c = canon(needle)
-  if (!c) return false
-  const body = [...c].map(reEsc).join(TOKEN_SEP)
-  const re = new RegExp(`${/^[a-z0-9]/.test(c) ? '(?:^|[^a-z0-9])' : ''}${body}${/[a-z0-9]$/.test(c) ? '(?![a-z0-9])' : ''}`)
-  return re.test(String(hay ?? '').normalize('NFKC').toLowerCase())
+  if (!c) return null
+  const key = `${tail ? 1 : 0}${c}`
+  let re = TOKEN_RE.get(key)
+  if (!re) {
+    const body = [...c].map(reEsc).join(TOKEN_SEP)
+    re = new RegExp(`${/^[a-z0-9]/.test(c) ? '(?:^|[^a-z0-9])' : ''}${body}${tail && /[a-z0-9]$/.test(c) ? '(?![a-z0-9])' : ''}`)
+    if (TOKEN_RE.size > 2000) TOKEN_RE.clear()
+    TOKEN_RE.set(key, re)
+  }
+  return re
 }
 /**
  * 品項庫裡可能就是這個正航產品的（還沒接上任何正航產品的）。給「要合併到 P0001 嗎？」用，最多 3 個：
@@ -2593,9 +2628,13 @@ function erpImportSheet() {
         try {
           const r = await importErp(text)
           close()
-          toast(`匯入完成：${r.products} 種（有庫存 ${r.stocked} 種）${r.cats ? `、${r.cats} 個類別名稱` : ''}${r.booked ? `，更新 ${r.booked} 個品項的帳面` : ''}`)
+          const msg = `匯入完成：${r.products} 種（有庫存 ${r.stocked} 種）${r.cats ? `、${r.cats} 個類別名稱` : ''}${r.booked ? `，更新 ${r.booked} 個品項的帳面` : ''}`
           state.erp = { cat: null, q: '', stocked: true, more: 0 }
           go('catalog')
+          // 交叉比對開關關著：跟以前一樣，只有一行提示；開著：存下這次的比對結果，跳出「這次有 N 項要查一下」
+          if (!r.cross) return toast(msg)
+          ls.set(LS.pickCrossLast, JSON.stringify(r.cross))
+          crossDoneSheet(msg, r.cross)
         } catch (e) {
           toast(e.message)
         }
@@ -2887,6 +2926,1038 @@ async function viewLocations() {
   </main>`
 }
 
+// ───────────────────────── 點貨對單（4.7 測試版） ─────────────────────────
+/**
+ * 進貨（廠商送來）、出貨（送客戶前撿貨）時對單對貨：名稱對、數量對，不出錯。整個功能標「測試版」。
+ * 一張點貨單（idb.picks）：{ id, kind:'in'|'out', ref 單號（選填）, createdAt, doneAt 第一次按「完成」的時間, editedAt, by／byId 誰點的,
+ *   lines:[{ id, no 正航產品編號 | itemId 品項庫的品項（還沒接正航的）, name／code／unit 加進來時的名稱（產品表換了也看得懂）,
+ *            qty 單子數量, got 實拿數量, done 點好了, st 按完成時的狀態, src 'search'|'ai', read AI 讀到的字 }], ai { at, model } }
+ * 不存客戶名稱、價格；點貨不改帳面（帳面以正航為準），只留紀錄。按「完成」後才同步給大家（鍵 pick:ID）。
+ */
+const PICK_KIND = { in: '進貨', out: '出貨' }
+const PICK_TITLE = { in: '進貨點貨', out: '出貨撿貨' }
+const PICK_MAX_LINES = 200
+const PICK_STATE = { todo: '還沒點', ok: '對了', bad: '數量不對', none: '對不到產品' }
+const betaBadge = '<span class="badge beta">測試版</span>'
+/** 交叉比對（測試版）：開關只在這台、只有擁有者／管理員 */
+const crossOn = () => canManage() && ls.get(LS.pickCross) === '1'
+
+// —— 對照、比對（純函式：node 驗證腳本直接從這個檔案取出來測） ——
+/** AI 讀到的字一律當資料：拿掉控制字元、空白合併、限制長度 */
+function clip(s, n) {
+  return String(s ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, n)
+}
+/**
+ * 點貨用的對照表：正航產品（編號 → 產品）＋品項庫裡還沒接正航的品項。
+ * rows：搜尋用（每一筆的字先整理好 h）；已經接上正航的品項算在那個正航產品裡（照片、位置從品項來）。
+ */
+function pickIndex(products, items) {
+  const byNo = new Map()
+  const rows = []
+  const linked = erpIndex(items || [])
+  const taken = new Set()
+  for (const p of products || []) {
+    const k = canon(p.no)
+    if (!k || byNo.has(k)) continue
+    const it = linked.of(p.no)
+    if (it) taken.add(it)
+    const r = { no: p.no, p, it, h: normHay(`${p.no} ${p.name}`) }
+    byNo.set(k, r)
+    rows.push(r)
+  }
+  const itemByNo = new Map()
+  const itemById = new Map()
+  for (const it of items || []) {
+    itemById.set(it.id, it)
+    if (taken.has(it)) continue
+    const r = { it, h: normHay([it.no, it.label, it.brand, it.model, it.spec].join(' ')) }
+    const k = canon(it.no)
+    if (k && !itemByNo.has(k)) itemByNo.set(k, r)
+    rows.push(r)
+  }
+  return { byNo, itemByNo, itemById, rows, linked }
+}
+/** 對照到的那一筆，記在點貨單上的樣子（名稱、編號、單位也記一份：之後產品表換了也看得懂） */
+function pickTarget(r) {
+  return r.no ? { no: r.no, name: r.p.name || r.no, code: r.no, unit: r.p.unit || '' } : { itemId: r.it.id, name: itemTitle(r.it), code: r.it.no || '', unit: r.it.unit || '' }
+}
+/**
+ * text 的每一個詞都要「完整」出現在 h 裡（h 已經 normHay）：DML 083 不會對到 DML 083S、KP 1 不會對到 KP 15。
+ * 相鄰的詞先試接起來（「DML 083S」＝「DML083S」），接不起來再一個一個比。
+ */
+function wordsIn(h, text) {
+  const ws = String(text ?? '')
+    .split(/[\s,，、;；]+/)
+    .filter((w) => canon(w))
+  if (!ws.length) return false
+  for (let i = 0; i < ws.length; ) {
+    let j = Math.min(ws.length, i + 3)
+    for (; j > i; j--) if (tokenRe(ws.slice(i, j).join(' '))?.test(h)) break
+    if (j === i) return false
+    i = j
+  }
+  return true
+}
+/** 打到一半：前面的詞完整出現、最後一個詞「開頭一樣」就算。只用在「開頭一樣的」那一區，讓人自己選，不拿來自動配對 */
+function prefixIn(h, text) {
+  const ws = String(text ?? '')
+    .split(/[\s,，、;；]+/)
+    .filter((w) => canon(w))
+  if (!ws.length) return false
+  if (ws.length > 1 && !wordsIn(h, ws.slice(0, -1).join(' '))) return false
+  return !!tokenRe(ws[ws.length - 1], false)?.test(h)
+}
+/**
+ * 搜尋產品（打產品編號、品名、型號）：
+ * 1. 產品編號（料號）一模一樣的排第一（canon：大小寫、橫線、空白不計）
+ * 2. 品名、型號每個詞都完整出現的（hasToken 的規則，不用會配錯的子字串比對）
+ * 3. 還不夠：編號或型號「開頭一樣的」另外列（打到一半時用；不一定是同一個）
+ */
+function pickSearch(ix, q, limit = 8) {
+  const raw = String(q ?? '').trim()
+  const out = { hits: [], near: [], more: 0 }
+  const cq = canon(raw)
+  if (!cq) return out
+  const seen = new Set()
+  const add = (list, r) => {
+    if (!r) return
+    const k = r.no ? `n:${r.no}` : `i:${r.it.id}`
+    if (seen.has(k)) return
+    seen.add(k)
+    list.push(r)
+  }
+  add(out.hits, ix.byNo.get(cq))
+  add(out.hits, ix.itemByNo.get(cq))
+  for (const r of ix.rows) if (wordsIn(r.h, raw)) add(out.hits, r)
+  out.more = Math.max(0, out.hits.length - limit)
+  out.hits = out.hits.slice(0, limit)
+  if (out.hits.length < limit)
+    for (const r of ix.rows) {
+      if (out.near.length >= limit) break
+      if (prefixIn(r.h, raw)) add(out.near, r)
+    }
+  return out
+}
+/**
+ * AI 讀到的一列 → 哪一個產品。自動配對要很確定才配，不確定就標「對不到產品」讓人自己選：
+ * 1. 產品編號一模一樣（正航料號，或品項庫料號）
+ * 2. 品名＋規格的每個詞都完整出現在某一個產品的名稱裡，而且只有那一個（兩個以上都像就不猜）
+ */
+function matchRow(ix, row) {
+  const c = canon(row?.code)
+  if (c) {
+    const r = ix.byNo.get(c) || ix.itemByNo.get(c)
+    if (r) return r
+  }
+  const text = [row?.name, row?.spec].filter(Boolean).join(' ')
+  if (canon(text).length < 2) return null
+  let hit = null
+  for (const r of ix.rows) {
+    if (!wordsIn(r.h, text)) continue
+    if (hit) return null
+    hit = r
+  }
+  return hit
+}
+/** AI 回的 JSON → 品項列：字串一律當資料（限制長度）；數量要是 1～99999 的整數，不是就留空讓人補 */
+function cleanNoteRows(parsed) {
+  const rows = Array.isArray(parsed?.rows) ? parsed.rows : []
+  return rows
+    .slice(0, PICK_MAX_LINES)
+    .map((r) => {
+      const n = typeof r?.qty === 'number' ? r.qty : Number(String(r?.qty ?? '').replace(/[,\s]/g, '') || NaN)
+      return { code: clip(r?.code, 40), name: clip(r?.name, 80), spec: clip(r?.spec, 60), qty: Number.isInteger(n) && n > 0 && n <= 99999 ? n : null }
+    })
+    .filter((r) => r.code || r.name)
+}
+/**
+ * 別台同步來的點貨單也當資料看：種類只認 in／out，數量要是 0～99999 的整數，字串限制長度。
+ * （畫面上一律 esc；這裡再把形狀整理好，壞掉的資料不會讓畫面出錯）
+ */
+function normPick(d) {
+  const num = (v) => (Number.isInteger(v) && v >= 0 && v <= 99999 ? v : null)
+  const str = (v, n) => (v == null || v === '' ? undefined : String(v).slice(0, n))
+  return {
+    ...d,
+    kind: d?.kind === 'in' ? 'in' : 'out',
+    ref: clip(d?.ref, 40),
+    by: clip(d?.by, 40),
+    createdAt: Number(d?.createdAt) || 0,
+    doneAt: Number(d?.doneAt) || undefined,
+    lines: (Array.isArray(d?.lines) ? d.lines : [])
+      .filter((l) => l && typeof l === 'object')
+      .slice(0, PICK_MAX_LINES)
+      .map((l, i) => ({
+        ...l,
+        id: str(l.id, 40) || `l${i}`,
+        no: str(l.no, 60),
+        itemId: str(l.itemId, 60),
+        name: clip(l.name, 160),
+        code: clip(l.code, 60),
+        unit: clip(l.unit, 12),
+        qty: num(l.qty),
+        got: num(l.got),
+        done: !!l.done,
+        st: ['ok', 'bad', 'todo', 'none'].includes(l.st) ? l.st : undefined,
+        read: l.read && typeof l.read === 'object' ? { code: clip(l.read.code, 40), name: clip(l.read.name, 80), spec: clip(l.read.spec, 60) } : undefined,
+      })),
+  }
+}
+/** 一項的狀態：none 對不到產品（琥珀）、todo 還沒點（灰）、ok 對了（綠）、bad 數量不對（紅） */
+function lineState(l) {
+  if (!l.no && !l.itemId) return 'none'
+  if (!l.done) return 'todo'
+  return l.qty != null && l.got === l.qty ? 'ok' : 'bad'
+}
+/** 點好了的那一項實拿幾個；沒點的不算（不知道到底拿了沒） */
+function lineGot(l) {
+  return l.done ? Number(l.got ?? l.qty ?? 0) || 0 : 0
+}
+function pickSummary(p) {
+  const s = { total: 0, done: 0, ok: 0, bad: 0, todo: 0, none: 0 }
+  for (const l of p?.lines || []) {
+    s.total++
+    s[lineState(l)]++
+    if (l.done) s.done++
+  }
+  return s
+}
+const round2 = (n) => Math.round(n * 100) / 100
+/**
+ * 交叉比對（測試版）：上次匯入正航（基準 { qty, at }）之後有點過貨的產品，
+ * 點貨的變化（進貨實拿總和 − 出貨實拿總和）≠ 正航的變化（這次數量 − 基準數量）→ 列進「要查一下」。
+ * 不說誰錯：可能單子打錯、拿錯貨，或有進出貨沒用 App 點。
+ * oldProducts：上次的產品表（有 at 的才有基準）；newProducts：這次報表讀到的；picks：點貨紀錄（按過完成的才算）。
+ */
+function crossCheck(oldProducts, newProducts, picks, now) {
+  const oldBy = new Map((oldProducts || []).map((p) => [p.no, p]))
+  const first = !(oldProducts || []).some((p) => p.at)
+  const done = (picks || []).filter((pk) => pk.doneAt && pk.doneAt <= now)
+  const items = []
+  const inNew = new Set()
+  let checked = 0
+  for (const np of newProducts || []) {
+    inNew.add(np.no)
+    const op = oldBy.get(np.no)
+    if (!op?.at) continue
+    const rel = []
+    let pick = 0
+    for (const pk of done) {
+      if (pk.doneAt <= op.at) continue
+      let got = 0
+      let hit = false
+      for (const l of pk.lines || []) {
+        if (l.no !== np.no) continue
+        hit = true
+        got += lineGot(l)
+      }
+      if (!hit) continue
+      rel.push({ id: pk.id, at: pk.doneAt, ref: pk.ref || '', kind: pk.kind, got })
+      pick += pk.kind === 'in' ? got : -got
+    }
+    if (!rel.length) continue
+    checked++
+    const erp = round2((Number(np.qty) || 0) - (Number(op.qty) || 0))
+    if (round2(pick) !== erp) items.push({ no: np.no, name: np.name || op.name || '', pick: round2(pick), erp, picks: rel.sort((a, b) => a.at - b.at) })
+  }
+  // 有點過貨、這次的正航表裡卻沒有（報表只匯了一部分？）：沒辦法比，只算數量
+  const missing = new Set()
+  for (const pk of done)
+    for (const l of pk.lines || []) {
+      const op = l.no && !inNew.has(l.no) ? oldBy.get(l.no) : null
+      if (op?.at && pk.doneAt > op.at) missing.add(l.no)
+    }
+  return { first, checked, missing: missing.size, items: items.slice(0, 300) }
+}
+
+// —— 存檔 ——
+let picksCache = null
+async function picksAll(force = false) {
+  if (!picksCache || force) picksCache = await idb.picks.all().catch(() => [])
+  return picksCache
+}
+/** 存點貨單：還沒按完成的只存這台（不同步）；按過完成的照一般存檔，稍後同步給大家 */
+async function savePick(p) {
+  if (p._gone) return // 這張已經刪掉了（例如刪掉時 AI 還在讀）：不要再存回去
+  try {
+    if (p.doneAt) await idb.picks.put(p)
+    else {
+      p.updatedAt = Date.now()
+      await idb.picks.putRaw(p)
+    }
+  } catch (e) {
+    saveFailed(e)
+    throw e
+  }
+  picksCache = null
+}
+/** 正在點的那一張：連續按 ＋／－ 時一次只存一個，存的時候又改了，存完再存一次（不會漏、也不會塞車） */
+let pickSaving = null
+let pickDirty = null
+function pickSave(p = state.pick) {
+  if (!p) return Promise.resolve()
+  if (pickSaving) {
+    pickDirty = p
+    return pickSaving
+  }
+  pickSaving = savePick(p)
+    .catch(() => {})
+    .finally(() => {
+      pickSaving = null
+      const again = pickDirty
+      pickDirty = null
+      if (again) pickSave(again)
+    })
+  return pickSaving
+}
+/** 對照表：正航產品表或品項庫換了才重建（4000 多種，每次重畫都建會慢） */
+let pickIx = { erp: undefined, items: null, n: -1, ix: null }
+async function pickCtx() {
+  const erp = await erpGet()
+  const items = await itemsAll()
+  if (pickIx.erp !== erp || pickIx.items !== items || pickIx.n !== items.length) pickIx = { erp, items, n: items.length, ix: pickIndex(erp?.products || [], items) }
+  return pickIx.ix
+}
+const pickLine = (id) => state.pick?.lines.find((l) => l.id === id)
+
+// —— 畫面小零件 ——
+/** 一項現在的名稱、編號、照片、位置：產品表或品項庫改了就用新的；都找不到就用加進來時記的 */
+function lineInfo(ix, l) {
+  const r = l.no ? ix.byNo.get(canon(l.no)) : null
+  const it = r?.it || (l.no ? ix.linked.of(l.no) : null) || (l.itemId ? ix.itemById.get(l.itemId) : null) || null
+  const name = r?.p.name || (it ? itemTitle(it) : '') || l.name || l.read?.name || '（沒有名稱）'
+  return { it, name, code: r?.no || it?.no || l.code || '', unit: r?.p.unit || it?.unit || l.unit || '' }
+}
+const signed = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${-n}` : '0')
+function diffText(l, unit) {
+  const d = (Number(l.got) || 0) - (Number(l.qty) || 0)
+  const u = unit || '個'
+  return d < 0 ? `少 ${-d} ${u}` : d > 0 ? `多 ${d} ${u}` : ''
+}
+function stateChip(l, unit) {
+  const st = lineState(l)
+  const text = st === 'bad' ? (l.qty == null ? '單子數量沒填' : diffText(l, unit) || PICK_STATE.bad) : PICK_STATE[st]
+  return `<span class="pk-chip pk-state ${st}">${st === 'ok' ? icon('check', 16) : st === 'bad' || st === 'none' ? icon('warning', 16) : ''}${esc(text)}</span>`
+}
+const pickThumb = (info, size) => (info.it ? itemThumb(info.it, size) : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc([...String(info.name || '?')][0] || '?')}</span>`)
+/** 放在哪裡：只畫儲位黃標籤，不寫數量（點貨不需要帳面、實盤數，盲盤也一樣） */
+function pickPlaces(info) {
+  const pairs = info.it ? liveStock(info.it).map(([, s]) => [s.place, null]).filter(([pl]) => pl) : []
+  return pairs.length ? placesHtml(pairs, 4) : '<span class="loc-list"><span class="loc-tag none sm">還沒記位置</span></span>'
+}
+function lineCard(ix, l, i) {
+  const info = lineInfo(ix, l)
+  const st = lineState(l)
+  const id = esc(l.id)
+  const readTxt = l.read ? [l.read.code, l.read.name, l.read.spec].filter(Boolean).join(' ') : ''
+  const meta = [info.code, info.unit && `單位：${info.unit}`].filter(Boolean).join('・')
+  return `<article class="pk-line st-${st}" data-line="${id}" aria-label="第 ${i + 1} 項">
+    <div class="pk-top">
+      ${pickThumb(info, 56)}
+      <div class="grow">
+        ${stateChip(l, info.unit)}
+        <span class="pk-name">${esc(info.name)}</span>
+        ${meta && st !== 'none' ? `<span class="meta">${esc(meta)}</span>` : ''}
+        ${st === 'none' ? '' : pickPlaces(info)}
+      </div>
+      <button class="icon-btn small pk-more" data-action="pk-more" data-id="${id}" aria-label="這一項的其他動作：改單子數量、換產品、刪掉" title="改數量、換產品、刪掉">${icon('more', 22)}</button>
+    </div>
+    ${
+      st === 'none'
+        ? `<div class="pk-none"><p>${readTxt ? `單子上寫：「${esc(readTxt)}」。` : ''}正航產品表、品項庫裡找不到一樣的，請選是哪一個產品，或刪掉這項。</p><div class="row-actions"><button class="btn small" data-action="pk-assign" data-id="${id}">${icon('search', 18)}選產品</button><button class="btn small secondary" data-action="pk-remove" data-id="${id}">刪掉這項</button></div></div>`
+        : ''
+    }
+    <div class="pk-bot">
+      <div class="pk-need"><span class="pk-cap">單子</span><button class="pk-need-num" data-action="pk-qty" data-id="${id}" aria-label="單子上寫 ${esc(l.qty ?? '（沒填）')} 個，點一下可以改">${esc(l.qty ?? '？')}</button></div>
+      <div class="pk-got"><span class="pk-cap">實拿</span><span class="stepper pk-step"><button data-action="pk-step" data-id="${id}" data-d="-1" aria-label="少一個">${icon('minus', 22)}</button><input data-pk-got="${id}" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${esc(l.got ?? '')}" placeholder="${esc(l.qty ?? '')}" aria-label="實拿幾個（空白＝跟單子一樣）"><button data-action="pk-step" data-id="${id}" data-d="1" aria-label="多一個">${icon('plus', 22)}</button></span></div>
+      <button class="pk-done${l.done ? ' on' : ''}" data-action="pk-done" data-id="${id}" aria-pressed="${!!l.done}">${icon('check', 20)}<span>點好了</span></button>
+    </div>
+  </article>`
+}
+function pickProgress(p) {
+  const s = pickSummary(p)
+  const pct = s.total ? Math.round((s.done / s.total) * 100) : 0
+  const allOk = s.total && s.ok === s.total
+  return `<div class="pk-prog-text"><b>已點 ${s.done}／${s.total} 項</b>${s.bad ? `<span class="pk-chip bad">${s.bad} 項不對</span>` : ''}${s.none ? `<span class="pk-chip none">${s.none} 項對不到</span>` : ''}${allOk ? `<span class="pk-chip ok">${icon('check', 14)}全部對了</span>` : ''}</div><div class="pk-bar${allOk ? ' ok' : ''}" role="progressbar" aria-label="點貨進度" aria-valuemin="0" aria-valuemax="${s.total}" aria-valuenow="${s.done}"><span style="width:${pct}%"></span></div>`
+}
+/** 按 ＋／－、點好了、打數字：只更新那一張卡片和上面的進度（不整頁重畫，打字不會被打斷） */
+function paintLine(l) {
+  const card = document.querySelector(`.pk-line[data-line="${CSS.escape(l.id)}"]`)
+  if (!card || !pickIx.ix) return render()
+  const st = lineState(l)
+  card.className = `pk-line st-${st}`
+  const chip = card.querySelector('.pk-state')
+  if (chip) chip.outerHTML = stateChip(l, lineInfo(pickIx.ix, l).unit)
+  const input = card.querySelector('[data-pk-got]')
+  if (input && document.activeElement !== input) input.value = l.got ?? ''
+  const btn = card.querySelector('.pk-done')
+  if (btn) {
+    btn.classList.toggle('on', !!l.done)
+    btn.setAttribute('aria-pressed', String(!!l.done))
+  }
+  const prog = document.getElementById('pk-progress')
+  if (prog) prog.innerHTML = pickProgress(state.pick)
+}
+function flashLine(id) {
+  const card = document.querySelector(`.pk-line[data-line="${CSS.escape(id)}"]`)
+  if (!card) return
+  card.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+  document.querySelectorAll('.pk-line.flash').forEach((x) => x.classList.remove('flash'))
+  void card.offsetWidth
+  card.classList.add('flash')
+}
+const parseGot = (v) => {
+  const n = parseInt(String(v ?? '').normalize('NFKC').replace(/[^\d]/g, ''), 10)
+  return Number.isFinite(n) ? Math.min(99999, n) : null
+}
+/** 搜尋結果（加品項、選產品共用）；mode＝'add'：點了加進清單；'assign'：點了＝這一項是這個產品 */
+function pickResultsHtml(ix, q, mode = 'add') {
+  if (!canon(q)) return ''
+  const res = pickSearch(ix, q, 8)
+  const row = (r) => {
+    const t = pickTarget(r)
+    const info = { it: r.it || null, name: t.name }
+    return `<button class="row pk-res" ${mode === 'add' ? 'data-action="pk-add"' : 'data-pp=""'} ${r.no ? `data-no="${esc(r.no)}"` : `data-iid="${esc(r.it.id)}"`}>${pickThumb(info, 40)}<span class="grow"><span class="title">${esc(t.name)}</span><br><span class="meta">${esc([t.code, t.unit].filter(Boolean).join('・') || '品項庫')}</span>${info.it ? pickPlaces(info) : ''}</span>${mode === 'add' ? `<span class="pk-add-ico" aria-hidden="true">${icon('plus', 20)}</span>` : chev}</button>`
+  }
+  return `${res.hits.length ? `<div class="group">${res.hits.map(row).join('')}</div>${res.more ? `<p class="footnote">還有 ${res.more} 個也符合：打完整一點會更準。</p>` : ''}` : ''}${
+    res.near.length ? `<p class="section-title">開頭一樣的（不一定是同一個）</p><div class="group">${res.near.map(row).join('')}</div>` : ''
+  }${!res.hits.length && !res.near.length ? `<div class="group"><div class="row muted">找不到「${esc(String(q).trim().slice(0, 40))}」。${ix.byNo.size ? '請確認編號、型號有沒有打錯。' : '還沒匯入正航產品表：只找得到品項庫裡的。'}</div></div>` : ''}`
+}
+function pickRow(p) {
+  const s = pickSummary(p)
+  const by = byName(p)
+  const meta = [fmtTime(p.doneAt || p.createdAt), by && `${by} 點`, `${s.total} 項`].filter(Boolean).join('・')
+  const tag = !p.doneAt
+    ? `<span class="pk-chip todo">點到 ${s.done}／${s.total}</span>`
+    : s.bad
+      ? `<span class="pk-chip bad">${s.bad} 項不對</span>`
+      : s.none
+        ? `<span class="pk-chip none">${s.none} 項對不到</span>`
+        : s.todo
+          ? `<span class="pk-chip todo">${s.todo} 項沒點</span>`
+          : `<span class="pk-chip ok">${icon('check', 14)}全部對</span>`
+  const kind = p.kind === 'in' ? 'in' : 'out'
+  return `<button class="row pk-row" data-action="pk-open" data-id="${esc(p.id)}"><span class="pk-kind-ico ${kind}" aria-hidden="true">${icon(kind, 22)}</span><span class="grow"><span class="title">${PICK_KIND[kind]}・${p.ref ? esc(p.ref) : '<span class="muted">沒填單號</span>'}</span><br><span class="meta">${esc(meta)}${p.doneAt ? '' : '・<span class="unfinished">還沒按完成</span>'}</span></span>${tag}${chev}</button>`
+}
+function crossCard(last) {
+  const when = last ? `・${fmtTime(last.at)}` : ''
+  const meta = !last ? '匯入正航產品表時會自動比對' : last.first ? `下次匯入才開始比對${when}` : last.items?.length ? `上次匯入有 ${last.items.length} 項要查一下${when}` : `上次匯入沒有要查的${when}`
+  return `<div class="group pk-cross-card"><button class="row" data-action="pk-cross-last"><span class="row-ico" aria-hidden="true">${icon('chart')}</span><span class="grow"><span class="title">交叉比對（測試版）</span><span class="badge new">新</span><br><span class="meta">${esc(meta)}</span></span>${last?.items?.length ? `<span class="pk-chip bad">${last.items.length} 項</span>` : ''}${chev}</button></div>`
+}
+/** 設定頁：交叉比對開關（只有擁有者、管理員看得到） */
+function pickCrossSettings() {
+  const last = readJson(LS.pickCrossLast, null)
+  return `<p class="section-title">點貨（測試版） <span class="badge new">新</span></p>
+    <div class="group">
+      <label class="row"><span class="grow"><span class="title">匯入正航時，跟點貨紀錄交叉比對（測試版）</span><br><span class="meta">只比上次匯入後有點過貨的產品：點貨記的進出跟正航的進出不一樣，就列出來查一下。第一次只記基準，下次匯入才開始比。開關只在這台。</span></span><input type="checkbox" id="rule-pick-cross" ${ls.get(LS.pickCross) === '1' ? 'checked' : ''} style="width:22px;height:22px"></label>
+      ${last ? `<button class="row" data-action="pk-cross-last"><span class="grow"><span class="title" style="color:var(--tint)">看上次的比對結果</span><br><span class="meta">${esc(fmtTime(last.at))}・${esc(last.first ? '下次匯入才開始比對' : `${last.items?.length || 0} 項要查一下`)}</span></span>${chev}</button>` : ''}
+    </div>`
+}
+
+// —— 三個畫面：點貨（清單）、點貨單（對貨）、結果 ——
+async function viewPick() {
+  const all = await picksAll()
+  const drafts = all.filter((p) => !p.doneAt)
+  const done = all.filter((p) => p.doneAt).sort((a, b) => b.doneAt - a.doneAt)
+  const shown = done.slice(0, 30 + (state.pickMore || 0))
+  const howTo = `<details class="steps pk-howto" ${all.length ? '' : 'open'}><summary>怎麼用？</summary>
+      <ol>
+        <li><b>開單：</b>按「出貨」或「進貨」；有單號就填（可以不填）。</li>
+        <li><b>加品項：</b>打產品編號、搜品名，或按「拍單子讓 AI 讀」（只會送框裡的品項，客戶名稱、金額不會送出）。</li>
+        <li><b>點貨：</b>一項一項拿。數量跟單子一樣，直接按「點好了」；不一樣，先用 ＋／－ 改成實拿的數量，再按「點好了」。</li>
+        <li><b>看顏色：</b>綠色＝對了，紅色＝數量不對（寫出差幾個），琥珀色＝對不到產品，灰色＝還沒點。</li>
+        <li><b>完成：</b>按「完成」看結果，可以截圖或複製文字傳給老闆。點貨不會改帳面，只留紀錄。</li>
+      </ol>
+    </details>`
+  return `
+  <main class="app">
+    <div class="nav nav-empty"><span></span></div>
+    <h1 class="large-title">點貨 ${betaBadge}</h1>
+    <p class="subtitle">進貨、出貨時對單對貨：名稱對、數量對。只留點貨紀錄，不會改帳面（帳面以正航為準）。</p>
+    <div class="pk-home">
+      <div class="pk-home-main">
+        ${
+          canEdit()
+            ? `<div class="pk-start">
+                <button class="pk-start-btn" data-action="pk-new" data-kind="out"><span class="pk-start-ico" aria-hidden="true">${icon('out', 26)}</span><b>出貨</b><span class="meta">送客戶前撿貨<br>對出貨單</span></button>
+                <button class="pk-start-btn" data-action="pk-new" data-kind="in"><span class="pk-start-ico" aria-hidden="true">${icon('in', 26)}</span><b>進貨</b><span class="meta">廠商送來<br>對進貨單</span></button>
+              </div>`
+            : `<div class="hint-card"><b>你是檢視者（只能看）</b>：可以看大家的點貨紀錄和結果；不能新增點貨單。需要點貨，請找擁有者或管理員改成「編輯者」。</div>`
+        }
+        ${drafts.length ? `<p class="section-title">還沒點完的（${drafts.length}）</p><div class="group">${drafts.map(pickRow).join('')}</div>` : ''}
+        ${crossOn() ? crossCard(readJson(LS.pickCrossLast, null)) : ''}
+        ${howTo}
+      </div>
+      <div class="pk-home-side">
+        <p class="section-title">最近的點貨紀錄${done.length ? `（${done.length}）` : ''}</p>
+        ${
+          done.length
+            ? `<div class="group">${shown.map(pickRow).join('')}</div>${done.length > shown.length ? `<button class="btn secondary block" data-action="pk-more-list" style="margin-top:10px">再顯示 ${Math.min(30, done.length - shown.length)} 筆（還有 ${done.length - shown.length} 筆）</button>` : ''}`
+            : `<div class="empty pk-empty"><span class="empty-ico" aria-hidden="true">${icon('list-check', 34)}</span><p><b>還沒有點貨紀錄</b><br>${canEdit() ? '按「出貨」或「進貨」開一張，照單子一項一項點。' : '別人點完、同步後，紀錄會出現在這裡。'}</p>${canEdit() ? '<button class="btn small" data-action="pk-new" data-kind="out">開一張出貨單試試</button>' : ''}</div>`
+        }
+      </div>
+    </div>
+  </main>
+  ${tabBar('pick')}`
+}
+async function viewPickEdit() {
+  const p = state.pick
+  if (!p) return viewPick()
+  if (!canEdit()) {
+    state.view = 'pick-result'
+    return viewPickResult()
+  }
+  const ix = await pickCtx()
+  const aiOk = hasAi()
+  const by = byName(p)
+  const ai = state.pickBusy
+    ? `<div class="pk-ai-busy" role="status"><span class="spinner small" aria-hidden="true"></span><span class="grow"><b>AI 讀單子中…</b><br><span class="meta">大約 5～20 秒；只送框裡的品項</span></span></div>`
+    : aiOk
+      ? `<div class="pk-ai"><div class="row-actions"><label class="btn secondary pk-ai-btn">${icon('camera', 20)}拍單子讓 AI 讀<input type="file" accept="image/*" capture="environment" id="pk-cam" class="sr-only"></label><label class="btn secondary pk-ai-btn">${icon('image', 20)}從相簿選<input type="file" accept="image/*" id="pk-album" class="sr-only"></label></div><p class="pk-privacy">${icon('shield', 16)}<span>拍完先框出品項那一段，只送框裡的給 AI；客戶名稱、金額不會送出。</span></p></div>`
+      : `<div class="pk-ai off"><div class="row-actions"><button class="btn secondary pk-ai-btn" data-action="pk-no-ai" aria-disabled="true">${icon('camera', 20)}拍單子讓 AI 讀</button></div><p class="pk-privacy">${icon('warning', 16)}<span>${syncReady() ? '要先設定 AI：請擁有者到「設定」把 AI 金鑰放到雲端，或在「設定」貼上自己的 Gemini API Key。' : '要先設定 AI：到「設定」貼上 Gemini API Key。'}打編號、搜品名不用 AI。</span></p></div>`
+  return `
+  <main class="app">
+    <div class="nav">${backBtn('pick', '點貨')}<span class="nav-right">${p.doneAt || (!p.lines.length && !p.ref) ? '' : '<button class="btn small plain" data-action="pk-discard">刪掉這張</button>'}</span></div>
+    <h1 class="large-title">${PICK_TITLE[p.kind] || '點貨'} ${betaBadge}</h1>
+    <div class="pk-cols">
+      <div class="pk-addcol">
+        <div class="group pk-meta">
+          <label class="row"><span class="pk-label">單號</span><input class="inline" id="pk-ref" value="${esc(p.ref || '')}" placeholder="選填，例如 S1131010-001" maxlength="40" autocomplete="off" spellcheck="false" enterkeyhint="done"></label>
+          ${by ? `<div class="row"><span class="pk-label">點貨人</span><span class="grow">${esc(by)}</span><span class="meta">${esc(fmtTime(p.createdAt))}</span></div>` : ''}
+        </div>
+        <p class="section-title">加品項</p>
+        ${
+          ix.rows.length
+            ? `<input class="field search" id="pk-q" type="search" placeholder="打產品編號，或品名、型號" autocomplete="off" enterkeyhint="search" spellcheck="false" value="${esc(state.pickQ || '')}"><div id="pk-results">${pickResultsHtml(ix, state.pickQ || '')}</div>`
+            : `<div class="hint-card">還沒匯入正航產品表，品項庫也是空的：請擁有者或管理員到「品項 → 產品總表」匯入，才找得到產品。</div>`
+        }
+        ${ai}
+      </div>
+      <div class="pk-linecol">
+        ${
+          p.lines.length
+            ? `<div class="pk-progress" id="pk-progress">${pickProgress(p)}</div><div class="pk-lines">${p.lines.map((l, i) => lineCard(ix, l, i)).join('')}</div>`
+            : `<div class="empty pk-empty"><span class="empty-ico" aria-hidden="true">${icon('list-check', 34)}</span><p><b>還沒有品項</b><br>把單子上的品項加進來：打產品編號、搜品名，或拍單子讓 AI 讀。</p></div>`
+        }
+      </div>
+    </div>
+  </main>
+  <div class="toolbar"><div class="inner"><button class="btn" data-action="pk-finish" ${p.lines.length ? '' : 'disabled'}>${p.doneAt ? '完成修改' : '完成'}</button></div></div>`
+}
+async function viewPickResult() {
+  const p = state.pick
+  if (!p) return viewPick()
+  const ix = await pickCtx()
+  const s = pickSummary(p)
+  const rows = p.lines.map((l) => ({ l, info: lineInfo(ix, l), st: lineState(l) }))
+  const order = { bad: 0, none: 1, todo: 2 }
+  const probs = rows.filter((r) => r.st !== 'ok').sort((a, b) => order[a.st] - order[b.st])
+  const oks = rows.filter((r) => r.st === 'ok')
+  const allOk = s.total > 0 && s.ok === s.total
+  const by = byName(p)
+  const kind = p.kind === 'in' ? 'in' : 'out'
+  const head = [p.ref ? `單號 ${p.ref}` : '沒填單號', p.doneAt ? `${fmtTime(p.doneAt)} 完成` : `${fmtTime(p.createdAt)} 開始・還沒按完成`, by && `${by} 點`].filter(Boolean).join('・')
+  const tile = (n, label, cls) => `<div class="pk-stat ${cls}${n ? '' : ' zero'}"><b>${n}</b><span>${label}</span></div>`
+  const probRow = ({ l, info, st }) => {
+    const readTxt = st === 'none' && l.read ? [l.read.code, l.read.name, l.read.spec].filter(Boolean).join(' ') : ''
+    const meta = st === 'none' ? `單子上寫：${readTxt || info.name}・單子 ${l.qty ?? '？'}` : [info.code, `單子 ${l.qty ?? '？'}`, `實拿 ${l.done ? l.got ?? '—' : '—'}`].filter(Boolean).join('・')
+    return `<div class="row pk-rrow st-${st}">${pickThumb(info, 40)}<span class="grow"><span class="title">${esc(info.name)}</span><br><span class="meta">${esc(meta)}</span></span>${stateChip(l, info.unit)}</div>`
+  }
+  const okRow = ({ l, info }) => `<div class="row pk-rrow st-ok">${pickThumb(info, 36)}<span class="grow"><span class="title">${esc(info.name)}</span>${info.code ? `<br><span class="meta">${esc(info.code)}</span>` : ''}</span><span class="qty"><b>${esc(l.got)}</b><small>${esc(info.unit || '個')}</small></span></div>`
+  return `
+  <main class="app">
+    <div class="nav">${backBtn('pick', '點貨')}<span class="nav-right">${canEdit() ? '<button class="btn small secondary" data-action="pk-reopen">改一下</button>' : ''}${canManage() && p.doneAt ? `<button class="icon-btn" data-action="pk-delete" aria-label="刪除這筆點貨紀錄" title="刪除這筆點貨紀錄">${icon('trash', 22)}</button>` : ''}</span></div>
+    <div class="pk-result">
+      <section class="pk-res-card" aria-label="點貨結果">
+        <div class="pk-res-kind"><span class="pk-kind-ico ${kind}" aria-hidden="true">${icon(kind, 22)}</span><span class="grow"><b>${PICK_TITLE[kind]}結果</b> ${betaBadge}<br><span class="meta">${esc(head)}</span></span></div>
+        <h1 class="pk-verdict ${allOk ? 'ok' : 'bad'}">${icon(allOk ? 'check' : 'warning', 28)}<span>${allOk ? `全部對了・${s.total} 項` : `${probs.length} 項要處理・共 ${s.total} 項`}</span></h1>
+        <div class="pk-stats">${tile(s.ok, '對了', 'ok')}${tile(s.bad, '數量不對', 'bad')}${tile(s.todo, '沒點', 'todo')}${tile(s.none, '對不到', 'none')}</div>
+      </section>
+      <div class="pk-res-lists">
+        ${probs.length ? `<p class="section-title">要處理的（${probs.length}）</p><div class="group">${probs.map(probRow).join('')}</div>` : ''}
+        ${oks.length ? `<p class="section-title">對了（${oks.length}）</p><div class="group${oks.length >= 6 ? ' cols-2' : ''}">${oks.map(okRow).join('')}</div>` : ''}
+      </div>
+      <div class="pk-res-actions">
+        <button class="btn secondary block" data-action="pk-copy">${icon('copy', 20)}複製結果（貼到 LINE）</button>
+        <p class="footnote">點貨不會改帳面（帳面以正航為準），只留這筆紀錄${syncReady() ? '，大家的手機都看得到' : ''}。要傳給老闆：直接截圖，或按上面複製文字。</p>
+      </div>
+    </div>
+  </main>`
+}
+
+// —— 動作 ——
+/** 從搜尋結果加一項：先問單子上寫幾個；同一個產品已經在清單裡就跳過去，不重複加 */
+function addPickLine(r) {
+  const p = state.pick
+  if (!p || !r) return
+  if (p.lines.length >= PICK_MAX_LINES) return toast(`一張最多 ${PICK_MAX_LINES} 項`)
+  const t = pickTarget(r)
+  const dup = p.lines.findIndex((l) => (t.no ? l.no === t.no : l.itemId === t.itemId))
+  if (dup >= 0) {
+    toast(`已經在清單裡（第 ${dup + 1} 項）`)
+    return flashLine(p.lines[dup].id)
+  }
+  numberSheet({ title: '單子上寫幾個？', sub: esc(t.name), value: '', action: '加進清單', quick: [1, 2, 3, 5, 10].map((n) => ({ n, label: String(n) })) }, async (n) => {
+    if (!n) return toast('單子數量要 1 以上')
+    const l = { id: uid(), ...t, qty: n, got: null, done: false, src: 'search' }
+    p.lines.push(l)
+    state.pickQ = ''
+    state.pickFlash = l.id
+    await pickSave(p)
+    toast(`已加入：${t.name}`)
+  })
+}
+function editLineQty(l, then) {
+  numberSheet({ title: '單子上寫幾個？', sub: esc(lineInfo(pickIx.ix || pickIndex([], []), l).name), value: l.qty ?? '', action: '儲存' }, async (n) => {
+    if (!n) return toast('單子數量要 1 以上')
+    l.qty = n
+    then?.()
+    await pickSave()
+  })
+}
+/** 選產品（對不到的、對錯的）：搜尋框先帶入 AI 讀到的編號或品名 */
+async function assignLine(l) {
+  const ix = await pickCtx()
+  const readTxt = l.read ? [l.read.code, l.read.name, l.read.spec].filter(Boolean).join(' ') : ''
+  const q0 = (l.no || l.itemId ? '' : l.read?.code || l.read?.name) || ''
+  sheet(
+    `<h2 class="sheet-title">這是哪一個產品？</h2>
+     <p class="sheet-sub">${readTxt ? `單子上寫：「${esc(readTxt)}」。` : `現在是：${esc(lineInfo(ix, l).name)}。`}打產品編號，或品名、型號找。</p>
+     <input class="field search" id="pp-q" type="search" placeholder="打產品編號，或品名、型號" autocomplete="off" spellcheck="false" enterkeyhint="search" value="${esc(q0)}">
+     <div id="pp-results" style="margin-top:10px">${pickResultsHtml(ix, q0, 'assign')}</div>`,
+    (el, close) => {
+      const input = el.querySelector('#pp-q')
+      const box = el.querySelector('#pp-results')
+      let timer = 0
+      input.addEventListener('input', () => {
+        clearTimeout(timer)
+        timer = setTimeout(() => {
+          box.innerHTML = pickResultsHtml(ix, input.value, 'assign')
+          glueTails(box)
+        }, 120)
+      })
+      box.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-pp]')
+        if (!b) return
+        const r = b.dataset.no ? ix.byNo.get(canon(b.dataset.no)) : ix.itemById.get(b.dataset.iid) ? { it: ix.itemById.get(b.dataset.iid) } : null
+        if (!r) return
+        close()
+        const t = pickTarget(r)
+        const dup = state.pick?.lines.findIndex((x) => x !== l && (t.no ? x.no === t.no : x.itemId === t.itemId)) ?? -1
+        delete l.no
+        delete l.itemId
+        Object.assign(l, t)
+        pickSave()
+        render()
+        toast(`已對到：${t.name}${dup >= 0 ? `（清單第 ${dup + 1} 項也是這個產品）` : ''}`)
+      })
+      if (!q0) input.focus()
+    },
+  )
+}
+function removeLine(l) {
+  const p = state.pick
+  const i = p?.lines.indexOf(l) ?? -1
+  if (i < 0) return
+  p.lines.splice(i, 1)
+  pickSave(p)
+  render()
+  toast('已刪掉這一項', {
+    label: '復原',
+    run: () => {
+      if (state.pick !== p) return toast('已經換到別張了，沒辦法復原')
+      p.lines.splice(Math.min(i, p.lines.length), 0, l)
+      pickSave(p)
+      render()
+    },
+  })
+}
+function lineMoreSheet(l) {
+  const info = lineInfo(pickIx.ix || pickIndex([], []), l)
+  sheet(
+    `<h2 class="sheet-title">${esc(info.name)}</h2>${info.code ? `<p class="sheet-sub">${esc(info.code)}</p>` : ''}
+     <div class="group">
+       <button class="row" id="lm-qty"><span class="grow"><span class="title">改單子數量</span><br><span class="meta">現在：${esc(l.qty ?? '沒填')}</span></span>${chev}</button>
+       <button class="row" id="lm-swap"><span class="grow"><span class="title">換產品</span><br><span class="meta">對錯產品時用</span></span>${chev}</button>
+       <button class="row" id="lm-del"><span class="grow"><span class="title" style="color:var(--red)">刪掉這項</span><br><span class="meta">刪掉後幾秒內可以復原</span></span>${chev}</button>
+     </div>`,
+    (el, close) => {
+      el.querySelector('#lm-qty').onclick = () => {
+        close()
+        editLineQty(l)
+      }
+      el.querySelector('#lm-swap').onclick = () => {
+        close()
+        assignLine(l)
+      }
+      el.querySelector('#lm-del').onclick = () => {
+        close()
+        removeLine(l)
+      }
+    },
+  )
+}
+/** 按「完成」：還有沒點的先提醒（回去點／還是完成） */
+function finishPickSheet(p) {
+  const ix = pickIx.ix || pickIndex([], [])
+  const undone = p.lines.filter((l) => !l.done)
+  const none = undone.filter((l) => lineState(l) === 'none').length
+  sheet(
+    `<h2 class="sheet-title">還有 ${undone.length} 項沒點</h2>
+     <p class="sheet-sub">還是完成的話，這些會記成「沒點」${none ? `（其中 ${none} 項對不到產品）` : ''}。</p>
+     <div class="group">${undone
+       .slice(0, 6)
+       .map((l) => `<div class="row"><span class="grow"><span class="title pk-tname">${esc(lineInfo(ix, l).name)}</span><br><span class="meta">單子 ${esc(l.qty ?? '？')}</span></span>${stateChip(l, lineInfo(ix, l).unit)}</div>`)
+       .join('')}${undone.length > 6 ? `<div class="row muted">還有 ${undone.length - 6} 項</div>` : ''}</div>
+     <div class="row-actions" style="margin-top:14px"><button class="btn secondary" id="pf-back" style="flex:1">回去點</button><button class="btn" id="pf-go" style="flex:1">還是完成</button></div>`,
+    (el, close) => {
+      el.querySelector('#pf-back').onclick = () => {
+        close()
+        flashLine(undone[0].id)
+      }
+      el.querySelector('#pf-go').onclick = () => {
+        close()
+        finishPick(p)
+      }
+    },
+  )
+}
+async function finishPick(p) {
+  const now = Date.now()
+  const again = !!p.doneAt
+  if (again) p.editedAt = now
+  else p.doneAt = now
+  // 每一項的狀態也記一份（ok 對了／bad 數量不對／todo 沒點／none 對不到）：紀錄自己就看得懂，之後要匯出也方便
+  for (const l of p.lines) l.st = lineState(l)
+  if (pickSaving) await pickSaving
+  try {
+    await savePick(p)
+  } catch {
+    if (!again) delete p.doneAt
+    return
+  }
+  state.pick = p
+  state.pickQ = ''
+  go('pick-result')
+  toast(again ? '改好了：已更新這筆點貨紀錄' : '點完了：已存成點貨紀錄（不會改帳面）')
+  if (syncReady()) syncNow().catch((err) => toast(`同步沒成功：${err.message}；有網路時會再自動試`))
+}
+/** 複製結果（貼到 LINE 給老闆）：不寫客戶、價格（本來就沒存） */
+function pickText(p, ix) {
+  const s = pickSummary(p)
+  const rows = p.lines.map((l) => ({ l, info: lineInfo(ix, l), st: lineState(l) }))
+  const one = ({ l, info }) => `・${info.name}${info.code ? `（${info.code}）` : ''}：單子 ${l.qty ?? '？'}，實拿 ${l.done ? l.got ?? '—' : '—'}`
+  const sec = (title, st, extra = () => '') => {
+    const xs = rows.filter((x) => x.st === st)
+    return xs.length ? [`【${title}】`, ...xs.map((x) => one(x) + extra(x))] : []
+  }
+  return [
+    `${PICK_TITLE[p.kind] || '點貨'}結果（測試版）`,
+    `單號：${p.ref || '沒填'}`,
+    `時間：${fmtTime(p.doneAt || p.createdAt)}${byName(p) ? `　點貨人：${byName(p)}` : ''}`,
+    `對了 ${s.ok} 項・數量不對 ${s.bad} 項・沒點 ${s.todo} 項・對不到 ${s.none} 項`,
+    ...sec('數量不對', 'bad', ({ l, info }) => `（${l.qty == null ? '單子數量沒填' : diffText(l, info.unit)}）`),
+    ...sec('沒點', 'todo'),
+    ...sec('對不到產品', 'none'),
+    ...sec('對了', 'ok'),
+  ].join('\n')
+}
+
+// —— 拍單子讓 AI 讀：先框出品項那一段，只送框裡的 ——
+const NOTE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    rows: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          code: { type: 'STRING', description: '產品編號（料號），照單子原樣；沒有就空字串' },
+          name: { type: 'STRING', description: '品名，照單子原樣' },
+          spec: { type: 'STRING', description: '規格：型號、尺寸；沒有就空字串' },
+          qty: { type: 'NUMBER', description: '數量，整數；看不清楚填 0' },
+        },
+        required: ['code', 'name', 'spec', 'qty'],
+      },
+    },
+  },
+  required: ['rows'],
+}
+const NOTE_PROMPT = `照片是一張出貨單或進貨單裡「品項」那一段（上面的客戶資料、下面的金額合計已經裁掉）。
+請一列一列讀出每一個品項：code＝產品編號、name＝品名、spec＝規格（型號、尺寸）、qty＝數量。
+規則：
+1. 只讀品項的產品編號、品名、規格、數量。客戶名稱、地址、電話、統一編號、單價、金額、小計、合計、稅額、備註一律忽略，不要寫進任何欄位。
+2. 照單子上的字原樣抄；看不清楚的欄位留空字串，不要猜。
+3. qty 只填數量那一欄的整數；看不清楚填 0。
+4. 品名和規格寫在同一格的：品名放 name，型號、尺寸放 spec。
+5. 標題列、空白列、合計列不是品項，不要列出來。
+只回 JSON。`
+/** 預設的框：單子中間的品項區（上面約 22% 是公司、客戶資料，下面約 18% 是金額合計、簽名） */
+const CROP_DEFAULT = { x1: 0.03, y1: 0.22, x2: 0.97, y2: 0.82 }
+const CROP_MIN = 0.08
+function cropRect() {
+  const r = readJson(LS.pickCrop, null)
+  const ok = r && ['x1', 'y1', 'x2', 'y2'].every((k) => Number.isFinite(r[k])) && r.x1 >= 0 && r.y1 >= 0 && r.x2 <= 1 && r.y2 <= 1 && r.x2 - r.x1 >= CROP_MIN && r.y2 - r.y1 >= CROP_MIN
+  return ok ? { x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 } : { ...CROP_DEFAULT }
+}
+const CROP_HANDLES = { nw: '拖曳左上角', ne: '拖曳右上角', sw: '拖曳左下角', se: '拖曳右下角', n: '拖曳上邊', s: '拖曳下邊' }
+/**
+ * 框出品項：照片上自動框好一個長方形（上次框的位置，記在這台），四個角、上下邊可以拖（手指範圍 44px），框裡面拖＝整個移動。
+ * 回傳框的位置（0～1 的比例），取消回傳 null。
+ */
+function cropSheet(blob) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob)
+    const r = cropRect()
+    const el = document.createElement('div')
+    el.className = 'crop-wrap'
+    el.setAttribute('role', 'dialog')
+    el.setAttribute('aria-modal', 'true')
+    el.setAttribute('aria-label', '框出單子上的品項')
+    el.innerHTML = `<div class="crop-bar"><button type="button" class="btn small crop-plain" data-c="cancel">取消</button><b class="crop-title">框出品項那一段</b><button type="button" class="btn small crop-plain" data-c="reset">重設</button></div>
+      <p class="crop-tip">拖曳四個角或上下邊，只框住品項那幾列；不要框到客戶名稱、金額。</p>
+      <div class="crop-stage"><div class="crop-img"><img src="${url}" alt="拍到的單子" draggable="false"><div class="crop-dim" aria-hidden="true"><div class="crop-hole"></div></div><div class="crop-rect" data-h="move">${Object.entries(CROP_HANDLES)
+        .map(([h, label]) => `<button type="button" class="crop-h ${h}" data-h="${h}" aria-label="${label}（可以用方向鍵）"><span></span></button>`)
+        .join('')}</div></div></div>
+      <div class="crop-foot"><p class="crop-note">${icon('shield', 18)}<span>只會送框裡的品項；客戶名稱、金額不會送出。</span></p><button type="button" class="btn block" data-c="send">送出，請 AI 讀框裡的品項</button></div>`
+    document.body.append(el)
+    document.body.classList.add('no-scroll')
+    glueTails(el)
+    const box = el.querySelector('.crop-rect')
+    const hole = el.querySelector('.crop-hole')
+    const imgBox = el.querySelector('.crop-img')
+    const paint = () => {
+      for (const n of [box, hole]) Object.assign(n.style, { left: `${r.x1 * 100}%`, top: `${r.y1 * 100}%`, width: `${(r.x2 - r.x1) * 100}%`, height: `${(r.y2 - r.y1) * 100}%` })
+    }
+    paint()
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+    const apply = (h, s, dx, dy) => {
+      let { x1, y1, x2, y2 } = s
+      if (h === 'move') {
+        const w = x2 - x1
+        const hh = y2 - y1
+        x1 = clamp(x1 + dx, 0, 1 - w)
+        y1 = clamp(y1 + dy, 0, 1 - hh)
+        x2 = x1 + w
+        y2 = y1 + hh
+      } else {
+        if (h.includes('n')) y1 = clamp(y1 + dy, 0, y2 - CROP_MIN)
+        if (h.includes('s')) y2 = clamp(y2 + dy, y1 + CROP_MIN, 1)
+        if (h.includes('w')) x1 = clamp(x1 + dx, 0, x2 - CROP_MIN)
+        if (h.includes('e')) x2 = clamp(x2 + dx, x1 + CROP_MIN, 1)
+      }
+      Object.assign(r, { x1, y1, x2, y2 })
+      paint()
+    }
+    let drag = null
+    el.addEventListener('pointerdown', (e) => {
+      const t = e.target.closest('[data-h]')
+      if (!t) return
+      e.preventDefault()
+      const rect = imgBox.getBoundingClientRect()
+      drag = { h: t.dataset.h, x: e.clientX, y: e.clientY, w: rect.width || 1, ht: rect.height || 1, s: { ...r }, id: e.pointerId }
+      try {
+        t.setPointerCapture(e.pointerId)
+      } catch {}
+      box.classList.add('dragging')
+    })
+    el.addEventListener('pointermove', (e) => {
+      if (drag && e.pointerId === drag.id) apply(drag.h, drag.s, (e.clientX - drag.x) / drag.w, (e.clientY - drag.y) / drag.ht)
+    })
+    const end = (e) => {
+      if (!drag || e.pointerId !== drag.id) return
+      drag = null
+      box.classList.remove('dragging')
+    }
+    el.addEventListener('pointerup', end)
+    el.addEventListener('pointercancel', end)
+    const done = (v) => {
+      el.remove()
+      document.removeEventListener('keydown', onKey)
+      document.body.classList.toggle('no-scroll', !!document.querySelector('.viewer'))
+      URL.revokeObjectURL(url)
+      resolve(v)
+    }
+    // 鍵盤也能調：選到某個角，按方向鍵移 1%（Shift 5%）；Esc 取消
+    const onKey = (e) => {
+      if (e.key === 'Escape') return done(null)
+      const t = e.target.closest?.('.crop-wrap [data-h]')
+      const step = e.shiftKey ? 0.05 : 0.01
+      const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key]
+      if (!t || !d) return
+      e.preventDefault()
+      apply(t.dataset.h, { ...r }, d[0], d[1])
+    }
+    document.addEventListener('keydown', onKey)
+    el.addEventListener('click', (e) => {
+      const c = e.target.closest('[data-c]')?.dataset.c
+      if (c === 'cancel') done(null)
+      else if (c === 'reset') {
+        Object.assign(r, CROP_DEFAULT)
+        paint()
+      } else if (c === 'send') {
+        const keep = Object.fromEntries(Object.entries(r).map(([k, v]) => [k, Math.round(v * 1000) / 1000]))
+        ls.set(LS.pickCrop, JSON.stringify(keep))
+        done({ ...r })
+      }
+    })
+    el.querySelector('[data-c="send"]').focus({ preventScroll: true })
+  })
+}
+/** 在手機上把框裡那一塊切出來（canvas）：只有這一塊會送給 AI */
+async function cropToBlob(blob, r) {
+  const bmp = await bitmapOf(blob)
+  const W = bmp.width
+  const H = bmp.height
+  const sx = Math.round(r.x1 * W)
+  const sy = Math.round(r.y1 * H)
+  const sw = Math.max(1, Math.min(W - sx, Math.round((r.x2 - r.x1) * W)))
+  const sh = Math.max(1, Math.min(H - sy, Math.round((r.y2 - r.y1) * H)))
+  const out = await drawToBlob(bmp, sx, sy, sw, sh, MAX_SIDE)
+  bmp.close?.()
+  return out
+}
+/** 拍單子 → 框 → 切 → AI 讀 → 每一列對到產品（對不到的標琥珀色，讓人選或刪） */
+async function readNoteFile(file) {
+  const p = state.pick
+  if (!p || !canEdit() || !hasAi()) return
+  if (p.lines.length >= PICK_MAX_LINES) return toast(`一張最多 ${PICK_MAX_LINES} 項`)
+  let photo
+  try {
+    photo = await prepareImage(file)
+  } catch {
+    return toast('這張照片讀不進來，換一張試試')
+  }
+  const r = await cropSheet(photo.blob)
+  if (!r) return
+  state.pickBusy = true
+  if (state.view === 'pick-edit') render()
+  try {
+    const cropped = await cropToBlob(photo.blob, r)
+    const res = await askJson([{ inline_data: { mime_type: 'image/jpeg', data: await blobToBase64(cropped) } }, { text: NOTE_PROMPT }], NOTE_SCHEMA, 40000)
+    const rows = cleanNoteRows(res)
+    if (p._gone) return // 讀的時候這張被刪掉了
+    if (!rows.length) return toast('AI 沒讀到品項：框要框住品項那幾列，再拍一次（拍正、不要反光）')
+    const ix = await pickCtx()
+    const lines = rows.slice(0, PICK_MAX_LINES - p.lines.length).map((row) => {
+      const m = matchRow(ix, row)
+      return { id: uid(), ...(m ? pickTarget(m) : { name: [row.name, row.spec].filter(Boolean).join(' ') || row.code }), qty: row.qty, got: null, done: false, src: 'ai', read: { code: row.code, name: row.name, spec: row.spec } }
+    })
+    p.lines.push(...lines)
+    p.ai = { at: Date.now(), model: clip(res.aiModel, 60) }
+    await pickSave(p)
+    const miss = lines.filter((l) => !l.no && !l.itemId).length
+    const noQty = lines.filter((l) => l.qty == null).length
+    toast(`讀到 ${lines.length} 項${miss ? `：${miss} 項對不到產品（琥珀色），請選產品或刪掉` : '，都對到產品了'}${noQty ? `；${noQty} 項數量沒讀到，點「單子」那格補上` : ''}`)
+  } catch (e) {
+    toast(e.message || 'AI 沒讀到，請再拍一次')
+  } finally {
+    state.pickBusy = false
+    if (state.view === 'pick-edit') render()
+  }
+}
+/** 匯入正航完成、交叉比對開著：跳出「這次有 N 項要查一下」，可以打開清單 */
+function crossDoneSheet(msg, c) {
+  const n = c.items?.length || 0
+  const head = c.first ? '下次匯入才開始比對' : n ? `這次有 ${n} 項要查一下` : '這次沒有要查的'
+  const sub = c.first ? '這次先記下每個產品的正航數量（基準）。之後用 App 點貨，下次匯入正航時就會比。' : n ? '上次匯入後有點過貨的產品裡，點貨記的進出跟正航的進出不一樣。' : `上次匯入後點過貨的 ${c.checked} 項，點貨跟正航的進出都一樣。`
+  sheet(
+    `<h2 class="sheet-title">匯入完成</h2><p class="sheet-sub">${esc(msg)}</p>
+     <div class="pk-cross-sum ${n ? 'bad' : 'ok'}"><span class="pk-cross-k">交叉比對（測試版） <span class="badge new">新</span></span><b>${esc(head)}</b><p>${esc(sub)}</p></div>
+     <div class="row-actions" style="margin-top:14px">${n ? '<button class="btn secondary" id="cd-ok" style="flex:1">等一下再看</button><button class="btn" id="cd-open" style="flex:1">打開清單</button>' : '<button class="btn block" id="cd-ok">知道了</button>'}</div>`,
+    (el, close) => {
+      el.querySelector('#cd-ok').onclick = close
+      el.querySelector('#cd-open')?.addEventListener('click', () => {
+        close()
+        crossListSheet(c)
+      })
+    },
+  )
+}
+function crossListSheet(c) {
+  const n = c.items?.length || 0
+  const head = c.first ? '下次匯入才開始比對' : n ? `這次有 ${n} 項要查一下` : '這次沒有要查的'
+  const rows = (c.items || [])
+    .map(
+      (x) => `<div class="row pk-cross-row"><span class="grow"><span class="title">${esc(x.name || x.no)}</span><br><span class="meta">${esc(x.no)}</span>
+        <span class="pk-cross-nums"><span>點貨記的 <b>${esc(signed(x.pick))}</b></span><span>正航變了 <b>${esc(signed(x.erp))}</b></span></span>
+        <span class="pk-cross-picks">${(x.picks || []).map((pk) => `<button class="chip" data-cross-pick="${esc(pk.id)}">${esc(PICK_KIND[pk.kind] || '點貨')} ${esc(fmtTime(pk.at))}${pk.ref ? `・${esc(pk.ref)}` : ''}・${esc(signed(pk.kind === 'in' ? pk.got : -pk.got))}</button>`).join('')}</span></span></div>`,
+    )
+    .join('')
+  sheet(
+    `<h2 class="sheet-title">交叉比對 ${betaBadge}</h2>
+     <p class="sheet-sub">${esc(fmtTime(c.at))} 匯入正航・${esc(head)}</p>
+     ${
+       n
+         ? `<div class="hint-card">不一定是誰錯：可能單子打錯、拿錯貨，或有進出貨沒用 App 點。</div><div class="group" style="margin-top:12px">${rows}</div>`
+         : `<div class="group"><div class="row muted">${c.first ? '這次先記下基準（每個產品的正航數量）；下次匯入正航時，才會跟這段時間的點貨紀錄比。' : `上次匯入後點過貨的 ${c.checked} 項，點貨跟正航的進出都一樣。`}</div></div>`
+     }
+     <p class="footnote">怎麼算：上次匯入正航之後按「完成」的點貨單，進貨實拿加起來、減掉出貨實拿＝點貨記的；這次正航的數量減掉上次的＝正航變了。兩個不一樣才列出來。${c.missing ? `另外有 ${c.missing} 項點過貨、但這次的正航表裡沒有，沒辦法比。` : ''}</p>
+     <button class="btn block secondary" id="cx-ok" style="margin-top:12px">知道了</button>`,
+    (el, close) => {
+      el.querySelector('#cx-ok').onclick = close
+      el.querySelectorAll('[data-cross-pick]').forEach(
+        (b) =>
+          (b.onclick = async () => {
+            const p = await idb.picks.get(b.dataset.crossPick)
+            if (!p) return toast('找不到這筆點貨紀錄（可能被刪掉了）')
+            close()
+            state.pick = p
+            go('pick-result')
+          }),
+      )
+    },
+  )
+}
+/** 點貨單那一頁的輸入框（render 之後綁） */
+function bindPickInputs() {
+  if (state.view !== 'pick-edit' || !state.pick) return
+  const p = state.pick
+  document.getElementById('pk-ref')?.addEventListener('input', (e) => {
+    p.ref = clip(e.target.value, 40)
+    pickSave(p)
+  })
+  const q = document.getElementById('pk-q')
+  if (q) {
+    let timer = 0
+    q.addEventListener('input', () => {
+      state.pickQ = q.value
+      clearTimeout(timer)
+      timer = setTimeout(async () => {
+        const box = document.getElementById('pk-results')
+        if (!box || state.pick !== p) return
+        box.innerHTML = pickResultsHtml(await pickCtx(), q.value)
+        glueTails(box)
+      }, 120)
+    })
+  }
+  for (const id of ['pk-cam', 'pk-album'])
+    document.getElementById(id)?.addEventListener('change', (e) => {
+      const f = e.target.files?.[0]
+      e.target.value = ''
+      if (f) readNoteFile(f)
+    })
+  document.querySelectorAll('[data-pk-got]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const l = p.lines.find((x) => x.id === input.dataset.pkGot)
+      if (!l) return
+      l.got = parseGot(input.value)
+      paintLine(l)
+      pickSave(p)
+    })
+    input.addEventListener('focus', () => input.select())
+  })
+  if (state.pickFlash) {
+    const id = state.pickFlash
+    state.pickFlash = null
+    requestAnimationFrame(() => flashLine(id))
+  }
+}
+
 async function render() {
   const html =
     state.view === 'home'
@@ -2911,7 +3982,13 @@ async function render() {
                         ? await viewCatalog()
                         : state.view === 'quality'
                           ? await viewQuality()
-                          : await viewSettings()
+                          : state.view === 'pick'
+                            ? await viewPick()
+                            : state.view === 'pick-edit'
+                              ? await viewPickEdit()
+                              : state.view === 'pick-result'
+                                ? await viewPickResult()
+                                : await viewSettings()
   // 放大看照片時，重畫畫面不要讓位置跳回左上角
   const vs = document.querySelector('.viewer-scroll')
   const keep = vs ? { x: vs.scrollLeft / Math.max(1, vs.scrollWidth), y: vs.scrollTop / Math.max(1, vs.scrollHeight) } : null
@@ -2936,7 +4013,7 @@ async function render() {
  * 一個字單獨掉到下一行（「秒。」「選」「號）」）：把每一段說明最後 3 個字黏在一起，不在中間換行。
  * CSS 的 text-wrap: pretty 對中文常常沒效（iPhone 的 Safari 舊版也不支援），所以畫完再處理一次；不用量字的位置，很快。
  */
-const GLUE_SEL = 'p, li, .meta, .footnote, .subtitle, .sheet-sub, .hint-card > div, .doubt-reason, .setup-card p'
+const GLUE_SEL = 'p, li, .meta, .footnote, .subtitle, .sheet-sub, .hint-card > div, .doubt-reason, .setup-card p, .pk-name, .pk-tname, .pk-rrow .title, .pk-res .title, .pk-cross-row .title'
 function glueTails(root) {
   for (const el of root.querySelectorAll(GLUE_SEL)) {
     if ((el.textContent || '').length < 14) continue
@@ -4269,12 +5346,19 @@ async function wipeLocal(msg) {
   await idb.sessions.clear()
   await idb.items.clear()
   await idb.samples.clear()
+  await idb.picks.clear().catch(() => {})
+  // 交叉比對的結果裡有產品名稱（公司資料）：一起清掉
+  ls.set(LS.pickCrossLast, '')
   itemsCache = null
+  picksCache = null
+  state.pick = null
   state.session = null
   toast(msg)
   go('home')
 }
-const SYNC_STORES = { session: idb.sessions, item: idb.items, sample: idb.samples, erp: idb.erp }
+// pick：點貨紀錄（4.7）。雲端的程式碼不用改：push／pull 本來就收任何鍵（只有 erp: 限擁有者、管理員）；
+// 舊版 App 收到 pick: 會略過（不認得的種類 applyRemote 回 false），不會出錯
+const SYNC_STORES = { session: idb.sessions, item: idb.items, sample: idb.samples, erp: idb.erp, pick: idb.picks }
 const tOf = (v) => v.updatedAt || v.createdAt || 0
 /**
  * 盤點紀錄（第 2 版格式，v:2）：只傳資料，照片另外一筆一張（photo:盤點ID:照片ID），下載時先拿資料、打開那次盤點才抓照片。
@@ -4287,9 +5371,14 @@ async function encodeRecord(kind, v, { full = false } = {}) {
   if (kind === 'session') return { ...v, v: 2, photos: v.photos.map(({ blob, lost, pending, up, ...p }) => p) }
   if (kind === 'item') return { ...v, photo: undefined, photoB64: v.photo ? await blobToBase64(v.photo) : '' }
   if (kind === 'erp') return { ...v, blob: undefined } // 正航產品表：純資料
+  if (kind === 'pick') {
+    const { _syncT, ...rest } = v // 點貨紀錄：純資料（沒有客戶名稱、價格）
+    return rest
+  }
   return { ...v, blob: undefined, b64: await blobToBase64(v.blob) }
 }
 function decodeRecord(kind, d) {
+  if (kind === 'pick') return normPick(d)
   if (kind === 'session')
     return {
       ...d,
@@ -4377,6 +5466,14 @@ async function applyRemote(rec) {
       toast('這次盤點在另一台被刪掉了')
       go('home')
     }
+    if (kind === 'pick') {
+      picksCache = null
+      if (state.pick?.id === id && ['pick-edit', 'pick-result'].includes(state.view)) {
+        toast('這筆點貨紀錄在另一台被刪掉了')
+        state.pick = null
+        go('pick')
+      }
+    }
     return true
   }
   if (!rec.d) return false
@@ -4418,6 +5515,13 @@ async function applyRemote(rec) {
     state.session = v
     if (state.view === 'review') toast('另一台更新了這次盤點')
   }
+  if (kind === 'pick') {
+    picksCache = null
+    // 正在看結果：換成新的；正在點（改）同一張：不打斷，這台存檔時以比較晚改的為準
+    if (state.pick?.id === id && state.view !== 'pick-edit') state.pick = v
+  }
+  // 別台匯入了新的正航產品表：下次用的時候重新讀（以前要重新打開 App 才看得到）
+  if (kind === 'erp') erpCache = undefined
   return true
 }
 /** 同步一次（同時只跑一個）：先上傳、再下載 */
@@ -4443,6 +5547,8 @@ async function syncNow(report = () => {}) {
     for (const it of await itemsAll(true)) if (tOf(it) !== it._syncT) jobs.push(['item', it])
     for (const sm of await idb.samples.all().catch(() => [])) if (tOf(sm) !== sm._syncT) jobs.push(['sample', sm])
     for (const e of await idb.erp.all().catch(() => [])) if (tOf(e) !== e._syncT) jobs.push(['erp', e])
+    // 點貨紀錄：按過「完成」的才傳（點到一半的只在這台）
+    for (const pk of await idb.picks.all().catch(() => [])) if (pk.doneAt && tOf(pk) !== pk._syncT) jobs.push(['pick', pk])
     const settingsAt = Number(ls.get(LS.settingsAt, '0'))
     const settingsDirty = settingsAt && String(settingsAt) !== ls.get(LS.settingsSyncT)
     const deleted = readJson(LS.deleted, [])
@@ -4541,19 +5647,29 @@ async function syncNow(report = () => {}) {
     }
     ls.set(LS.lastSync, String(Date.now()))
     // 剛從頭下載過一次，就不用再「重新下載全部」（不然剛加入的人會下載兩次，等很久）
-    if (fromStart) ls.set(LS.fullPullDone, '1')
+    if (fromStart) {
+      ls.set(LS.fullPullDone, '1')
+      ls.set(LS.pickPullDone, '1')
+    }
+    // 點貨紀錄（4.7）：更新前的舊版 App 下載到別人的點貨紀錄會略過、而且不會再下載一次 → 更新後從頭補拿一次
+    // （只在雲端是新版程式碼時做：新版不帶照片，很快；舊版雲端從頭拿會連照片一起下載，太慢）
+    const needPicks = ls.get(LS.pickPullDone) !== '1' && serverV2()
+    if (!serverV2()) ls.set(LS.pickPullDone, '1')
     // 自動從雲端重新下載一次全部：這台有照片不見了（轉新存法時發現），或剛更新到 4.0.7（之前同步卡住，這台可能少了資料）
-    if (ls.get(LS.needRepair) === '1' || ls.get(LS.fullPullDone) !== '1') {
+    if (ls.get(LS.needRepair) === '1' || ls.get(LS.fullPullDone) !== '1' || needPicks) {
       onProgress('檢查有沒有少的紀錄…')
       ls.set(LS.needRepair, '')
       ls.set(LS.fullPullDone, '1')
+      ls.set(LS.pickPullDone, '1')
       const r = await fullPull({ quiet: true }).catch(() => null)
       if (r?.records || r?.photos) changed = true
     }
     state.syncState = ''
     if (changed) {
       itemsCache = null
-      if (['home', 'items', 'item', 'report', 'locations', 'review'].includes(state.view)) render()
+      picksCache = null
+      // 點貨正在點的那一頁（pick-edit）不重畫：不要打斷輸入
+      if (['home', 'items', 'item', 'report', 'locations', 'review', 'pick', 'pick-result'].includes(state.view)) render()
     } else if (state.view === 'home') render()
     // 正在看的那次盤點先抓照片，其他的在背景慢慢抓
     if (state.session?.photos.some((p) => p.pending)) fetchPhotos(state.session).catch(() => {})
@@ -6213,6 +7329,125 @@ $app.addEventListener('click', async (e) => {
       return locationSheet(-1)
     case 'loc-print':
       return printLabels()
+    // ── 點貨對單（4.7 測試版） ──
+    case 'pk-new': {
+      // 先不存：加了品項或填了單號才存（按進來又返回，不會留下一張空的）
+      const c = currentCounter()
+      state.pick = { id: uid(), kind: d.kind === 'in' ? 'in' : 'out', ref: '', createdAt: Date.now(), by: c?.name || '', byId: c?.id || '', lines: [] }
+      state.pickQ = ''
+      return go('pick-edit')
+    }
+    case 'pk-open': {
+      const p = await idb.picks.get(d.id)
+      if (!p) return toast('找不到這筆點貨紀錄（可能在別台被刪掉了）')
+      state.pick = p
+      state.pickQ = ''
+      return go(!p.doneAt && canEdit() ? 'pick-edit' : 'pick-result')
+    }
+    case 'pk-more-list':
+      state.pickMore = (state.pickMore || 0) + 30
+      return render()
+    case 'pk-add': {
+      const ix = await pickCtx()
+      const r = d.no ? ix.byNo.get(canon(d.no)) : ix.itemById.get(d.iid) ? { it: ix.itemById.get(d.iid) } : null
+      if (!r) return toast('找不到這個產品，請重新搜尋')
+      return addPickLine(r)
+    }
+    case 'pk-step': {
+      const l = pickLine(d.id)
+      if (!l) return
+      l.got = Math.max(0, Math.min(99999, (l.got ?? l.qty ?? 0) + Number(d.d || 0)))
+      paintLine(l)
+      return pickSave()
+    }
+    case 'pk-done': {
+      const l = pickLine(d.id)
+      if (!l) return
+      if (l.done) l.done = false
+      else {
+        // 單子數量沒讀到（AI 看不清楚）：先補數量，再算點好了
+        if (l.qty == null)
+          return editLineQty(l, () => {
+            if (l.got == null) l.got = l.qty
+            l.done = true
+          })
+        // 實拿沒改＝跟單子一樣
+        if (l.got == null) l.got = l.qty
+        l.done = true
+      }
+      paintLine(l)
+      return pickSave()
+    }
+    case 'pk-qty': {
+      const l = pickLine(d.id)
+      return l && editLineQty(l)
+    }
+    case 'pk-more': {
+      const l = pickLine(d.id)
+      return l && lineMoreSheet(l)
+    }
+    case 'pk-assign': {
+      const l = pickLine(d.id)
+      return l && assignLine(l)
+    }
+    case 'pk-remove': {
+      const l = pickLine(d.id)
+      return l && removeLine(l)
+    }
+    case 'pk-finish': {
+      const p = state.pick
+      if (!p) return
+      if (!p.lines.length) return toast('還沒有品項：先把單子上的品項加進來')
+      if (p.lines.some((l) => !l.done)) return finishPickSheet(p)
+      return finishPick(p)
+    }
+    case 'pk-discard': {
+      const p = state.pick
+      if (!p) return go('pick')
+      if (p.lines.length && !confirm(`刪掉這張點貨單？已經加的 ${p.lines.length} 項都會刪掉。`)) return
+      p._gone = true
+      if (pickSaving) await pickSaving
+      await idb.picks.del(p.id).catch(() => {})
+      if (p._syncT) tombstone(`pick:${p.id}`)
+      picksCache = null
+      state.pick = null
+      toast('已刪掉這張點貨單')
+      return go('pick')
+    }
+    case 'pk-reopen':
+      if (!state.pick) return go('pick')
+      state.pickQ = ''
+      return go('pick-edit')
+    case 'pk-delete': {
+      if (!canManage()) return toast('只有擁有者或管理員可以刪點貨紀錄')
+      const p = state.pick
+      if (!p || !confirm(`刪除這筆點貨紀錄（${PICK_KIND[p.kind] || '點貨'}${p.ref ? `・${p.ref}` : ''}）？${syncReady() ? '\n有開多台同步：大家的手機都會一起刪掉，' : '\n'}交叉比對也不會再算它。`)) return
+      p._gone = true
+      await idb.picks.del(p.id)
+      tombstone(`pick:${p.id}`)
+      picksCache = null
+      state.pick = null
+      toast('已刪除這筆點貨紀錄')
+      return go('pick')
+    }
+    case 'pk-copy': {
+      const p = state.pick
+      if (!p) return
+      try {
+        await navigator.clipboard.writeText(pickText(p, await pickCtx()))
+        return toast('已複製：到 LINE 貼上就好')
+      } catch {
+        return toast('這個瀏覽器不讓複製，請直接截圖')
+      }
+    }
+    case 'pk-no-ai':
+      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰' : syncReady() ? '先請擁有者到「設定」把 AI 金鑰放到雲端，或到「設定」貼上自己的 Gemini API Key；打編號、搜品名不用 AI' : '先到「設定」貼上 Gemini API Key，才能拍單子讓 AI 讀；打編號、搜品名不用 AI')
+    case 'pk-cross-last': {
+      if (!canManage()) return toast('交叉比對只有擁有者或管理員看得到')
+      const last = readJson(LS.pickCrossLast, null)
+      if (!last) return toast('還沒有比對結果：下次匯入正航產品表時會自動比對')
+      return crossListSheet(last)
+    }
   }
 })
 
@@ -6227,6 +7462,14 @@ function bindInputs() {
     await save()
     toast(e.target.checked ? '已當成標準答案：到「AI 準不準」可以拿來考 AI' : '已取消標準答案')
   })
+  // 點貨交叉比對（測試版）：只在這台、只有擁有者／管理員能開（不同步：匯入正航的人自己決定要不要比）
+  document.getElementById('rule-pick-cross')?.addEventListener('change', (e) => {
+    if (!canManage()) return render()
+    ls.set(LS.pickCross, e.target.checked ? '1' : '')
+    toast(e.target.checked ? '已開啟：下次匯入正航產品表時會跟點貨紀錄比對（第一次只記基準）' : '已關閉：匯入正航時不比對')
+    render()
+  })
+  bindPickInputs()
   for (const [id, k] of [
     ['rule-blind', LS.blind],
     ['rule-recount', LS.recount],
@@ -6297,9 +7540,11 @@ function bindInputs() {
 const photosAtRisk = () => state.view === 'capture' && !!state.session?.photos.length
 const safeToReload = () =>
   // 只在清單類的頁面重新整理（盤點結果、品項頁、拍照頁等你換頁再說）
-  ['home', 'items', 'lookup', 'settings', 'report', 'catalog', 'locations', 'quality'].includes(state.view) &&
+  ['home', 'items', 'lookup', 'settings', 'report', 'catalog', 'locations', 'quality', 'pick', 'pick-result'].includes(state.view) &&
   !photosAtRisk() &&
   !state.busy &&
+  !state.pickBusy &&
+  !document.querySelector('.crop-wrap') &&
   !state.refining &&
   !state.lookup?.busy &&
   !state.moving &&
