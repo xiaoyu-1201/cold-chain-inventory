@@ -2584,13 +2584,33 @@ h2,
   background: var(--red-soft);
   color: #a3191f;
 }
-.pk-chip.none {
+.pk-chip.none,
+.pk-chip.guess {
   background: var(--amber-soft);
   color: #6e4100;
 }
+/* 卡片上的狀態（「少 1 個」）：大一點、粗一點，一眼看得到 */
+.pk-chip.pk-state {
+  padding: 2px 10px;
+  font-size: 15px;
+}
+/* 紅色字（品項頁的盤虧「-6」、刪除按鈕）在淺色模式再深一點：對比 4.5 以上 */
+:root {
+  --red-ink: #a8222a;
+}
+.badge.bad,
+.btn.danger {
+  color: var(--red-ink);
+}
 @media (prefers-color-scheme: dark) {
+  :root {
+    --red-ink: #ff8a8e;
+  }
   .pk-chip.ok {
     color: var(--green);
+  }
+  .pk-chip.guess {
+    color: var(--amber);
   }
   .pk-chip.bad {
     color: #ff9ca0;
@@ -2808,9 +2828,16 @@ h2,
   background: color-mix(in srgb, var(--red) 9%, var(--card));
   box-shadow: inset 4px 0 0 var(--red);
 }
-.pk-line.st-none {
+.pk-line.st-none,
+.pk-line.st-guess {
   background: color-mix(in srgb, var(--amber-dot) 12%, var(--card));
   box-shadow: inset 4px 0 0 var(--amber-dot);
+}
+.pk-top .pk-cap {
+  margin-top: 2px;
+}
+.pk-none .btn.small.plain {
+  background: var(--card);
 }
 .pk-top {
   display: flex;
@@ -2862,9 +2889,10 @@ h2,
   font-size: 14px;
   overflow-wrap: anywhere;
 }
+/* 下面一排：「單子」「實拿」放一起（好對照），「點好了」靠右 */
 .pk-bot {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: end;
   gap: 8px;
   margin-top: 12px;
@@ -2873,11 +2901,37 @@ h2,
 .pk-got {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 3px;
   min-width: 0;
 }
-.pk-got {
-  align-items: center;
+.pk-bot .pk-done {
+  justify-self: end;
+}
+/* 對不到產品、AI 配的還沒確認：「點好了」變淡（按了會說要先選產品） */
+.pk-done.off {
+  opacity: 0.45;
+}
+/* 數字框依位數縮字：4 位數（1195）、小數（12.5）也不會被切掉 */
+.pk-need-num[data-len='4'],
+.pk-step input[data-len='4'] {
+  font-size: 19px;
+}
+.pk-need-num[data-len='5'],
+.pk-step input[data-len='5'] {
+  font-size: 16px;
+}
+.pk-need-num[data-len='6'],
+.pk-step input[data-len='6'] {
+  font-size: 15px;
+}
+.pk-need-num[data-len='7'],
+.pk-need-num[data-len='8'],
+.pk-need-num[data-len='9'],
+.pk-step input[data-len='7'],
+.pk-step input[data-len='8'],
+.pk-step input[data-len='9'] {
+  font-size: 13px;
 }
 .pk-cap {
   color: var(--text-2);
@@ -2902,7 +2956,7 @@ h2,
   height: 48px;
 }
 .pk-step input {
-  width: 54px;
+  width: 58px;
   height: 48px;
   font-size: 24px;
 }
@@ -2968,15 +3022,16 @@ h2,
     width: 44px;
   }
   .pk-step input {
-    width: 46px;
+    width: 54px;
   }
 }
 @media (max-width: 340px) {
   .pk-bot {
     grid-template-columns: auto minmax(0, 1fr);
   }
-  .pk-done {
+  .pk-bot .pk-done {
     grid-column: 1 / -1;
+    justify-self: stretch;
   }
 }
 /* 結果頁：一頁看得完、適合截圖 */
@@ -3072,7 +3127,8 @@ h2,
 .pk-rrow.st-bad {
   box-shadow: inset 4px 0 0 var(--red);
 }
-.pk-rrow.st-none {
+.pk-rrow.st-none,
+.pk-rrow.st-guess {
   box-shadow: inset 4px 0 0 var(--amber-dot);
 }
 .pk-rrow .title {
@@ -3081,8 +3137,53 @@ h2,
 .pk-rrow .qty small {
   white-space: nowrap;
 }
+/* 手機：總結卡 → 清單 → 複製（截圖時清單緊接在數字下面）；電腦：左邊總結卡＋複製（固定），右邊清單 */
+.pk-result {
+  display: flex;
+  flex-direction: column;
+}
+.pk-res-side {
+  display: contents;
+}
+.pk-res-card {
+  order: 1;
+}
+.pk-res-lists {
+  order: 2;
+}
 .pk-res-actions {
+  order: 3;
   margin-top: 16px;
+}
+.pk-edited {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.pk-edited .ico {
+  flex: none;
+}
+.pk-ref-tip {
+  margin: 6px 16px 0;
+}
+/* 數量面板：打錯在面板裡說；快速數量平分一整排（每個至少 44px） */
+.q-err {
+  margin: 8px 4px 0;
+  color: var(--red-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+.q-quick {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(44px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.q-quick .chip {
+  justify-content: center;
+  padding-inline: 4px;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
 }
 /* 交叉比對（測試版） */
 .pk-cross-sum {
@@ -3145,24 +3246,35 @@ h2,
   background: #000000;
   color: #ffffff;
 }
+/* 上面那排、說明、下面按鈕都限制在 560px 寬（電腦上「取消」才不會貼在螢幕最左邊） */
 .crop-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: calc(var(--safe-t) + 8px) 12px 4px;
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  /* 左右 16px：跟下面的說明、送出鈕對齊 */
+  padding: calc(var(--safe-t) + 8px) 16px 4px;
 }
-.crop-bar .btn.crop-plain {
+.crop-wrap .btn.crop-plain {
   background: rgba(255, 255, 255, 0.16);
   color: #ffffff;
+}
+.crop-wrap .btn.crop-plain.on {
+  background: #ffd60a;
+  color: #2b2400;
 }
 .crop-title {
   font-size: 17px;
   text-align: center;
 }
 .crop-tip {
-  margin: 4px 16px 0;
-  color: rgba(255, 255, 255, 0.82);
+  width: calc(100% - 32px);
+  max-width: 528px;
+  margin: 4px auto 0;
+  color: rgba(255, 255, 255, 0.85);
   font-size: 14px;
   text-align: center;
 }
@@ -3182,7 +3294,9 @@ h2,
 }
 .crop-img img {
   max-width: calc(100vw - 52px);
-  max-height: calc(100dvh - var(--safe-t) - var(--safe-b) - 250px);
+  /* 舊的瀏覽器不認得 dvh：先用 vh */
+  max-height: calc(100vh - var(--safe-t) - var(--safe-b) - 300px);
+  max-height: calc(100dvh - var(--safe-t) - var(--safe-b) - 300px);
   width: auto;
   height: auto;
 }
@@ -3196,14 +3310,148 @@ h2,
   position: absolute;
   box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.58);
 }
-.crop-rect {
+/* 三層：框裡面（拖＝移動，遮住欄位模式＝畫遮罩）→ 遮罩 → 黃框的角和邊（最上面，永遠拖得到） */
+.crop-area {
   position: absolute;
-  border: 2px solid #ffd60a;
+  z-index: 1;
   cursor: move;
   touch-action: none;
 }
+.crop-area.drawing {
+  cursor: crosshair;
+}
+.crop-masks {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.crop-rect {
+  position: absolute;
+  z-index: 3;
+  border: 2px solid #ffd60a;
+  pointer-events: none;
+}
 .crop-rect.dragging {
   border-style: dashed;
+}
+.crop-mask {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.86);
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.55);
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+}
+.crop-mlabel {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  pointer-events: none;
+}
+.crop-mx {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+}
+.crop-mh {
+  position: absolute;
+  top: 50%;
+  width: 44px;
+  height: 72px;
+  padding: 0;
+  border: 0;
+  background: none;
+  display: grid;
+  place-items: center;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.crop-mh.l {
+  left: 0;
+  transform: translate(-50%, -50%);
+}
+.crop-mh.r {
+  right: 0;
+  transform: translate(50%, -50%);
+}
+.crop-mh span {
+  width: 8px;
+  height: 36px;
+  border-radius: 4px;
+  background: #ffffff;
+  border: 1.5px solid #000000;
+}
+.crop-mh:focus-visible {
+  outline: 3px solid #ffd60a;
+  outline-offset: -6px;
+}
+.crop-tools {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.crop-tools .btn {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-inline: 8px;
+}
+.crop-tools .btn[disabled] {
+  opacity: 0.4;
+}
+/* 第一次用的說明：示意圖＋三步 */
+.crop-help {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: calc(var(--safe-t) + 16px) 16px calc(var(--safe-b) + 16px);
+  background: rgba(0, 0, 0, 0.72);
+  overflow-y: auto;
+}
+.crop-help-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 18px;
+  border-radius: 18px;
+  background: #ffffff;
+  color: #15181f;
+}
+.crop-help-title {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 20px;
+}
+.crop-help-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  background: #3a3a3c;
+}
+.crop-help-card ol {
+  margin: 12px 0 14px;
+  padding-left: 20px;
+  color: #3a3d46;
+  font-size: 15px;
+  line-height: 1.6;
+}
+.crop-help-card b {
+  color: #15181f;
 }
 .crop-h {
   position: absolute;
@@ -3215,6 +3463,27 @@ h2,
   display: grid;
   place-items: center;
   touch-action: none;
+  pointer-events: auto;
+}
+.crop-h.w,
+.crop-h.e {
+  top: 50%;
+  height: 72px;
+  cursor: ew-resize;
+}
+.crop-h.w {
+  left: 0;
+  transform: translate(-50%, -50%);
+}
+.crop-h.e {
+  right: 0;
+  transform: translate(50%, -50%);
+}
+.crop-h.w span,
+.crop-h.e span {
+  width: 10px;
+  height: 40px;
+  border-radius: 5px;
 }
 .crop-h span {
   width: 22px;
@@ -3357,24 +3626,41 @@ h2,
     padding: 10px 0;
   }
   /* 結果：左邊總結卡＋複製，右邊清單 */
+  /* 結果：左邊總結卡＋複製（捲動時固定，不會左輕右重），右邊清單 */
   .pk-result {
     display: grid;
     grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-    grid-template-areas: 'card lists' 'actions lists';
-    grid-template-rows: auto 1fr;
     column-gap: 28px;
     align-items: start;
   }
-  .pk-res-card {
-    grid-area: card;
-  }
-  .pk-res-lists {
-    grid-area: lists;
+  .pk-res-side {
+    display: block;
+    position: sticky;
+    top: calc(var(--safe-t) + 16px);
   }
   .pk-res-lists > .section-title:first-child {
     margin-top: 0;
   }
-  .pk-res-actions {
-    grid-area: actions;
+  /* 左欄的數字排成 2×2、字放大：左欄不會比右邊清單輕一大截 */
+  .pk-res-card {
+    padding: 20px;
+  }
+  .pk-res-card .pk-verdict {
+    margin: 18px 0 16px;
+    font-size: 28px;
+  }
+  .pk-res-card .pk-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .pk-res-card .pk-stat {
+    gap: 4px;
+    padding: 16px 14px 14px 16px;
+  }
+  .pk-res-card .pk-stat b {
+    font-size: 40px;
+  }
+  .pk-res-card .pk-stat span {
+    font-size: 15px;
   }
 }
