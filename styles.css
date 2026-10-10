@@ -2702,9 +2702,27 @@ h2,
 .row.near-note::before {
   display: none;
 }
-/* 新手機：「我收到連結碼了」放最前面 */
+/* 新手機：「貼上邀請並加入」放最前面（4.7.6）：小字不要貼著按鈕；按鈕、手動貼上那一排手機滿版、寬螢幕最多 560px（不要拉到兩欄那麼寬） */
 .join-first {
   margin-bottom: 8px;
+}
+.join-first .footnote {
+  margin: 12px 0 0;
+}
+.join-first > .btn,
+.join-first > .row-actions {
+  width: 100%;
+  max-width: 560px;
+}
+.fast-hint {
+  margin-bottom: 12px;
+}
+/* 邀請同事：整段訊息用一般字型、高度跟著內容（不用在框裡捲才看到連結） */
+.field.invite-text {
+  min-height: 0;
+  font-size: 15px;
+  line-height: 1.55;
+  resize: none;
 }
 @media (max-width: 767px) {
   /* 查型號頁上面那條空的導覽列（手機上沒東西可放） */

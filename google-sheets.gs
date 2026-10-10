@@ -30,7 +30,8 @@
  * 更新方法：整段重新貼上 → 存檔 →「部署」→「管理部署作業」→ 鉛筆 → 版本選「新版本」→ 部署（網址不會變）。
  *
  * 4.7.6：同步變快——很多筆資料、照片「同時」讀寫（Drive API），不再一筆一筆來；
- * 記住目錄檔的位置，不用每次搜尋。Drive API 用不了會自動改回舊方法（結果一樣，只是比較慢）。
+ * 記住目錄檔的位置，不用每次搜尋。Drive API 用不了會自動改回舊方法（結果一樣，只是比較慢），
+ * App 的設定頁會提醒擁有者：左邊「服務」→ 加入「Drive API」→ 再部署一次新版本，就會打開。
  * 第一次更新到這一版，Google 可能會再問一次授權，按允許即可。
  */
 const RAW = '盤點紀錄'
@@ -96,8 +97,9 @@ function doPost(e) {
   }
   if (who && data.action === 'ai') return json(canEdit ? Object.assign(aiProxy(data, P, props, who), { ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
   // ver 2：盤點的照片分開存（photo:盤點ID:照片ID），下載只拿資料，照片用 photos 另外要；App 看到 ver 才改用新格式上傳
-  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, ai: ai, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster })
-  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, ai: ai, me: me, roster: roster }))
+  // fast：有沒有用到「同時讀寫」（4.7.6）；沒有的話，App 會教擁有者打開 Drive API
+  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, ai: ai, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster, fast: driveApiEnabled() })
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, ai: ai, me: me, roster: roster, fast: driveApiEnabled() }))
   if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, ai: ai, me: me }))
   if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
@@ -361,36 +363,48 @@ function manage(data, props, P, who) {
  * 目錄：{ 鍵: { t: 裝置上的修改時間, s: 收到的順序（這邊的時間）, d: 哪一台送的, f: 檔案 ID, del: 是否已刪除 } }
  * 鍵例如 session:xxx（一次盤點，含照片）、item:xxx（品項）、sample:xxx（樣品照）、settings（儲位、品項清單）
  */
+/** Drive 說「找不到這個 ID」（真的被刪了）；其他錯誤（忙線、呼叫太多次）都當成一時出錯 */
+const NOT_FOUND = /No item with the given ID|not found|找不到/i
 function syncFolder(P) {
   const props = PropertiesService.getScriptProperties()
   const id = P.SYNC_FOLDER
   if (id) {
-    try {
-      return DriveApp.getFolderById(id)
-    } catch (e) {
-      /* 資料夾被刪了：重新建立 */
+    // Drive 一時出錯（忙線、呼叫太多次）不能當成「資料夾被刪了」：不然會另建一個空資料夾，
+    // 雲端的資料看起來全部不見（4.7.6 code review）。多試兩次；確定是「找不到」才重建，其他錯誤整個請求失敗、App 等一下再試
+    let err = null
+    for (let i = 0; i < 3; i++) {
+      try {
+        return DriveApp.getFolderById(id)
+      } catch (e) {
+        err = e
+        if (i < 2) Utilities.sleep(500)
+      }
     }
+    if (!NOT_FOUND.test(String((err && err.message) || err))) throw err
   }
   const folder = DriveApp.createFolder('拍照盤點同步資料（不要刪）')
   props.setProperty('SYNC_FOLDER', folder.getId())
   P.SYNC_FOLDER = folder.getId()
-  delete P.SYNC_INDEX
-  props.deleteProperty('SYNC_INDEX')
   return folder
 }
 /**
  * 讀目錄檔（4.7.6 加快）：記住 index.json 的檔案 ID，直接打開，
- * 不用每次先開資料夾、再用檔名搜尋（每次同步省 1 秒左右）；記的檔案不見了才用舊方法找。
+ * 不用每次先開資料夾、再用檔名搜尋（每次同步省 1 秒左右）；打不開才用檔名找。
+ * 還沒同步過（沒有資料夾）：回空的，不先建資料夾（建資料夾留給上傳，在鎖裡面做）。
  */
 function readIndex(P) {
   if (P.SYNC_INDEX) {
+    let f = null
     try {
-      const f = DriveApp.getFileById(P.SYNC_INDEX)
-      return { file: f, map: JSON.parse(f.getBlob().getDataAsString() || '{}') }
+      f = DriveApp.getFileById(P.SYNC_INDEX)
     } catch (e) {
-      /* 檔案被刪了：下面用檔名找 */
+      // 確定被刪了才往下用檔名找；Drive 一時出錯：整個請求失敗、App 等一下再試
+      // （不能當成空的：上傳會蓋出一份只有新資料的目錄，大家的資料看起來就不見了）
+      if (!NOT_FOUND.test(String((e && e.message) || e))) throw e
     }
+    if (f) return { file: f, map: JSON.parse(f.getBlob().getDataAsString() || '{}') }
   }
+  if (!P.SYNC_FOLDER) return { file: null, map: {} }
   const files = syncFolder(P).getFilesByName('index.json')
   if (!files.hasNext()) return { file: null, map: {} }
   const file = files.next()
@@ -400,36 +414,57 @@ function readIndex(P) {
 }
 function writeIndex(P, idx) {
   const text = JSON.stringify(idx.map)
-  if (idx.file) return idx.file.setContent(text)
-  idx.file = syncFolder(P).createFile(Utilities.newBlob(text, 'application/json', 'index.json'))
-  PropertiesService.getScriptProperties().setProperty('SYNC_INDEX', idx.file.getId())
-  P.SYNC_INDEX = idx.file.getId()
+  if (idx.file) idx.file.setContent(text)
+  else idx.file = syncFolder(P).createFile(Utilities.newBlob(text, 'application/json', 'index.json'))
+  const id = idx.file.getId()
+  if (P.SYNC_INDEX !== id) {
+    PropertiesService.getScriptProperties().setProperty('SYNC_INDEX', id)
+    P.SYNC_INDEX = id
+  }
 }
 
 // ───────────── 一次同時讀寫很多個檔案（4.7.6：同步變快的主要原因） ─────────────
 /**
  * 以前每一筆資料、每一張照片都要一個一個跟雲端硬碟要（一筆約 0.3～1 秒），
  * 現在用 Drive API 同時送出去（UrlFetchApp.fetchAll），幾十筆也只要一兩秒。
- * Drive API 用不了（例如 Google 那邊沒開）就自動改回一個一個來，結果一樣、只是比較慢；
- * 用不了的情況會記 6 小時，不會每次都先試一次。
- * 會用到「連到外部網站」的每日次數（一般帳號每天 2 萬次），一家店用不完。
+ * - Drive API 用不了（例如 Google 那邊沒開）：自動改回一個一個來，結果一樣、只是比較慢；記 6 小時，不會每次都先試。
+ *   擁有者可以在 Apps Script 左邊「服務」加入「Drive API」打開它。
+ * - 每讀、建、丟一個檔算一次「連到外部網站」（一般帳號每天 2 萬次，跟共用 AI 金鑰共用）：
+ *   同時讀寫每天最多用 1 萬次，超過就改回一個一個來，剩下的留給 AI。
  */
 const DRIVE_API = 'https://www.googleapis.com/drive/v3/files'
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id'
-const FETCH_CHUNK = 20 // 一次同時送幾個（照片一張約 0.5 MB，不要一次太多）
+const FETCH_CHUNK = 20 // 一次同時送幾個
+const UPLOAD_GROUP_BYTES = 4e6 // 一次同時上傳最多約 4 MB（照片一張約 0.5 MB）
+const DRIVE_API_DAILY = 10000
+/** 今天用了幾次的鍵（Google 的每日次數照美國太平洋時間重算） */
+function driveApiDayKey() {
+  return 'DRIVE_API_N_' + Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyyMMdd')
+}
 function driveApiOn() {
   try {
-    return CacheService.getScriptCache().get('NO_DRIVE_API') !== '1'
+    const c = CacheService.getScriptCache()
+    return !c.get('NO_DRIVE_API') && Number(c.get(driveApiDayKey()) || 0) < DRIVE_API_DAILY
   } catch (e) {
     return true
   }
 }
-function driveApiOff(res) {
-  // 只有「Drive API 沒開、沒權限」才關掉；一時忙線（429、500）下次照樣試
+/** Google 那邊有沒有開 Drive API（沒試過、或關掉的原因不是「沒開」都算有） */
+function driveApiEnabled() {
+  try {
+    return CacheService.getScriptCache().get('NO_DRIVE_API') !== 'off'
+  } catch (e) {
+    return true
+  }
+}
+/** 關掉同時讀寫一陣子：res＝Drive API 的回覆（只有「沒開、沒權限」才關）；沒有 res＝整批送不出去 */
+function driveApiOff(res, seconds) {
+  // 一時忙線（429、500、403 太頻繁）不關，下次照樣試
   const text = res ? String(res.getContentText()).slice(0, 2000) : ''
   if (res && !(res.getResponseCode() === 403 && /accessNotConfigured|SERVICE_DISABLED|has not been used|is disabled|insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(text))) return
   try {
-    CacheService.getScriptCache().put('NO_DRIVE_API', '1', 21600)
+    // off＝Google 那邊沒開（App 會教擁有者打開）；busy＝次數用完或送不出去，等一下自己恢復
+    CacheService.getScriptCache().put('NO_DRIVE_API', res ? 'off' : 'busy', seconds || 21600)
   } catch (e) {
     /* 記不住就算了 */
   }
@@ -437,6 +472,13 @@ function driveApiOff(res) {
 /** 同時送一批請求；Drive API 用不了就回 null（呼叫的人改用一個一個來） */
 function fetchMany(requests) {
   if (!requests.length || !driveApiOn()) return null
+  try {
+    const c = CacheService.getScriptCache()
+    const k = driveApiDayKey()
+    c.put(k, String(Number(c.get(k) || 0) + requests.length), 21600)
+  } catch (e) {
+    /* 算不了就算了 */
+  }
   const token = ScriptApp.getOAuthToken()
   requests.forEach(function (r) {
     r.headers = Object.assign({ Authorization: 'Bearer ' + token }, r.headers || {})
@@ -445,7 +487,8 @@ function fetchMany(requests) {
   try {
     return UrlFetchApp.fetchAll(requests)
   } catch (e) {
-    driveApiOff(null)
+    // 每日次數用完：關 6 小時；其他（例如其中一個逾時）：關 10 分鐘
+    driveApiOff(null, /too many times|urlfetch|bandwidth|quota/i.test(String((e && e.message) || e)) ? 21600 : 600)
     return null
   }
 }
@@ -475,43 +518,48 @@ function readFiles(ids) {
   }
   return out
 }
-/** 建很多個檔案：items＝[{ name, text }]，回傳一樣順序的檔案 ID；有一個建不起來就丟錯誤（整批不算） */
+/** Drive API 建一個檔（multipart：先放檔名、資料夾，再放內容） */
+function uploadRequest(P, it) {
+  const boundary = 'b' + Utilities.getUuid().replace(/-/g, '')
+  const type = 'multipart/related; boundary=' + boundary
+  const meta = JSON.stringify({ name: it.name, mimeType: 'application/json', parents: [P.SYNC_FOLDER] })
+  const body = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + meta + '\r\n--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + it.text + '\r\n--' + boundary + '--'
+  // 直接給 Blob（不要轉成數字陣列：照片一張就是幾十萬個元素，很吃記憶體）
+  return { url: DRIVE_UPLOAD, method: 'post', contentType: type, payload: Utilities.newBlob(body, type) }
+}
+/**
+ * 建很多個檔案：items＝[{ name, text }]，回傳一樣順序的檔案 ID。
+ * 有一個建不起來就丟錯誤（整批不算，App 下次重傳）；這次已經建好的先丟到垃圾桶，不留沒人用的檔案。
+ */
 function createFiles(P, items) {
   const ids = []
-  let folder = null
-  for (let at = 0; at < items.length; at += FETCH_CHUNK) {
-    const part = items.slice(at, at + FETCH_CHUNK)
-    const boundary = 'b' + Utilities.getUuid().replace(/-/g, '')
-    const res =
-      P.SYNC_FOLDER && driveApiOn()
-      ? fetchMany(
-          part.map(function (it) {
-            const body =
-              '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' +
-              JSON.stringify({ name: it.name, mimeType: 'application/json', parents: [P.SYNC_FOLDER] }) +
-              '\r\n--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' +
-              it.text +
-              '\r\n--' + boundary + '--'
-            return { url: DRIVE_UPLOAD, method: 'post', contentType: 'multipart/related; boundary=' + boundary, payload: Utilities.newBlob(body).getBytes() }
-          }),
-        )
-      : null
-    part.forEach(function (it, i) {
-      const r = res && res[i]
-      let id = ''
-      if (r && r.getResponseCode() === 200) {
-        try {
-          id = JSON.parse(r.getContentText()).id || ''
-        } catch (e) {
-          id = ''
-        }
-      } else if (r) driveApiOff(r)
-      if (!id) {
-        folder = folder || syncFolder(P)
-        id = folder.createFile(Utilities.newBlob(it.text, 'application/json', it.name)).getId()
-      }
-      ids.push(id)
-    })
+  try {
+    let at = 0
+    while (at < items.length) {
+      // 一組最多 20 個、約 4 MB
+      let end = at
+      let bytes = 0
+      while (end < items.length && end - at < FETCH_CHUNK && (end === at || bytes + items[end].text.length <= UPLOAD_GROUP_BYTES)) bytes += items[end++].text.length
+      const part = items.slice(at, end)
+      at = end
+      const res = P.SYNC_FOLDER && driveApiOn() ? fetchMany(part.map((it) => uploadRequest(P, it))) : null
+      part.forEach(function (it, i) {
+        const r = res && res[i]
+        let id = ''
+        if (r && r.getResponseCode() === 200) {
+          try {
+            id = JSON.parse(r.getContentText()).id || ''
+          } catch (e) {
+            id = ''
+          }
+        } else if (r) driveApiOff(r)
+        if (!id) id = syncFolder(P).createFile(Utilities.newBlob(it.text, 'application/json', it.name)).getId()
+        ids.push(id)
+      })
+    }
+  } catch (e) {
+    trashFiles(ids)
+    throw e
   }
   return ids
 }
@@ -552,6 +600,12 @@ function syncPush(data, props, P, manager) {
   const lock = LockService.getScriptLock()
   lock.waitLock(30000)
   try {
+    // 鎖住後重新讀資料夾、目錄檔的位置（兩台同時第一次上傳，才不會各建一個資料夾）
+    ;['SYNC_FOLDER', 'SYNC_INDEX'].forEach(function (k) {
+      const v = props.getProperty(k)
+      if (v) P[k] = v
+      else delete P[k]
+    })
     const idx = readIndex(P)
     if (!P.SYNC_FOLDER) syncFolder(P) // 第一次同步：先建資料夾（新檔案要放在裡面）
     // 順序號一定越來越大（同一毫秒兩次上傳也不會重複），下載時才不會漏；鎖住後重新讀一次，別人剛寫的才不會被蓋掉
@@ -603,6 +657,11 @@ function syncPush(data, props, P, manager) {
         skipped.push(r.k) // 雲端已經有比較新的（別台改的）
         return
       }
+      // 同一台重送同一個版本（上傳逾時、App 沒收到回覆又送一次）：已經收過了，不用再建一次檔
+      if (!r.del && cur && cur.f && !cur.del && cur.t === r.t && cur.d === String(data.dev || '')) {
+        n++
+        return
+      }
       // 編輯者改了儲位、品項清單：盲盤、複盤規則照雲端原本的（沒有就不帶，別台就不會跟著改）
       if (r.k === 'settings' && !manager && !r.del && r.d && typeof r.d === 'object') {
         let old = {}
@@ -622,7 +681,11 @@ function syncPush(data, props, P, manager) {
       trash(cur)
       unwrite(r.k)
       const entry = { t: r.t, s: seq++, d: String(data.dev || ''), f: '', del: !!r.del }
-      if (!r.del) toWrite.push((writing[r.k] = { entry: entry, name: r.k.replace(/[^\w-]/g, '_') + '.json', text: JSON.stringify(r.d) }))
+      if (!r.del) {
+        const text = JSON.stringify(r.d)
+        if (isPhotoKey(r.k)) entry.z = text.length // 照片記大小：下載時先算好一次拿幾張，不用讀了又丟
+        toWrite.push((writing[r.k] = { entry: entry, name: r.k.replace(/[^\w-]/g, '_') + '.json', text: text }))
+      }
       idx.map[r.k] = entry
       // 刪掉一次盤點：它的照片也一起丟掉
       if (r.del && String(r.k).indexOf('session:') === 0) {
@@ -662,9 +725,14 @@ function syncPush(data, props, P, manager) {
   }
 }
 
-/** 下載：別台送來、比 since 新的；一次最多約 8 MB 或 150 筆，more＝還有（4.7.6：檔案同時讀，一次可以給比較多筆） */
-const PULL_MAX = 150
+/**
+ * 下載：別台送來、比 since 新的；一次最多約 8 MB、150 筆（同時讀用不了時 60 筆）或 20 秒，more＝還有。
+ * 4.7.6：檔案同時讀，一次可以給比較多筆；限時 20 秒，手機切到背景、網路斷掉時要重來的比較少
+ */
+const PULL_BUDGET_MS = 20000
 function syncPull(data, P) {
+  const started = Date.now()
+  const PULL_MAX = driveApiOn() ? 150 : 60
   const idx = readIndex(P)
   const since = Number(data.since) || 0
   const dev = String(data.dev || '')
@@ -683,7 +751,7 @@ function syncPull(data, P) {
   let next = since
   let i = 0 // all 裡第一筆還沒給的
   const full = function () {
-    return records.length && (size > 8e6 || records.length >= PULL_MAX)
+    return records.length && (size > 8e6 || records.length >= PULL_MAX || Date.now() - started > PULL_BUDGET_MS)
   }
   while (i < all.length && !full()) {
     // 這一輪：往後拿到 FETCH_CHUNK 筆要給的，一起讀（自己送的不用再下載，不算）
@@ -723,15 +791,28 @@ function syncPull(data, P) {
   return { ok: true, records: records, next: next, more: i < all.length }
 }
 
-/** 要照片：給一串 photo:盤點ID:照片ID，回傳有的那些（一次最多約 8 MB，more＝還有沒給的）；4.7.6：一次同時讀 12 張 */
+/**
+ * 要照片：給一串 photo:盤點ID:照片ID，回傳有的那些（一次最多約 8 MB 或 20 秒，more＝還有沒給的）。
+ * 4.7.6：照目錄記的大小（舊照片沒記，當 0.6 MB）先算好這一輪拿幾張（最多 12 張），一起讀
+ */
 function syncPhotos(data, P) {
+  const started = Date.now()
   const idx = readIndex(P)
   const keys = (data.keys || []).filter(isPhotoKey).slice(0, 200)
   const records = []
   let size = 0
   let i = 0
-  while (i < keys.length && !(records.length && size > 8e6)) {
-    const group = keys.slice(i, i + 12) // 照片一張約 0.5 MB
+  const full = function () {
+    return records.length && (size > 8e6 || Date.now() - started > PULL_BUDGET_MS)
+  }
+  while (i < keys.length && !full()) {
+    const group = []
+    let plan = size
+    for (let j = i; j < keys.length && group.length < 12 && (!group.length || plan <= 8e6); j++) {
+      group.push(keys[j])
+      const e = idx.map[keys[j]]
+      if (e && !e.del && e.f) plan += e.z || 6e5
+    }
     const texts = readFiles(
       group
         .map(function (k) {
@@ -745,7 +826,7 @@ function syncPhotos(data, P) {
         }),
     )
     for (const k of group) {
-      if (records.length && size > 8e6) break
+      if (full()) break
       i++
       const e = idx.map[k]
       if (!e || e.del || !e.f) {
