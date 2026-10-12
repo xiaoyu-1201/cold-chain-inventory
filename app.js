@@ -89,7 +89,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.7（10/12・複製到桌面 App）'
+const VERSION = '4.7.8（10/12・更新不清其他 App 暫存）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -9170,8 +9170,10 @@ async function forceUpdate() {
   }
   if (latest && latest === VERSION) return toast(`已經是最新版：${VERSION}`)
   toast(`更新到 ${latest || '最新版'}…`)
-  for (const r of (await navigator.serviceWorker?.getRegistrations?.()) || []) await r.unregister()
-  for (const k of await caches.keys()) await caches.delete(k)
+  // 同一個網址還有英文複習 App、培訓筆記：只解除、清掉盤點 App 自己的（4.7.8）
+  const scope = new URL('./', location.href).href
+  for (const r of (await navigator.serviceWorker?.getRegistrations?.()) || []) if (r.scope === scope) await r.unregister()
+  for (const k of await caches.keys()) if (k.startsWith('inventory-')) await caches.delete(k)
   location.replace(`./?v=${Date.now()}`)
 }
 

@@ -1,6 +1,6 @@
 // 讓 App 本身離線也能打開（AI 辨識還是要網路）
 // 更新：每次都先問 GitHub 有沒有新版（跳過手機的 10 分鐘暫存）；新版裝好後，App 在安全的頁面（不是拍照拍到一半）自動重新整理
-const CACHE = 'inventory-v46'
+const CACHE = 'inventory-v47'
 const SHELL = ['./', 'index.html', 'app.js', 'rules.js', 'icons.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'logo.svg', 'xlsx.js', 'google-sheets.gs']
 
 self.addEventListener('install', (e) => {
@@ -37,9 +37,12 @@ const askClient = (w) =>
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     (async () => {
+      // 同一個網址（xiaoyu-1201.github.io）還有英文複習 App、培訓筆記，暫存是共用的：
+      // 只刪盤點 App 自己的舊版（inventory-…），別的 App 的暫存不能動
       const keys = await caches.keys()
-      const hadOld = keys.some((k) => k !== CACHE)
-      await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+      const old = keys.filter((k) => k.startsWith('inventory-') && k !== CACHE)
+      const hadOld = old.length > 0
+      await Promise.all(old.map((k) => caches.delete(k)))
       await self.clients.claim()
       // 從舊版升上來（第一次安裝不用）：通知開著的畫面「新版好了」，讓 App 自己找時間重新整理；
       // 3 秒內沒回覆的（4.6.0 以前的舊版 App 不會回）→ 照以前直接重新整理，才不會一直卡在舊版
