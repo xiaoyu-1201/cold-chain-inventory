@@ -46,6 +46,8 @@ const LS = {
   serverVer: 'inventory:serverVer',
   // 雲端有沒有用到「同時讀寫」（4.7.6；'0'＝Google 那邊沒開 Drive API）
   serverFast: 'inventory:serverFast',
+  // 首頁「桌面上的 App 要再接一次」按過「不用了」（4.7.7，只在這台）
+  moveHintOff: 'inventory:moveHintOff',
   // 電腦、平板的側邊選單收起來了沒
   sideCollapsed: 'inventory:sideCollapsed',
   // 點貨對單（4.7 測試版）：拍單子時框的位置（只在這台）、交叉比對開關（只在這台）、最後一次比對結果、更新後從雲端補拿點貨紀錄了沒
@@ -87,7 +89,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.6（10/11・同步變快、貼上邀請）'
+const VERSION = '4.7.7（10/12・複製到桌面 App）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2144,6 +2146,7 @@ async function viewHome() {
     <h1 class="large-title brand"><img class="brand-logo" src="logo.svg" alt="聖佳 LOGO">聖佳智慧庫存</h1>
     <div class="home-grid"><div class="home-main">
     <div class="home-cards">
+    ${moveCard()}
     ${
       !canEdit()
         ? `<div class="hint-card"><b>你是檢視者（只能看）</b>：可以看大家的盤點紀錄、品項庫，也可以下載 Excel；不能盤點或修改。需要盤點請找管理員改成「編輯者」。</div>`
@@ -2152,7 +2155,7 @@ async function viewHome() {
         : syncReady()
           ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → Gemini API Key」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 Gemini API Key。</p><button class="btn small" data-go="settings">去設定</button></div></div>`
           : freshPhone()
-            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>同事傳了邀請給你？ <span class="badge new">新</span></b><p>在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>（iPhone 會跳出<span class="nb">小小的「貼上」</span>，<span class="nb">再按一下它</span>）。<br>自己是擁有者：按<span class="nb">「去設定」</span>，貼上 <span class="nb">Gemini API Key</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
+            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'} <span class="badge new">新</span></b><p>${JOIN_HOW()}<br>自己是擁有者、第一次用：按<span class="nb">「去設定」</span>，貼上 <span class="nb">Gemini API Key</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
             : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 Gemini API Key<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>收到同事的邀請：在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>，不用 Key。</p><div class="row-actions"><button class="btn small" data-go="settings">去設定</button><button class="btn small secondary" data-action="paste-invite">貼上邀請並加入</button></div></div></div>`
     }
     </div>
@@ -2411,6 +2414,30 @@ const diagSection = () =>
     : ''
 /** 還沒設定任何同步、也沒有金鑰的新手機（大多是剛收到邀請的同事） */
 const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.key)
+/**
+ * 4.7.7：在瀏覽器裡用、資料跟桌面 App 分開的（iPhone 的 Safari／Chrome、LINE 裡打開的）。
+ * 使用者回報：在 Safari 早就連好，打開桌面 App 卻是全新的，大家一定都會這樣 → 「複製到桌面 App」
+ * （Android、電腦裝的 App 跟 Chrome 共用資料，不用搬）
+ */
+const browserSeparate = () => !standalone() && (isIOS() || inLineApp())
+/** 這台的連線做成邀請連結（試算表＋自己的連結碼；擁有者的就是擁有者的）：貼到桌面 App 就接上同一個身分 */
+const moveLink = () => joinLinkOf(`${ls.get(LS.sheet)}#k=${ls.get(LS.syncKey)}`, `${location.origin}${location.pathname}`)
+/** 新手機怎麼接上：邀請、或從 Safari 搬過來（在桌面 App 裡才講 Safari 那條） */
+const JOIN_HOW = () =>
+  `先複製，<span class="nb">再按「貼上邀請並加入」</span>（iPhone 會跳出<span class="nb">小小的「貼上」</span>，<span class="nb">再按一下它</span>）：<br>・同事傳了邀請：在 LINE <b>長按邀請訊息 →「複製」</b>。${
+    standalone() ? '<br>・在 Safari 用過：到 Safari 打開這個 App，按<span class="nb">「複製到桌面 App」</span>。' : ''
+  }`
+/** 首頁：在瀏覽器裡用的，提醒桌面 App 要再接一次（可以關掉；設定頁一直有「複製到桌面 App」） */
+function moveCard() {
+  if (!syncReady() || !browserSeparate() || ls.get(LS.moveHintOff) === '1') return ''
+  const keyNote =
+    ls.get(LS.key) && !aiSharedOn()
+      ? myRole() === 'owner'
+        ? '<p class="move-note">Gemini API Key 不會一起帶過去：先到<span class="nb">「設定」</span>按<span class="nb">「放到雲端」</span>，桌面 App 和同事就都能用。</p>'
+        : '<p class="move-note">你自己貼的 Gemini API Key 不會一起帶過去，桌面 App 裡要再貼一次。</p>'
+      : ''
+  return `<div class="setup-card move-card"><span class="setup-ico" aria-hidden="true">${icon('copy', 26)}</span><div class="grow"><b>桌面上的 App 要再接一次 <span class="badge new">新</span></b><p>桌面上的「聖佳庫存」跟瀏覽器是分開的，這裡連好的不會自動帶過去：</p><ol class="steps-list"><li>按下面的「複製到桌面 App」。</li><li>打開桌面上的「聖佳庫存」。</li><li>按「貼上邀請並加入」，資料會<span class="nb">從雲端</span>下載回來。</li></ol>${keyNote}<div class="row-actions"><button class="btn small" data-action="move-to-app">複製到桌面 App</button><button class="btn small plain" data-action="move-hint-off">只用瀏覽器，不用了</button></div></div></div>`
+}
 async function viewSettings() {
   const key = ls.get(LS.key)
   const model = ls.get(LS.model)
@@ -2422,7 +2449,7 @@ async function viewSettings() {
     ${
       // 還沒設定任何同步的新手機：大多是被邀請的同事 →「貼上邀請並加入」放最前面（以前要往下捲很久）
       freshPhone()
-        ? `<div class="hint-card stack join-first"><div><b>同事傳了邀請給你？</b> <span class="badge new">新</span><br>在 LINE <b>長按邀請訊息 →「複製」</b>，<span class="nb">回到這裡</span>按下面的按鈕（iPhone 會跳出<span class="nb">小小的「貼上」</span>，<span class="nb">再按一下它</span>）。</div>
+        ? `<div class="hint-card stack join-first"><div><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'}</b> <span class="badge new">新</span><br>${JOIN_HOW()}</div>
         <button class="btn" data-action="paste-invite">貼上邀請並加入</button>
         <p class="footnote">讀不到的話：把邀請貼在下面，再按「加入」。</p>
         <div class="row-actions"><input class="field" id="link-code" placeholder="貼上收到的邀請" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small secondary" data-action="sync-link">加入</button></div>
@@ -2505,6 +2532,11 @@ async function viewSettings() {
               canManage()
                 ? `<button class="row" data-action="share-open"><span class="grow"><span class="title" style="color:var(--tint)">共用設定</span><br><span class="meta">邀請同事、改權限（只能看／可以改）、移除離職的人</span></span>${chev}</button>`
                 : `<div class="row muted">${ROLE_DESC[myRole()]}。要加人或改權限，請找擁有者或管理員。</div>`
+            }
+            ${
+              browserSeparate()
+                ? `<button class="row" data-action="move-to-app"><span class="grow"><span class="title" style="color:var(--tint)">複製到桌面 App <span class="badge new">新</span></span><br><span class="meta">桌面上的「聖佳庫存」跟這個瀏覽器是分開的：複製這台的連線，到桌面 App 按「貼上邀請並加入」</span></span>${chev}</button>`
+                : ''
             }
             <button class="row" data-action="full-pull" ${repairing ? 'disabled' : ''}><span class="grow"><span class="title" style="color:var(--tint)">${repairing ? '正在從雲端重新下載…' : '從雲端重新下載全部'}</span><br><span class="meta">這台跟別台不一樣、少了紀錄或照片時用；這台比較新的不會被蓋掉</span></span>${chev}</button>
             <button class="row" data-action="sync-leave"><span class="grow"><span class="title" style="color:var(--red)">這台退出並清除資料</span><br><span class="meta">交還手機、換手機時用；雲端的資料不會刪</span></span>${chev}</button>
@@ -8451,6 +8483,27 @@ $app.addEventListener('click', async (e) => {
     }
     case 'paste-invite':
       return pasteInvite()
+    case 'move-to-app': {
+      if (!syncReady()) return toast('這台還沒開啟多台同步，沒有連線可以複製')
+      const link = moveLink()
+      // 要在按下去的當下寫剪貼簿（iPhone 等網路回來再寫會被擋）；複製好再順便同步，這台還沒傳的先傳上去
+      return navigator.clipboard
+        .writeText(link)
+        .then(() => {
+          toast('已複製：打開桌面上的「聖佳庫存」，按「貼上邀請並加入」')
+          syncNow().catch(() => {})
+        })
+        .catch(() =>
+          sheet(
+            `<h2 class="sheet-title">複製這台的連線</h2><p class="sheet-sub">自動複製不了：長按下面的文字 →「全選」→「拷貝」，再到桌面的「聖佳庫存」按「貼上邀請並加入」。這段只給你自己用，請不要傳給別人。</p><textarea class="field invite-text" readonly rows="4">${esc(link)}</textarea>`,
+            (el) => el.querySelector('textarea').addEventListener('focus', (e) => e.target.select()),
+          ),
+        )
+    }
+    case 'move-hint-off':
+      ls.set(LS.moveHintOff, '1')
+      toast('之後要接到桌面 App：到「設定」按「複製到桌面 App」')
+      return render()
     case 'sync-link': {
       const raw = document.getElementById('link-code').value.trim()
       const code = parseLinkCode(raw)
