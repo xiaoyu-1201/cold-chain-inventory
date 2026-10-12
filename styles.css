@@ -2524,7 +2524,8 @@ button.tile:active {
   background: var(--card);
   box-shadow: inset 0 0 0 1.5px var(--tint-soft);
 }
-.setup-card b {
+/* 只有卡片標題（.grow 底下第一層的 b）變大字；內文裡的粗字照一般大小（4.7.7 QA） */
+.setup-card .grow > b {
   display: block;
   font-size: 19px;
   line-height: 1.35;
@@ -4522,13 +4523,11 @@ html.no-glass {
   }
 }
 
-/* 4.7.7：在 Safari 裡用的，首頁提醒「桌面上的 App 要再接一次」：步驟清單、API Key 的小字 */
-.move-card .steps-list {
+/* 4.7.7：在 Safari 裡用的，首頁提醒「桌面上的 App 要再接一次」；新手機卡片的條列（懸掛縮排） */
+.setup-card .steps-list {
   margin: 4px 0 12px;
-  color: var(--text-2);
-  font-size: 15px;
 }
-.move-card .move-note {
+.setup-card p.move-note {
   margin: -4px 0 12px;
-  font-size: 13px;
+  color: var(--text);
 }

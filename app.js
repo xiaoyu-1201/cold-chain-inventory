@@ -2153,9 +2153,9 @@ async function viewHome() {
         : hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">${icon('camera', 30)}</span><span class="grow"><b>新盤點</b><span class="meta">拍一格貨架，AI 幫你數<br>拍到 ${locTag(locations()[0]?.code || 'A-03', 'sm')} 會自動填位置</span></span>${chev}</button>`
         : syncReady()
-          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → Gemini API Key」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 Gemini API Key。</p><button class="btn small" data-go="settings">去設定</button></div></div>`
+          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>還不能拍照盤點：AI 金鑰還沒放到雲端</b><p>到「設定 → Gemini API Key」貼上金鑰，再按<span class="nb">「放到雲端」</span>，這台和同事就都能用。</p>' : '<b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → Gemini API Key」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 Gemini API Key。</p>'}<button class="btn small" data-go="settings">去設定</button></div></div>`
           : freshPhone()
-            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'} <span class="badge new">新</span></b><p>${JOIN_HOW()}<br>自己是擁有者、第一次用：按<span class="nb">「去設定」</span>，貼上 <span class="nb">Gemini API Key</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
+            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'} <span class="badge new">新</span></b>${joinHow()}<p>自己是擁有者、第一次用：按<span class="nb">「去設定」</span>，貼上 <span class="nb">Gemini API Key</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
             : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 Gemini API Key<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>收到同事的邀請：在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>，不用 Key。</p><div class="row-actions"><button class="btn small" data-go="settings">去設定</button><button class="btn small secondary" data-action="paste-invite">貼上邀請並加入</button></div></div></div>`
     }
     </div>
@@ -2421,22 +2421,22 @@ const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.key)
  */
 const browserSeparate = () => !standalone() && (isIOS() || inLineApp())
 /** 這台的連線做成邀請連結（試算表＋自己的連結碼；擁有者的就是擁有者的）：貼到桌面 App 就接上同一個身分 */
-const moveLink = () => joinLinkOf(`${ls.get(LS.sheet)}#k=${ls.get(LS.syncKey)}`, `${location.origin}${location.pathname}`)
+const moveLink = () => joinLinkOf(linkCode(), `${location.origin}${location.pathname}`)
 /** 新手機怎麼接上：邀請、或從 Safari 搬過來（在桌面 App 裡才講 Safari 那條） */
-const JOIN_HOW = () =>
-  `先複製，<span class="nb">再按「貼上邀請並加入」</span>（iPhone 會跳出<span class="nb">小小的「貼上」</span>，<span class="nb">再按一下它</span>）：<br>・同事傳了邀請：在 LINE <b>長按邀請訊息 →「複製」</b>。${
-    standalone() ? '<br>・在 Safari 用過：到 Safari 打開這個 App，按<span class="nb">「複製到桌面 App」</span>。' : ''
-  }`
-/** 首頁：在瀏覽器裡用的，提醒桌面 App 要再接一次（可以關掉；設定頁一直有「複製到桌面 App」） */
+const joinHow = () =>
+  standalone()
+    ? `<p>先複製，<span class="nb">再按「貼上邀請並加入」</span>（iPhone 會跳出<span class="nb">小小的「貼上」</span>，<span class="nb">再按一下它</span>）：</p><ol class="steps-list"><li>同事傳了邀請：在 LINE <span class="nb">長按邀請訊息</span>→<span class="nb">「複製」</span>。</li><li>在 Safari（或 Chrome）用過：回到瀏覽器裡的聖佳庫存，按<span class="nb">「複製到桌面 App」</span>（那邊要先開好同步）。</li></ol>`
+    : `<p>在 LINE <span class="nb">長按邀請訊息</span>→<span class="nb">「複製」</span>，<span class="nb">再按「貼上邀請並加入」</span>（iPhone 會跳出<span class="nb">小小的「貼上」</span>，<span class="nb">再按一下它</span>）。</p>`
+/** 首頁：在瀏覽器裡用的，提醒桌面 App 要再接一次（複製成功或按「不用了」就收起來；設定頁一直有「複製到桌面 App」） */
 function moveCard() {
   if (!syncReady() || !browserSeparate() || ls.get(LS.moveHintOff) === '1') return ''
   const keyNote =
-    ls.get(LS.key) && !aiSharedOn()
+    canEdit() && ls.get(LS.key) && !aiSharedOn()
       ? myRole() === 'owner'
-        ? '<p class="move-note">Gemini API Key 不會一起帶過去：先到<span class="nb">「設定」</span>按<span class="nb">「放到雲端」</span>，桌面 App 和同事就都能用。</p>'
-        : '<p class="move-note">你自己貼的 Gemini API Key 不會一起帶過去，桌面 App 裡要再貼一次。</p>'
+        ? '<p class="move-note">API Key 不會帶過去：先到<span class="nb">「設定」</span>按<span class="nb">「放到雲端」</span>。</p>'
+        : '<p class="move-note">API Key 不會帶過去，<span class="nb">桌面 App 裡</span><span class="nb">要再貼一次</span>。</p>'
       : ''
-  return `<div class="setup-card move-card"><span class="setup-ico" aria-hidden="true">${icon('copy', 26)}</span><div class="grow"><b>桌面上的 App 要再接一次 <span class="badge new">新</span></b><p>桌面上的「聖佳庫存」跟瀏覽器是分開的，這裡連好的不會自動帶過去：</p><ol class="steps-list"><li>按下面的「複製到桌面 App」。</li><li>打開桌面上的「聖佳庫存」。</li><li>按「貼上邀請並加入」，資料會<span class="nb">從雲端</span>下載回來。</li></ol>${keyNote}<div class="row-actions"><button class="btn small" data-action="move-to-app">複製到桌面 App</button><button class="btn small plain" data-action="move-hint-off">只用瀏覽器，不用了</button></div></div></div>`
+  return `<div class="setup-card move-card"><span class="setup-ico" aria-hidden="true">${icon('copy', 26)}</span><div class="grow"><b>桌面的 App 要再接一次 <span class="badge new">新</span></b><p>桌面的 App 跟瀏覽器的資料是分開的：</p><ol class="steps-list"><li>按「複製到桌面 App」。</li><li>打開桌面的「聖佳庫存」<span class="nb">（還沒有：分享</span>→<span class="nb">加入主畫面）</span>。</li><li>按<span class="nb">「貼上邀請並加入」</span>。</li></ol><p class="move-note">只貼到自己的 App，<span class="nb">不要傳給別人</span>；點到一半的點貨單先按完成。</p>${keyNote}<div class="row-actions"><button class="btn small" data-action="move-to-app">複製到桌面 App</button><button class="btn small plain" data-action="move-hint-off">不用了</button></div></div></div>`
 }
 async function viewSettings() {
   const key = ls.get(LS.key)
@@ -2449,7 +2449,7 @@ async function viewSettings() {
     ${
       // 還沒設定任何同步的新手機：大多是被邀請的同事 →「貼上邀請並加入」放最前面（以前要往下捲很久）
       freshPhone()
-        ? `<div class="hint-card stack join-first"><div><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'}</b> <span class="badge new">新</span><br>${JOIN_HOW()}</div>
+        ? `<div class="hint-card stack join-first"><div><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'}</b> <span class="badge new">新</span></div>${joinHow()}
         <button class="btn" data-action="paste-invite">貼上邀請並加入</button>
         <p class="footnote">讀不到的話：把邀請貼在下面，再按「加入」。</p>
         <div class="row-actions"><input class="field" id="link-code" placeholder="貼上收到的邀請" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small secondary" data-action="sync-link">加入</button></div>
@@ -2535,7 +2535,7 @@ async function viewSettings() {
             }
             ${
               browserSeparate()
-                ? `<button class="row" data-action="move-to-app"><span class="grow"><span class="title" style="color:var(--tint)">複製到桌面 App <span class="badge new">新</span></span><br><span class="meta">桌面上的「聖佳庫存」跟這個瀏覽器是分開的：複製這台的連線，到桌面 App 按「貼上邀請並加入」</span></span>${chev}</button>`
+                ? `<button class="row" data-action="move-to-app"><span class="grow"><span class="title" style="color:var(--tint)">複製到桌面 App <span class="badge new">新</span></span><br><span class="meta">桌面的「聖佳庫存」跟瀏覽器資料分開：複製這台的連線，到桌面 App 按<span class="nb">「貼上邀請並加入」</span>（只貼到自己的 App，不要傳給別人）</span></span>${chev}</button>`
                 : ''
             }
             <button class="row" data-action="full-pull" ${repairing ? 'disabled' : ''}><span class="grow"><span class="title" style="color:var(--tint)">${repairing ? '正在從雲端重新下載…' : '從雲端重新下載全部'}</span><br><span class="meta">這台跟別台不一樣、少了紀錄或照片時用；這台比較新的不會被蓋掉</span></span>${chev}</button>
@@ -6730,7 +6730,7 @@ async function postSync(body, opt = {}) {
 /** 清除這台的資料（退出同步、被移除權限時） */
 async function wipeLocal(msg) {
   clearTimeout(syncTimer)
-  for (const k of [LS.aiShared, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId]) ls.set(k, '')
+  for (const k of [LS.moveHintOff, LS.aiShared, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId]) ls.set(k, '')
   // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
   await idb.sessions.clear()
   await idb.items.clear()
@@ -7208,7 +7208,12 @@ async function joinNow(code, before = () => {}) {
               <ol class="steps-list"><li>按右上角的「⋮」。</li><li>按「加到主畫面」或「安裝應用程式」。</li><li>之後點桌面上的「聖佳庫存」就能打開。</li></ol>`
      }
      <button class="btn block" id="j-ok" style="margin-top:12px">知道了</button>`,
-    (el, close) => (el.querySelector('#j-ok').onclick = close),
+    // 按「知道了」的當下清剪貼簿（裡面的邀請有密碼；iPhone 只准在按下去的時候寫剪貼簿）
+    (el, close) =>
+      (el.querySelector('#j-ok').onclick = () => {
+        navigator.clipboard?.writeText?.('').catch(() => {})
+        close()
+      }),
   )
 }
 /** iPhone、iPad 在 Safari 點了邀請連結：教他到桌面的 App 裡加入（只想在瀏覽器用也可以） */
@@ -8486,19 +8491,26 @@ $app.addEventListener('click', async (e) => {
     case 'move-to-app': {
       if (!syncReady()) return toast('這台還沒開啟多台同步，沒有連線可以複製')
       const link = moveLink()
-      // 要在按下去的當下寫剪貼簿（iPhone 等網路回來再寫會被擋）；複製好再順便同步，這台還沒傳的先傳上去
-      return navigator.clipboard
-        .writeText(link)
-        .then(() => {
-          toast('已複製：打開桌面上的「聖佳庫存」，按「貼上邀請並加入」')
-          syncNow().catch(() => {})
-        })
-        .catch(() =>
-          sheet(
-            `<h2 class="sheet-title">複製這台的連線</h2><p class="sheet-sub">自動複製不了：長按下面的文字 →「全選」→「拷貝」，再到桌面的「聖佳庫存」按「貼上邀請並加入」。這段只給你自己用，請不要傳給別人。</p><textarea class="field invite-text" readonly rows="4">${esc(link)}</textarea>`,
-            (el) => el.querySelector('textarea').addEventListener('focus', (e) => e.target.select()),
-          ),
+      // 試算表網址不是標準格式時做不出邀請連結：桌面 App 會認不得，先講清楚
+      if (!parseLinkCode(link)) return toast('這台記的試算表網址格式不對，複製了桌面 App 也認不得：請擁有者到「設定 → Google 試算表」重新貼一次網址')
+      // 複製好：首頁的提醒收起來；這台還沒傳的資料先傳上去（傳不上去要講，不然桌面 App 會少資料）
+      const copied = () => {
+        ls.set(LS.moveHintOff, '1')
+        toast('已複製：只貼到自己桌面的「聖佳庫存」，不要傳給別人')
+        render()
+        syncNow().catch(() => toast('這台還有資料沒傳上去：有網路時再按一次「立即同步」，桌面 App 才看得到'))
+      }
+      const manual = () =>
+        sheet(
+          `<h2 class="sheet-title">複製這台的連線</h2><p class="sheet-sub">自動複製不了：長按下面的文字 →「全選」→「拷貝」，再到桌面的「聖佳庫存」按「貼上邀請並加入」。<b>這段只給你自己用，請不要傳給別人。</b></p><textarea class="field invite-text" readonly rows="4" aria-label="這台的連線">${esc(link)}</textarea><button class="btn block" id="mv-ok" style="margin-top:12px">好</button>`,
+          (el, close) => {
+            el.querySelector('textarea').addEventListener('focus', (ev) => ev.target.setSelectionRange(0, 9999))
+            el.querySelector('#mv-ok').onclick = close
+          },
         )
+      // 要在按下去的當下寫剪貼簿（iPhone 等網路回來再寫會被擋）；沒有剪貼簿功能的瀏覽器直接給手動複製
+      if (!navigator.clipboard?.writeText) return manual()
+      return navigator.clipboard.writeText(link).then(copied, manual)
     }
     case 'move-hint-off':
       ls.set(LS.moveHintOff, '1')
