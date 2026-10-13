@@ -89,7 +89,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.8（10/12・更新不清其他 App 暫存）'
+const VERSION = '4.7.9（10/13・放大看照片可以用滑鼠拖）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -5338,7 +5338,7 @@ function photoViewer(list, start = 0, opts = {}) {
 }
 /** 結果頁有框的放大檢視（state.viewer）：上面那一行字 */
 function reviewZoomLabel() {
-  return `放大 ${Number.isInteger(state.zoom) ? state.zoom : state.zoom.toFixed(1)} 倍・可以上下左右滑`
+  return `放大 ${Number.isInteger(state.zoom) ? state.zoom : state.zoom.toFixed(1)} 倍・${matchMedia('(hover: hover) and (pointer: fine)').matches ? '按住拖曳可以移動' : '可以上下左右滑'}`
 }
 /** 結果頁有框的放大檢視：兩指縮放（框是用 % 擺的，跟著一起變大），放開手再重畫按鈕狀態 */
 function bindReviewPinch(scroll) {
@@ -5365,6 +5365,44 @@ function bindReviewPinch(scroll) {
     },
     () => render(),
   )
+  // 電腦：滑鼠按住拖曳＝上下左右移動照片（手機一指滑本來就可以）；拖過就不算點到框（10/13 使用者）
+  let drag = null
+  scroll.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return
+    drag = { x: e.clientX, y: e.clientY, l: scroll.scrollLeft, t: scroll.scrollTop, moved: false, id: e.pointerId }
+  })
+  scroll.addEventListener('pointermove', (e) => {
+    if (!drag || !(e.buttons & 1)) return
+    const dx = e.clientX - drag.x
+    const dy = e.clientY - drag.y
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 5) {
+      drag.moved = true
+      scroll.classList.add('dragging')
+      scroll.setPointerCapture(drag.id)
+    }
+    if (!drag.moved) return
+    e.preventDefault()
+    scroll.scrollLeft = drag.l - dx
+    scroll.scrollTop = drag.t - dy
+  })
+  const endDrag = () => {
+    if (!drag) return
+    if (drag.moved) {
+      // 放開時那一下 click 不要選到框
+      const block = (ev) => {
+        ev.stopPropagation()
+        ev.preventDefault()
+      }
+      scroll.addEventListener('click', block, { capture: true, once: true })
+      setTimeout(() => scroll.removeEventListener('click', block, { capture: true }), 0)
+    }
+    scroll.classList.remove('dragging')
+    drag = null
+  }
+  scroll.addEventListener('pointerup', endDrag)
+  scroll.addEventListener('pointercancel', endDrag)
+  // 照片裡的圖片不要被瀏覽器當成「拖出去的圖片」
+  scroll.addEventListener('dragstart', (e) => e.preventDefault())
 }
 // 結果頁的放大檢視：Esc 關掉（上面有開視窗時，Esc 先關視窗）
 document.addEventListener('keydown', (e) => {

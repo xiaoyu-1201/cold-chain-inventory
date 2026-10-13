@@ -498,6 +498,17 @@ button.row[aria-current='true'] {
   touch-action: pan-x pan-y;
   overscroll-behavior: contain;
 }
+/* 電腦：照片可以用滑鼠按住拖 */
+@media (hover: hover) and (pointer: fine) {
+  .viewer:not(.pv) .viewer-scroll {
+    cursor: grab;
+  }
+  .viewer:not(.pv) .viewer-scroll.dragging,
+  .viewer:not(.pv) .viewer-scroll.dragging * {
+    cursor: grabbing;
+    user-select: none;
+  }
+}
 /* 右上角關閉（44×44，Apple 的圓形 ×） */
 .viewer-close {
   flex: none;
