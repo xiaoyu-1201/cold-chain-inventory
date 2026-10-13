@@ -89,7 +89,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.9（10/13・放大看照片可以用滑鼠拖）'
+const VERSION = '4.7.10（10/13・放大看照片可以用滑鼠拖）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -5401,6 +5401,12 @@ function bindReviewPinch(scroll) {
   }
   scroll.addEventListener('pointerup', endDrag)
   scroll.addEventListener('pointercancel', endDrag)
+  // 還沒拖動就移出視窗放開：收掉，不留到下一次
+  scroll.addEventListener('pointerleave', () => drag && !drag.moved && (drag = null))
+  // 照片比視窗大（可以捲）才顯示「抓手」游標
+  const markPannable = () => scroll.classList.toggle('pannable', scroll.scrollWidth > scroll.clientWidth + 1 || scroll.scrollHeight > scroll.clientHeight + 1)
+  markPannable()
+  new ResizeObserver(markPannable).observe(scroll.querySelector('.viewer-photo'))
   // 照片裡的圖片不要被瀏覽器當成「拖出去的圖片」
   scroll.addEventListener('dragstart', (e) => e.preventDefault())
 }

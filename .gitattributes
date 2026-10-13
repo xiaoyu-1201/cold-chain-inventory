@@ -1,0 +1,3 @@
+# 統一用 LF（Windows 編輯時才不會整檔換行符號翻轉，git blame 被洗掉）
+* text=auto eol=lf
+*.png binary

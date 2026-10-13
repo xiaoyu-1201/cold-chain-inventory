@@ -500,7 +500,7 @@ button.row[aria-current='true'] {
 }
 /* 電腦：照片可以用滑鼠按住拖 */
 @media (hover: hover) and (pointer: fine) {
-  .viewer:not(.pv) .viewer-scroll {
+  .viewer:not(.pv) .viewer-scroll.pannable {
     cursor: grab;
   }
   .viewer:not(.pv) .viewer-scroll.dragging,
