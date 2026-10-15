@@ -29,6 +29,9 @@
  * 編輯者不能改盲盤／複盤規則、不能匯入正航產品表、不能一次刪光盤點紀錄（雲端也擋）。
  * 更新方法：整段重新貼上 → 存檔 →「部署」→「管理部署作業」→ 鉛筆 → 版本選「新版本」→ 部署（網址不會變）。
  *
+ * 4.8：共用金鑰也可以放 Claude（指令碼屬性 CLAUDE_KEY；App「設定 → AI」選 Claude 再按「放到雲端」）。
+ * 費用上限比 Gemini 緊（Claude 沒有免費額度）：只准 Haiku／Sonnet（Opus 要 CLAUDE_ALLOW_OPUS＝1）、每人每天 100 次（CLAUDE_DAILY_LIMIT）、一次最多 8 MB、不准工具。
+ *
  * 4.7.6：同步變快——很多筆資料、照片「同時」讀寫（Drive API），不再一筆一筆來；
  * 記住目錄檔的位置，不用每次搜尋。Drive API 用不了會自動改回舊方法（結果一樣，只是比較慢），
  * App 的設定頁會提醒擁有者：左邊「服務」→ 加入「Drive API」→ 再部署一次新版本，就會打開。
@@ -89,19 +92,22 @@ function doPost(e) {
   // 共用 AI 金鑰：ai＝擁有者有沒有放；每個回覆都帶，App 才知道能不能用
   if (!who && (data.action === 'ai' || data.action === 'aiKey')) return json({ ok: false, error: '還沒開啟同步，不能用共用的 AI 金鑰' })
   const ai = !!P.GEMINI_KEY
+  // aiClaude（4.8）：擁有者有沒有放 Claude 的共用金鑰（指令碼屬性 CLAUDE_KEY）
+  const aiClaude = !!P.CLAUDE_KEY
   if (who && data.action === 'aiKey') {
-    if (who.role !== 'owner') return json({ ok: false, ai: ai, me: me, error: '只有擁有者可以設定共用的 AI 金鑰' })
-    if (data.aiKey) props.setProperty('GEMINI_KEY', String(data.aiKey))
-    else props.deleteProperty('GEMINI_KEY')
-    return json({ ok: true, ai: !!data.aiKey, me: me })
+    if (who.role !== 'owner') return json({ ok: false, ai: ai, aiClaude: aiClaude, me: me, error: '只有擁有者可以設定共用的 AI 金鑰' })
+    const prop = data.provider === 'claude' ? 'CLAUDE_KEY' : 'GEMINI_KEY'
+    if (data.aiKey) props.setProperty(prop, String(data.aiKey))
+    else props.deleteProperty(prop)
+    return json({ ok: true, ai: prop === 'GEMINI_KEY' ? !!data.aiKey : ai, aiClaude: prop === 'CLAUDE_KEY' ? !!data.aiKey : aiClaude, me: me })
   }
-  if (who && data.action === 'ai') return json(canEdit ? Object.assign(aiProxy(data, P, props, who), { ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
+  if (who && data.action === 'ai') return json(canEdit ? Object.assign(data.provider === 'claude' ? claudeProxy(data, P, props, who) : aiProxy(data, P, props, who), { ai: ai, aiClaude: aiClaude, me: me }) : { ok: false, viewer: true, ai: ai, aiClaude: aiClaude, me: me, error: '你是檢視者，只能看' })
   // ver 2：盤點的照片分開存（photo:盤點ID:照片ID），下載只拿資料，照片用 photos 另外要；App 看到 ver 才改用新格式上傳
   // fast：有沒有用到「同時讀寫」（4.7.6）；沒有的話，App 會教擁有者打開 Drive API
-  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, ai: ai, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster, fast: driveApiEnabled() })
-  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, ai: ai, me: me, roster: roster, fast: driveApiEnabled() }))
-  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, ai: ai, me: me }))
-  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, ai: ai, me: me }) : { ok: false, viewer: true, ai: ai, me: me, error: '你是檢視者，只能看' })
+  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, ai: ai, aiClaude: aiClaude, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster, fast: driveApiEnabled() })
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, ai: ai, aiClaude: aiClaude, me: me, roster: roster, fast: driveApiEnabled() }))
+  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, ai: ai, aiClaude: aiClaude, me: me }))
+  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, ai: ai, aiClaude: aiClaude, me: me }) : { ok: false, viewer: true, ai: ai, aiClaude: aiClaude, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
   if (!canEdit) return json({ ok: false, viewer: true, error: '你是檢視者，只能看' })
   const lock = LockService.getScriptLock()
@@ -203,11 +209,96 @@ function aiProxy(data, P, props, who) {
   }
   return { ok: true, status: status, body: text }
 }
+/**
+ * 共用 Claude 金鑰（4.8）：幫 App 問 Claude（金鑰只在這裡，指令碼屬性 CLAUDE_KEY）。只准兩種請求：列出模型、看圖回答（v1/messages）。
+ * Claude 沒有免費額度（擁有者付錢），上限比 Gemini 緊：
+ * - 每人每天最多 100 次（指令碼屬性 CLAUDE_DAILY_LIMIT 可以改）、一次最多 8 MB
+ * - 模型只准 Haiku、Sonnet；Opus 比較貴，要在指令碼屬性加 CLAUDE_ALLOW_OPUS＝1 才放行
+ * - 一次最多回 16000 個字詞；只准一則訊息、內容只能是文字和照片；不准工具（網路搜尋、程式執行等）
+ */
+const CLAUDE_MAX_OUTPUT = 16000
+const CLAUDE_DAILY_LIMIT = 100
+function claudeLimit(P) {
+  return Number(P.CLAUDE_DAILY_LIMIT) > 0 ? Number(P.CLAUDE_DAILY_LIMIT) : CLAUDE_DAILY_LIMIT
+}
+function claudeModelOk(name, P) {
+  const m = String(name || '')
+  if (/^claude-opus-/.test(m) && !(P && P.CLAUDE_ALLOW_OPUS === '1')) return false
+  return /^claude-(haiku|sonnet|opus)-[a-z0-9.\-]+$/.test(m)
+}
+function claudeProxy(data, P, props, who) {
+  if (!P.CLAUDE_KEY) return { ok: false, status: 403, error: '擁有者還沒把 Claude 金鑰放到雲端（或已經停止共用）' }
+  const path = typeof data.path === 'string' ? data.path : ''
+  const list = /^v1\/models(\?limit=\d+)?$/.test(path)
+  const msg = path === 'v1/messages'
+  if (!list && !msg) return { ok: false, status: 400, error: '不支援的 AI 請求' }
+  const opt = { method: 'get', headers: { 'x-api-key': P.CLAUDE_KEY, 'anthropic-version': '2023-06-01' }, muteHttpExceptions: true }
+  if (msg) {
+    const raw = typeof data.body === 'string' ? data.body : JSON.stringify(data.body || {})
+    if (raw.length > AI_MAX_BYTES) return { ok: false, status: 400, error: '這次送的照片太大（超過 8 MB）：請少放一些樣品照再試' }
+    let src
+    try {
+      src = JSON.parse(raw)
+    } catch (e) {
+      src = null
+    }
+    if (!src || typeof src !== 'object' || !Array.isArray(src.messages)) return { ok: false, status: 400, error: 'AI 請求的格式不對' }
+    if (!claudeModelOk(src.model, P)) return { ok: false, status: 404, error: '共用金鑰不能用這個模型（' + src.model + '）：只能用 Claude 的 Haiku、Sonnet' + (P.CLAUDE_ALLOW_OPUS === '1' ? '、Opus' : '（Opus 比較貴，擁有者沒有開放）') }
+    // 只准一則使用者訊息，內容只能是文字和直接附上的照片（不准用網址叫 Claude 去抓東西、不准附文件）
+    const m0 = src.messages.length === 1 && src.messages[0] && src.messages[0].role === 'user' && Array.isArray(src.messages[0].content) ? src.messages[0] : null
+    const okBlocks =
+      m0 &&
+      m0.content.length > 0 &&
+      m0.content.every(function (b) {
+        return b && ((b.type === 'text' && typeof b.text === 'string') || (b.type === 'image' && b.source && b.source.type === 'base64'))
+      })
+    if (!okBlocks) return { ok: false, status: 400, error: 'AI 請求的內容不對（只能是文字和照片）' }
+    // 只留需要的欄位：結構化輸出（JSON 格式）、思考設定；其他（工具、網路搜尋、程式執行、MCP…）一律拿掉
+    const body = { model: src.model, max_tokens: Math.min(Number(src.max_tokens) || CLAUDE_MAX_OUTPUT, CLAUDE_MAX_OUTPUT), messages: [{ role: 'user', content: m0.content }] }
+    const oc = src.output_config && typeof src.output_config === 'object' ? src.output_config : {}
+    const outCfg = {}
+    if (oc.format && oc.format.type === 'json_schema' && oc.format.schema) outCfg.format = { type: 'json_schema', schema: oc.format.schema }
+    if (oc.effort === 'low' || oc.effort === 'medium') outCfg.effort = oc.effort
+    if (outCfg.format || outCfg.effort) body.output_config = outCfg
+    const th = src.thinking && src.thinking.type
+    if (th === 'between_tools' || th === 'disabled') body.thinking = { type: th }
+    const used = aiCount(props, P, who, 'AI_USAGE_CLAUDE', claudeLimit(P))
+    if (used < 0) return { ok: false, status: 429, quota: true, error: '今天用共用 Claude 的次數已經到上限（每人每天 ' + claudeLimit(P) + ' 次），明天會自動恢復；急用請找擁有者' }
+    opt.method = 'post'
+    opt.contentType = 'application/json'
+    opt.payload = JSON.stringify(body)
+  }
+  let res
+  try {
+    res = UrlFetchApp.fetch('https://api.anthropic.com/' + path, opt)
+  } catch (e) {
+    // 連不到 Claude、或等太久（Apps Script 最多等大約 1 分鐘）：回 408，App 會改用比較快的 Haiku，
+    // 不要回「太多人用」讓 App 馬上用同一個模型再送一次（Claude 那邊可能還在做、照樣計費）
+    return { ok: true, status: 408, body: JSON.stringify({ type: 'error', error: { type: 'timeout_error', message: 'Apps Script 等不到 Claude 回覆：' + String((e && e.message) || e).slice(0, 150) } }) }
+  }
+  const status = res.getResponseCode()
+  let text = res.getContentText()
+  // 列模型：只給共用金鑰能用的那些
+  if (list && status === 200) {
+    try {
+      const all = JSON.parse(text)
+      all.data = (all.data || []).filter(function (m) {
+        return claudeModelOk(m.id, P)
+      })
+      text = JSON.stringify(all)
+    } catch (e) {
+      /* 回覆不是 JSON：原樣給 App */
+    }
+  }
+  return { ok: true, status: status, body: text }
+}
 function aiLimit(P) {
   return Number(P.AI_DAILY_LIMIT) > 0 ? Number(P.AI_DAILY_LIMIT) : AI_DAILY_LIMIT
 }
-/** 這個人今天第幾次用共用 AI；超過上限回 -1（台灣時間每天 0 點重算） */
-function aiCount(props, P, who) {
+/** 這個人今天第幾次用共用 AI；超過上限回 -1（台灣時間每天 0 點重算）。Claude 另外算（AI_USAGE_CLAUDE、上限比較低） */
+function aiCount(props, P, who, prop, limit) {
+  prop = prop || 'AI_USAGE'
+  limit = limit || aiLimit(P)
   const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
   // 用試算表的鎖（跟同步用的鎖分開）：同步上傳照片要鎖比較久，問 AI 不用跟著等
   const lock = (LockService.getDocumentLock && LockService.getDocumentLock()) || LockService.getScriptLock()
@@ -215,16 +306,16 @@ function aiCount(props, P, who) {
   try {
     let usage = {}
     try {
-      usage = JSON.parse(props.getProperty('AI_USAGE') || '{}') || {}
+      usage = JSON.parse(props.getProperty(prop) || '{}') || {}
     } catch (e) {
       usage = {}
     }
     if (usage.day !== today) usage = { day: today, n: {} }
     const id = String(who.id)
     const n = (usage.n[id] || 0) + 1
-    if (n > aiLimit(P)) return -1
+    if (n > limit) return -1
     usage.n[id] = n
-    props.setProperty('AI_USAGE', JSON.stringify(usage))
+    props.setProperty(prop, JSON.stringify(usage))
     return n
   } finally {
     lock.releaseLock()

@@ -1,8 +1,8 @@
 /**
  * 聖佳智慧庫存（聖佳冷凍材料；原名「拍照盤點」）
- * 拍貨架 → Gemini 視覺模型找出每個商品並框起來 → 原圖對照、＋／－ 修正 → 存在手機；總表一次匯出 Excel、同步 Google 試算表。
+ * 拍貨架 → AI 視覺模型（Claude 或 Gemini，設定裡選）找出每個商品並框起來 → 原圖對照、＋／－ 修正 → 存在手機；總表一次匯出 Excel、同步 Google 試算表。
  * 品項庫：按「完成」時自動長出來（料號、各位置數量、帳面數、安全庫存）；查型號：拍標籤或打型號 → 解讀、店裡有沒有、替代品。
- * 沒有後端：API Key 只存在這支手機（localStorage），照片只送到 Google Gemini 分析。
+ * 沒有後端：API Key 只存在這支手機（localStorage），照片只送到選用的 AI（Anthropic Claude 或 Google Gemini）分析；擁有者也可以把金鑰放在自己的 Apps Script 共用。
  */
 
 import { makeXlsx } from './xlsx.js'
@@ -15,6 +15,12 @@ const LS = {
   /** 擁有者有沒有把 AI 金鑰放在雲端（Apps Script）給大家共用：'1'＝有 */
   aiShared: 'inventory:aiShared',
   model: 'inventory:model',
+  // Claude（4.8）：金鑰、共用、模型都跟 Gemini 分開存；provider＝這台選用哪一家（沒選＝有 Claude 就用 Claude）
+  claudeKey: 'inventory:claudeKey',
+  aiSharedClaude: 'inventory:aiSharedClaude',
+  claudeModel: 'inventory:claudeModel',
+  claudePinned: 'inventory:claudePinned',
+  provider: 'inventory:aiProvider',
   catalog: 'inventory:catalog',
   pinned: 'inventory:modelPinned',
   sheet: 'inventory:sheetUrl',
@@ -89,7 +95,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.7.10（10/13・放大看照片可以用滑鼠拖）'
+const VERSION = '4.8.0（10/15・AI 可以選 Claude）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -485,7 +491,37 @@ function boxZoomSvg(photo, box, color = '#0a84ff', ratio = 0) {
   </svg>`
 }
 
-// ───────────────────────── Gemini ─────────────────────────
+// ───────────────────────── AI：Claude／Gemini ─────────────────────────
+/**
+ * 4.8：可以選 Claude（Anthropic）或 Gemini（Google）。盤點、相似品比對、讀標籤、讀單子的程式都照 Gemini 的格式寫，
+ * 選 Claude 時由 call() 換成 Claude 的格式送出、回覆再換回來（toClaude／fromClaude），上面的程式不用分兩套。
+ * 這台明確選過就照選的；沒選過：有 Claude 金鑰（自己的或擁有者共用的）就用 Claude，不然用 Gemini。
+ */
+const CLAUDE_API = 'https://api.anthropic.com'
+function aiProvider() {
+  const p = ls.get(LS.provider)
+  if (p === 'claude' || p === 'gemini') return p
+  // 自己的金鑰優先（自己付錢、自己選的）：自己的 Claude → 自己的 Gemini → 擁有者共用的 Claude → Gemini
+  if (ls.get(LS.claudeKey)) return 'claude'
+  if (ls.get(LS.key)) return 'gemini'
+  return sharedOn('claude') ? 'claude' : 'gemini'
+}
+const isClaude = () => aiProvider() === 'claude'
+/** 現在這一家的設定存在哪裡 */
+const K = (p = aiProvider()) =>
+  p === 'claude' ? { key: LS.claudeKey, model: LS.claudeModel, pinned: LS.claudePinned, shared: LS.aiSharedClaude } : { key: LS.key, model: LS.model, pinned: LS.pinned, shared: LS.aiShared }
+const aiName = (p = aiProvider()) => (p === 'claude' ? 'Claude' : 'Gemini')
+const keyName = (p = aiProvider()) => `${aiName(p)} API Key`
+/** 備用的快模型（Gemini 的 Lite、Claude 的 Haiku）：分不出相似品，只當備用，不會自動變成預設 */
+const isLite = (m) => /lite|haiku/.test(String(m))
+/** 給人看的模型名：claude-sonnet-5-5 →「Sonnet 5.5」、claude-haiku-4-5-20251001 →「Haiku 4.5（快、便宜）」；Gemini 照原名 */
+function modelLabel(m) {
+  const x = String(m).match(/^claude-(sonnet|haiku|opus)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/)
+  if (!x) return String(m)
+  const name = x[1][0].toUpperCase() + x[1].slice(1) + ' ' + x[2] + (x[3] ? '.' + x[3] : '')
+  return x[1] === 'haiku' ? `${name}（快、便宜）` : x[1] === 'opus' ? `${name}（最強、比較貴）` : name
+}
+
 class ApiError extends Error {
   constructor(message, status, detail = '') {
     super(message)
@@ -497,6 +533,18 @@ class ApiError extends Error {
   }
 }
 function friendly(status, msg = '') {
+  if (isClaude()) {
+    if (status === 401) return 'Claude API Key 不對或已經停用：請重新貼上正確的金鑰（設定 → AI）。'
+    if (status === 400 && /credit|balance|billing/i.test(msg)) return 'Claude 帳戶的餘額不夠了：請到 console.anthropic.com 的 Billing 儲值。'
+    if (status === 400) return `AI 看不懂這次的請求（${msg.slice(0, 80)}）`
+    if (status === 403) return '這把 Claude 金鑰沒有權限：請確認是在 console.anthropic.com 建立的金鑰。'
+    if (status === 404) return '這個 Claude 模型已經下架或不能用，已自動改用其他模型，請再試一次。'
+    if (status === 413) return '這次送的照片太大：請少放一些樣品照再試。'
+    if (status === 429) return 'Claude 短時間內用太多次了，等一下再試。'
+    if (status === 503) return 'Claude 現在太多人用，等幾分鐘再試。'
+    if (status >= 500) return 'Claude 那邊暫時出問題，已經自動重試；等一下再按「再試一次」。'
+    return msg || '連線失敗，請確認有網路。'
+  }
   if (status === 400 && /api key/i.test(msg)) return 'API Key 不對：請到「設定」重新貼上。'
   if (status === 400) return `AI 看不懂這次的請求（${msg.slice(0, 80)}）`
   if (status === 403) return '這個 API Key 沒有權限用 Gemini，請確認是在 Google AI Studio 建立的金鑰。'
@@ -508,6 +556,7 @@ function friendly(status, msg = '') {
 }
 /** timeoutMs：等太久就放棄（之後會自動重試或換模型），不要讓人一直乾等 */
 async function call(path, opts = {}, timeoutMs = 0) {
+  if (isClaude()) return callClaude(path, opts, timeoutMs)
   const key = ls.get(LS.key)
   // 這台沒有自己的金鑰、擁有者有放共用金鑰：改由自己的 Apps Script 去問 Gemini（金鑰不會到這支手機）
   if (!key && aiViaSheet()) return callViaSheet(path, opts, timeoutMs)
@@ -546,13 +595,129 @@ function toResult(status, data) {
   }
   return data
 }
-/** 有沒有 AI 可以用：自己的金鑰，或擁有者放在雲端的共用金鑰 */
+/** 有沒有 AI 可以用：自己的金鑰，或擁有者放在雲端的共用金鑰（現在選的那一家） */
 function hasAi() {
-  return !!ls.get(LS.key) || aiViaSheet()
+  return !!ls.get(K().key) || aiViaSheet()
 }
-/** 擁有者有把金鑰放在雲端共用（不管這台能不能用） */
+/** 擁有者有把某一家的金鑰放在雲端共用（不管這台能不能用） */
+function sharedOn(p) {
+  return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(K(p).shared) === '1'
+}
+/** 現在選的那一家有共用金鑰 */
 function aiSharedOn() {
-  return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(LS.aiShared) === '1'
+  return sharedOn(aiProvider())
+}
+
+// ── Claude：把 Gemini 格式的請求換成 Claude 的 Messages API，回覆再換回 Gemini 的樣子 ──
+/** Gemini 的 schema（type 大寫）→ Claude 結構化輸出要的 JSON Schema：type 小寫、每個 object 都要 additionalProperties: false */
+function strictSchema(s) {
+  if (Array.isArray(s)) return s.map(strictSchema)
+  if (!s || typeof s !== 'object') return s
+  const out = {}
+  for (const [k, v] of Object.entries(s)) out[k] = k === 'type' && typeof v === 'string' ? v.toLowerCase() : strictSchema(v)
+  if (out.type === 'object') out.additionalProperties = false
+  return out
+}
+/**
+ * 思考設定（照官方文件 2026-10）：盤點、讀標籤不用想，關掉比較快、也不用多付思考的錢。
+ * Sonnet 5.5 不能 disabled，最低是 between_tools；Opus 5.5 不能關，只能把 effort 調低；Haiku 5.5、Sonnet 5、Opus 5 可以 disabled；4.x 預設就沒在想。
+ */
+function claudeThinking(model) {
+  if (/sonnet-5-5/.test(model)) return { thinking: { type: 'between_tools' } }
+  if (/opus-5-5|fable|mythos/.test(model)) return { output_config: { effort: 'low' } }
+  if (/haiku-5-5|(sonnet|opus)-5(-\d{8})?$/.test(model)) return { thinking: { type: 'disabled' } }
+  return {}
+}
+/**
+ * 請求：models?pageSize=…→ 列模型；models/X:generateContent → v1/messages。
+ * 有 responseSchema 的用「強制呼叫一個工具」拿到結構化 JSON（Claude 一定照格式回）；只要 JSON 的就在最後加一句提醒。
+ */
+function toClaude(path, opts) {
+  if (/^models\?/.test(path)) return { cpath: 'v1/models?limit=100', method: 'GET', body: null }
+  const m = /^models\/([\w.\-]+):generateContent$/.exec(path)
+  if (!m) throw new ApiError('不支援的 AI 請求', 400, `claude: unsupported path ${path}`)
+  const src = JSON.parse(opts.body || '{}')
+  const gc = src.generationConfig || {}
+  const content = []
+  for (const c of src.contents || [])
+    for (const p of c.parts || []) {
+      if (p.text) content.push({ type: 'text', text: p.text })
+      const img = p.inline_data || p.inlineData
+      if (img) content.push({ type: 'image', source: { type: 'base64', media_type: img.mime_type || img.mimeType || 'image/jpeg', data: img.data } })
+    }
+  // 不送 temperature（新的 Sonnet／Opus 收到非預設值會回 400）；不用「強制工具」（Sonnet 5.5 不支援），改用結構化輸出
+  const th = claudeThinking(m[1])
+  const body = { model: m[1], max_tokens: Math.min(Number(gc.maxOutputTokens) || 16000, 16000), messages: [{ role: 'user', content }], ...(th.thinking ? { thinking: th.thinking } : {}) }
+  const oc = { ...(th.output_config || {}) }
+  if (gc.responseSchema) oc.format = { type: 'json_schema', schema: strictSchema(gc.responseSchema) }
+  if (Object.keys(oc).length) body.output_config = oc
+  if (gc.responseSchema) {
+    /* 結構化輸出：答案在文字區塊裡，一定是符合 schema 的 JSON */
+  } else if (gc.responseMimeType === 'application/json' && !/只回 JSON/.test(content.map((c) => c.text || '').join(''))) {
+    content.push({ type: 'text', text: '只回 JSON，不要其他文字。' })
+  }
+  return { cpath: 'v1/messages', method: 'POST', body }
+}
+/** 回覆換成 Gemini 的樣子：只拿文字區塊（思考區塊不要）；停在字數上限、拒絕回答也照 Gemini 的說法 */
+function fromClaude(cpath, data) {
+  if (cpath.startsWith('v1/models')) return { models: (data.data || []).map((m) => ({ name: `models/${m.id}`, displayName: m.display_name || m.id, supportedGenerationMethods: ['generateContent'] })) }
+  // 寫到一半被字數上限切斷：框會少算，不能當成結果（以前 Gemini 會變成壞掉的 JSON、會報錯；這裡要自己擋）
+  if (data.stop_reason === 'max_tokens') throw new ApiError('這張照片的東西太多，AI 一次寫不完：請拍近一點、分成兩張再試。', 422, 'claude: stop_reason max_tokens')
+  let text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text || '').join('')
+  // 只要 JSON 的：先整段試；不行（前後多了一句話）才取第一個 { 到最後一個 }
+  try {
+    JSON.parse(text.replace(/^`(?:json)?\s*|\s*`$/g, ''))
+  } catch {
+    const a = text.indexOf('{')
+    const b = text.lastIndexOf('}')
+    if (a >= 0 && b > a) text = text.slice(a, b + 1)
+  }
+  const finishReason = data.stop_reason === 'max_tokens' ? 'MAX_TOKENS' : data.stop_reason === 'refusal' ? 'SAFETY' : 'STOP'
+  return { candidates: [{ content: { parts: [{ text }] }, finishReason }], usageMetadata: data.usage }
+}
+/** Claude 的錯誤 → 跟 Gemini 一樣的 ApiError（529 太多人用＝503；429 會附 retry-after 秒數） */
+function claudeResult(status, data, retryAfter = 0) {
+  const s = status === 529 ? 503 : status
+  if (s >= 200 && s < 300) return data
+  const msg = data?.error?.message || ''
+  const err = new ApiError(friendly(s, msg), s, `${status} ${data?.error?.type || ''} ${msg}`.trim().slice(0, 200))
+  if (retryAfter) err.retryAfter = Math.min(30, retryAfter)
+  throw err
+}
+async function callClaude(path, opts = {}, timeoutMs = 0) {
+  const req = toClaude(path, opts)
+  const key = ls.get(LS.claudeKey)
+  // 沒有自己的金鑰、擁有者有放共用的 Claude 金鑰：經過自己的 Apps Script 問（金鑰不會到這支手機）
+  if (!key && aiViaSheet()) {
+    const data = await callViaSheet(req.cpath, { ...opts, body: req.body ? JSON.stringify(req.body) : '' }, timeoutMs, 'claude')
+    return fromClaude(req.cpath, data)
+  }
+  if (!key) throw new ApiError(`還沒設定 ${keyName('claude')}：請到「設定」貼上。`, 401, 'claude: no key')
+  const ctrl = new AbortController()
+  const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : 0
+  const outer = opts.signal
+  const onOuter = () => ctrl.abort()
+  outer?.addEventListener('abort', onOuter)
+  let res
+  try {
+    if (outer?.aborted) throw new Error('aborted')
+    res = await fetch(`${CLAUDE_API}/${req.cpath}`, {
+      method: req.method,
+      // 金鑰放標頭；anthropic-dangerous-direct-browser-access：允許從瀏覽器直接呼叫（金鑰只存在這支手機）
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true', ...(req.body ? { 'content-type': 'application/json' } : {}) },
+      body: req.body ? JSON.stringify(req.body) : undefined,
+      signal: ctrl.signal,
+    })
+  } catch {
+    if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
+    if (ctrl.signal.aborted) throw new ApiError(`等了 ${Math.round(timeoutMs / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${timeoutMs / 1000}s`)
+    throw new ApiError('沒有網路，或連不到 Claude。辨識時請不要切到別的 App、不要讓螢幕暗掉。', 0, 'network error')
+  } finally {
+    clearTimeout(timer)
+    outer?.removeEventListener('abort', onOuter)
+  }
+  const data = await res.json().catch(() => ({}))
+  return fromClaude(req.cpath, claudeResult(res.status, data, parseFloat(res.headers.get('retry-after') || '0') || 0))
 }
 /** 這台可以用共用金鑰：檢視者不行（雲端也會擋），所以檢視者的拍照鈕不會亮 */
 function aiViaSheet() {
@@ -561,7 +726,7 @@ function aiViaSheet() {
 /** 經過 Apps Script 時多等的時間：雲端那邊收到後照樣會跑完、照樣計費，太早放棄再送一次＝花兩次錢 */
 const SHEET_GRACE = 20000
 /** 共用金鑰：請求送到自己的 Apps Script，由它拿雲端的金鑰問 Gemini（會多 1～2 秒） */
-async function callViaSheet(path, opts, timeoutMs) {
+async function callViaSheet(path, opts, timeoutMs, provider = 'gemini') {
   const outer = opts.signal
   if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
   const ctrl = new AbortController()
@@ -576,11 +741,11 @@ async function callViaSheet(path, opts, timeoutMs) {
   outer?.addEventListener('abort', onAbort)
   let r
   try {
-    r = await postSync({ action: 'ai', path, body: opts.body || '' }, { signal: ctrl.signal })
+    r = await postSync({ action: 'ai', ...(provider === 'claude' ? { provider } : {}), path, body: opts.body || '' }, { signal: ctrl.signal })
   } catch (e) {
     if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
     if (timedOut) throw new ApiError(`等了 ${Math.round((timeoutMs + SHEET_GRACE) / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${(timeoutMs + SHEET_GRACE) / 1000}s (sheet)`)
-    throw sheetAiError(e)
+    throw sheetAiError(e, provider)
   } finally {
     clearTimeout(timer)
     outer?.removeEventListener('abort', onAbort)
@@ -593,16 +758,18 @@ async function callViaSheet(path, opts, timeoutMs) {
   } catch {
     /* 回覆不是 JSON：當成空的，toResult 會依狀態碼處理 */
   }
-  return toResult(r.status, data)
+  return provider === 'claude' ? claudeResult(r.status, data) : toResult(r.status, data)
 }
 /**
  * 經過雲端問 AI 失敗：分清楚是「雲端說不行」（檢視者、被移除、今天次數到上限、不支援 → 不重試，直接顯示原因）
  * 還是「網路斷了、雲端暫時出錯」（可以重試）。以前全部當成網路斷線，一張照片會自動重試十幾次。
  */
-function sheetAiError(e) {
+function sheetAiError(e, provider = 'gemini') {
   const d = e?.data
   const msg = e?.message || '連不到 Google（沒有網路？）'
   if (!d || d.network) return new ApiError(msg, 0, `sheet ${msg}`.slice(0, 200))
+  // 雲端還不認得 Claude（舊版程式碼）：會回「不支援的 AI 請求」
+  if (provider === 'claude' && /不支援的 AI 請求/.test(d.error || '')) return new ApiError('雲端的程式碼是舊版，還不會幫忙問 Claude：請擁有者到「設定 → Google 試算表」複製新的程式碼、貼上、部署新版本。', 403, 'sheet: old Apps Script (no claude)')
   if (d.html) return Object.assign(new ApiError(msg, 503, `sheet html ${d.httpStatus || ''}`.trim()), { sheetDown: true })
   // 404＝共用金鑰不支援這個模型：換下一個模型試；其他都是雲端明確說不行：重試也一樣，不要浪費
   const status = d.status === 404 && !d.quota && !d.viewer && !d.revoked ? 404 : 403
@@ -624,7 +791,25 @@ function thinkingFor(model, purpose = 'detect') {
 }
 /** 單次等待上限：第一輪找東西、第二輪比對 */
 const TIMEOUT = { detect: 40000, refine: 35000 }
+/** Claude 一次把整張照片的框寫完比較久（不會先想），等久一點才不會太早放棄、重送又多花一次錢 */
+const aiTimeout = (k) => (isClaude() ? { detect: 90000, refine: 80000 }[k] : TIMEOUT[k])
 
+/**
+ * Claude 的模型：Sonnet（平常）優先、Haiku（快、便宜，備用）其次；Opus（最強、比較貴）只在設定裡手動選。版本新的優先。
+ * 例：claude-sonnet-5-5、claude-haiku-4-5-20251001（舊的 claude-3-5-sonnet-… 也認得版本）
+ */
+function rankClaude(models, kind = /sonnet|haiku/) {
+  const ver = (n) => {
+    // 版本只認 1～2 位數（後面的 20251001 是日期，不是版本）
+    const m = n.match(/(?:sonnet|haiku|opus)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/) || n.match(/claude-(\d{1,2})(?:-(\d{1,2}))?-/)
+    return m ? Number(m[1]) + (m[2] ? Number(m[2]) / 10 : 0) : 0
+  }
+  return models
+    .map((m) => m.name.replace(/^models\//, ''))
+    // 4.5 以上才支援結構化輸出（盤點要的 JSON 格式）
+    .filter((n) => /^claude-/.test(n) && kind.test(n) && ver(n) >= 4.5)
+    .sort((a, b) => (/sonnet/.test(b) ? 1 : 0) - (/sonnet/.test(a) ? 1 : 0) || ver(b) - ver(a))
+}
 /** 自動挑模型：可用、會看圖、名字有 flash；穩定版優先、版本新的優先、lite 排後面 */
 function rankModels(models, kind = /flash/) {
   const score = (name) => {
@@ -643,19 +828,26 @@ function rankModels(models, kind = /flash/) {
 let modelCache = null
 /** Pro：看得比較細（相似品分得比較開），但比較慢、免費額度比 Flash 少很多；只在設定裡手動選 */
 let proCache = []
+/** 模型清單是哪一家的（換了一家就重新拿） */
+let modelCacheOf = ''
 async function fetchModels() {
+  const p = aiProvider()
   const data = await call('models?pageSize=200')
-  modelCache = rankModels(data.models || [])
-  proCache = rankModels(data.models || [], /-pro/)
+  modelCache = p === 'claude' ? rankClaude(data.models || []) : rankModels(data.models || [])
+  proCache = p === 'claude' ? rankClaude(data.models || [], /opus/) : rankModels(data.models || [], /-pro/)
+  modelCacheOf = p
   return modelCache
 }
+/** 已經拿過、而且是現在這一家的模型清單 */
+const cachedModels = () => (modelCacheOf === aiProvider() ? modelCache : null)
 async function currentModel(force = false) {
-  const saved = ls.get(LS.model)
-  // 之前忙線時自動換成 Lite 的，下次重新挑（Lite 只當備用）；自己在設定選的就照用
-  if (saved && !force && (!/lite/.test(saved) || ls.get(LS.pinned) === saved)) return saved
+  const k = K()
+  const saved = ls.get(k.model)
+  // 之前忙線時自動換成備用（Lite／Haiku）的，下次重新挑；自己在設定選的就照用
+  if (saved && !force && (!isLite(saved) || ls.get(k.pinned) === saved)) return saved
   const list = await fetchModels()
-  if (!list.length) throw new ApiError('這個 API Key 找不到能看圖的 Gemini 模型。', 0)
-  ls.set(LS.model, list[0])
+  if (!list.length) throw new ApiError(`這個 API Key 找不到能看圖的 ${aiName()} 模型。`, 0)
+  ls.set(k.model, list[0])
   return list[0]
 }
 
@@ -751,7 +943,7 @@ async function generate(model, image, simple = false, refs = [], thinking = true
           ...(thinking && thinkingFor(model) ? { thinkingConfig: thinkingFor(model) } : {}),
         },
   }
-  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, TIMEOUT.detect)
+  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, aiTimeout('detect'))
   const cand = data?.candidates?.[0]
   const text = cand?.content?.parts?.map((p) => p.text || '').join('') || ''
   if (!text) throw new ApiError(cand?.finishReason === 'SAFETY' ? 'AI 拒絕分析這張照片，請換一張。' : 'AI 沒有回傳結果，請再試一次。', 0, `empty response ${cand?.finishReason || ''}`)
@@ -825,14 +1017,16 @@ const HEDGE_MS = 15000
 async function analyze(photo, onStatus = () => {}, refs = []) {
   const image = await blobToBase64(photo.blob)
   const first = await currentModel()
-  const list = modelCache ?? (await fetchModels().catch(() => [first]))
-  const models = [first, ...list.filter((m) => m !== first)].slice(0, 4)
-  // 備用：最快的 Lite（分組不夠細沒關係，背景的相似品比對會用強的模型再分一次）
-  const backup = list.find((m) => m !== first && /lite/.test(m)) ?? list.find((m) => m !== first)
+  const list = cachedModels() ?? (await fetchModels().catch(() => [first]))
+  // 備用：最快的 Lite／Haiku（分組不夠細沒關係，背景的相似品比對會用強的模型再分一次）
+  const backup = list.find((m) => m !== first && isLite(m)) ?? list.find((m) => m !== first)
+  // Claude 沒有免費額度：最多試兩個模型（現在的 → Haiku），不要一路換好幾個一樣慢的 Sonnet、每個都付錢
+  const models = isClaude() ? [first, backup].filter(Boolean) : [first, ...list.filter((m) => m !== first)].slice(0, 4)
   const hedge = new AbortController()
   const primary = attemptChain(models, image, refs, onStatus, hedge.signal)
   // 用共用金鑰（經過 Apps Script）不要「同時請備用模型」：這邊取消了，雲端那邊照樣跑完、照樣計費，等於花兩次錢
-  if (!backup || viaSheetNow()) return primary.finally(() => hedge.abort())
+  // Claude 也不「同時請備用」：沒有免費額度，同時兩個＝每張慢的照片付兩次錢；主模型太慢會直接換 Haiku
+  if (!backup || viaSheetNow() || isClaude()) return primary.finally(() => hedge.abort())
   let timer = 0
   let started = false
   const second = new Promise((resolve, reject) => {
@@ -840,7 +1034,7 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
       started = true
       onStatus(`${first} 比較慢，同時請 ${backup} 一起做，誰先好就用誰`)
       generate(backup, image, false, refs, true, hedge.signal).then(resolve, reject)
-    }, HEDGE_MS)
+    }, isClaude() ? 45000 : HEDGE_MS)
     // 主模型在備用開始前就失敗（已經換過所有模型）：不用再等備用
     primary.catch((e) => {
       if (!started) {
@@ -860,7 +1054,7 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
 }
 
 /** 這次的 AI 請求會經過 Apps Script（這台沒有自己的金鑰、用擁有者的共用金鑰） */
-const viaSheetNow = () => !ls.get(LS.key) && aiViaSheet()
+const viaSheetNow = () => !ls.get(K().key) && aiViaSheet()
 /** 連續幾次「網路斷了」就停：網路真的不通，再試也是白等 */
 const MAX_NET_FAILS = 3
 
@@ -880,8 +1074,9 @@ async function attemptChain(models, image, refs, onStatus, signal) {
     for (const [pi, step] of plan.entries()) {
       let t0 = Date.now()
       if (step.wait) {
-        onStatus(`Google 忙線，${step.wait / 1000} 秒後再試（${model}）`)
-        await sleep(lastErr?.retryAfter ? Math.min(lastErr.retryAfter * 1000, 15000) : step.wait)
+        const ms = lastErr?.retryAfter ? Math.min(lastErr.retryAfter * 1000, 15000) : step.wait
+        onStatus(`${isClaude() ? 'Claude' : 'Google'} 忙線，${Math.round(ms / 100) / 10} 秒後再試（${model}）`)
+        await sleep(ms)
       }
       try {
         // 第二次：上一次是 400（不接受思考設定）才拿掉；網路斷一下就照原本的快速設定再送
@@ -890,7 +1085,7 @@ async function attemptChain(models, image, refs, onStatus, signal) {
         const r = await generate(model, image, step.simple, refs, think, signal)
         onStatus(`${model} 完成（${Math.round((Date.now() - t0) / 1000)} 秒，找到 ${r.objects.length} 個）`)
         // 這個模型比較順：之後先用它（但不要換成 Lite：Lite 分不出相似品，只當備用）
-        if (mi > 0 && !/lite/.test(model)) ls.set(LS.model, model)
+        if (mi > 0 && !isLite(model)) ls.set(K().model, model)
         return r
       } catch (e) {
         lastErr = e
@@ -898,7 +1093,7 @@ async function attemptChain(models, image, refs, onStatus, signal) {
         onStatus(`${model} 沒成功：${e.detail || e.message}（${Math.round((Date.now() - t0) / 1000)} 秒）`)
         if (!(e instanceof ApiError)) throw e
         if (e.status === 404) {
-          if (mi === 0) ls.set(LS.model, '')
+          if (mi === 0) ls.set(K().model, '')
           break
         }
         // 等太久：同一個模型再等一次也是慢，直接換下一個（比較快的）模型
@@ -912,7 +1107,9 @@ async function attemptChain(models, image, refs, onStatus, signal) {
         }
         // 400：先拿掉思考設定、再改簡化請求；都不行就是別的問題（Key、照片）
         if (e.status === 400) {
-          if (pi < plan.length - 1) continue
+          // Claude 沒有「思考設定不被接受」這回事：同一個請求再送也是 400（例如餘額不足），不要白送三次；
+          // 任何一家的金鑰錯、餘額不足也一樣，直接停
+          if (!isClaude() && !/credit|billing|api key/i.test(e.detail || '') && pi < plan.length - 1) continue
           throw e
         }
         if (!retryable(e)) throw e
@@ -1018,10 +1215,10 @@ async function sameScaleCrops(photo, objects, indices) {
 
 /** 第二輪用最強的非 Lite 模型（Lite 看不出粗細差別） */
 async function refineModel() {
-  const list = modelCache ?? (await fetchModels().catch(() => []))
-  const saved = ls.get(LS.model)
-  if (saved && !/lite/.test(saved)) return saved
-  return list.find((m) => !/lite/.test(m)) ?? saved ?? list[0]
+  const list = cachedModels() ?? (await fetchModels().catch(() => []))
+  const saved = ls.get(K().model)
+  if (saved && !isLite(saved)) return saved
+  return list.find((m) => !isLite(m)) ?? saved ?? list[0]
 }
 
 /** 把 objects 裡 indices 這些框重新分組；失敗就保留原本的結果 */
@@ -1050,7 +1247,7 @@ async function refineObjects(photo, objects, indices, refs = [], onStatus = () =
 ${refs.length ? '如果某一組跟某張樣品一樣，label、brand、model、spec 就照那張樣品填，一字不差。\n' : ''}店內品項清單：
 ${catalogLines().join('\n')}`
   // 物件越多，給 AI 的時間越多（背景在跑，不會卡住畫面）
-  const timeout = Math.min(60000, TIMEOUT.refine + indices.length * 1000)
+  const timeout = Math.min(isClaude() ? 120000 : 60000, aiTimeout('refine') + indices.length * 1000)
   const send = (think) => {
     const body = {
       contents: [{ role: 'user', parts: [...sampleParts, ...objectParts, { text }] }],
@@ -2153,10 +2350,10 @@ async function viewHome() {
         : hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">${icon('camera', 30)}</span><span class="grow"><b>新盤點</b><span class="meta">拍一格貨架，AI 幫你數<br>拍到 ${locTag(locations()[0]?.code || 'A-03', 'sm')} 會自動填位置</span></span>${chev}</button>`
         : syncReady()
-          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>還不能拍照盤點：AI 金鑰還沒放到雲端</b><p>到「設定 → Gemini API Key」貼上金鑰，再按<span class="nb">「放到雲端」</span>，這台和同事就都能用。</p>' : '<b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → Gemini API Key」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 Gemini API Key。</p>'}<button class="btn small" data-go="settings">去設定</button></div></div>`
+          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>還不能拍照盤點：AI 金鑰還沒放到雲端</b><p>到「設定 → AI」貼上金鑰，再按<span class="nb">「放到雲端」</span>，這台和同事就都能用。</p>' : '<b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → AI」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 AI 金鑰。</p>'}<button class="btn small" data-go="settings">去設定</button></div></div>`
           : freshPhone()
-            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'} <span class="badge new">新</span></b>${joinHow()}<p>自己是擁有者、第一次用：按<span class="nb">「去設定」</span>，貼上 <span class="nb">Gemini API Key</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
-            : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 Gemini API Key<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>收到同事的邀請：在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>，不用 Key。</p><div class="row-actions"><button class="btn small" data-go="settings">去設定</button><button class="btn small secondary" data-action="paste-invite">貼上邀請並加入</button></div></div></div>`
+            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'} <span class="badge new">新</span></b>${joinHow()}<p>自己是擁有者、第一次用：按<span class="nb">「去設定」</span>，貼上 <span class="nb">AI 金鑰</span><span class="nb">（Claude 或 Gemini）</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
+            : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 AI 金鑰<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>收到同事的邀請：在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>，不用 Key。</p><div class="row-actions"><button class="btn small" data-go="settings">去設定</button><button class="btn small secondary" data-action="paste-invite">貼上邀請並加入</button></div></div></div>`
     }
     </div>
     ${sessions.length || items.length ? homeStats(sessions, items) : ''}
@@ -2395,8 +2592,8 @@ function aiShareRows(key) {
     )
   if (myRole() === 'owner')
     rows.push(
-      ls.get(LS.aiShared) === '1'
-        ? `<div class="row"><span class="grow"><span class="title">金鑰已放在雲端給大家共用</span>${fresh}<br><span class="meta">同事不用跟你要金鑰；大家的用量都算在這把金鑰上。</span></span><button class="btn small secondary" data-action="ai-unshare">停止共用</button></div>`
+      ls.get(K().shared) === '1'
+        ? `<div class="row"><span class="grow"><span class="title">${aiName()} 金鑰已放在雲端給大家共用</span>${fresh}<br><span class="meta">同事不用跟你要金鑰；大家的用量都算在這把金鑰上。</span></span><button class="btn small secondary" data-action="ai-unshare">停止共用</button></div>`
         : `<div class="row"><span class="grow"><span class="title">把金鑰放到雲端，大家共用</span>${fresh}<br><span class="meta">金鑰存在你的 Apps Script，同事的手機不會有，不用一個一個給。</span></span><button class="btn small" data-action="ai-share">放到雲端</button></div>`,
     )
   return rows.length ? `<div class="group">${rows.join('')}</div>` : ''
@@ -2413,7 +2610,7 @@ const diagSection = () =>
     <p class="footnote">辨識一直失敗時按這個，把結果截圖傳給擁有者（管理這個 App 的人）。</p>`
     : ''
 /** 還沒設定任何同步、也沒有金鑰的新手機（大多是剛收到邀請的同事） */
-const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.key)
+const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.key) && !ls.get(LS.claudeKey)
 /**
  * 4.7.7：在瀏覽器裡用、資料跟桌面 App 分開的（iPhone 的 Safari／Chrome、LINE 裡打開的）。
  * 使用者回報：在 Safari 早就連好，打開桌面 App 卻是全新的，大家一定都會這樣 → 「複製到桌面 App」
@@ -2431,7 +2628,7 @@ const joinHow = () =>
 function moveCard() {
   if (!syncReady() || !browserSeparate() || ls.get(LS.moveHintOff) === '1') return ''
   const keyNote =
-    canEdit() && ls.get(LS.key) && !aiSharedOn()
+    canEdit() && ls.get(K().key) && !aiSharedOn()
       ? myRole() === 'owner'
         ? '<p class="move-note">API Key 不會帶過去：先到<span class="nb">「設定」</span>按<span class="nb">「放到雲端」</span>。</p>'
         : '<p class="move-note">API Key 不會帶過去，<span class="nb">桌面 App 裡</span><span class="nb">要再貼一次</span>。</p>'
@@ -2439,8 +2636,9 @@ function moveCard() {
   return `<div class="setup-card move-card"><span class="setup-ico" aria-hidden="true">${icon('copy', 26)}</span><div class="grow"><b>桌面的 App 要再接一次 <span class="badge new">新</span></b><p>桌面的 App 跟瀏覽器的資料是分開的：</p><ol class="steps-list"><li>按「複製到桌面 App」。</li><li>打開桌面的「聖佳庫存」<span class="nb">（還沒有：分享</span>→<span class="nb">加入主畫面）</span>。</li><li>按<span class="nb">「貼上邀請並加入」</span>。</li></ol><p class="move-note">只貼到自己的 App，<span class="nb">不要傳給別人</span>；點到一半的點貨單先按完成。</p>${keyNote}<div class="row-actions"><button class="btn small" data-action="move-to-app">複製到桌面 App</button><button class="btn small plain" data-action="move-hint-off">不用了</button></div></div></div>`
 }
 async function viewSettings() {
-  const key = ls.get(LS.key)
-  const model = ls.get(LS.model)
+  const prov = aiProvider()
+  const key = ls.get(K().key)
+  const model = ls.get(K().model)
   const samples = await idb.samples.all().catch(() => [])
   return `
   <main class="app">
@@ -2453,7 +2651,7 @@ async function viewSettings() {
         <button class="btn" data-action="paste-invite">貼上邀請並加入</button>
         <p class="footnote">讀不到的話：把邀請貼在下面，再按「加入」。</p>
         <div class="row-actions"><input class="field" id="link-code" placeholder="貼上收到的邀請" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small secondary" data-action="sync-link">加入</button></div>
-        <p class="footnote">自己就是擁有者（管理這個 App 的人）：<span class="nb">不用填這裡</span>，往下設定 <span class="nb">Gemini API Key</span>、<span class="nb">Google 試算表</span>。</p></div>`
+        <p class="footnote">自己就是擁有者（管理這個 App 的人）：<span class="nb">不用填這裡</span>，往下設定 <span class="nb">AI 金鑰</span>、<span class="nb">Google 試算表</span>。</p></div>`
         : serverSlow() && myRole() === 'owner'
           ? `<div class="hint-card stack fast-hint"><div><b>同步可以快很多</b> <span class="badge new">新</span><br>把 Google 那邊的程式碼更新成新版，<span class="nb">同步上傳、下載</span>會快很多，<span class="nb">也會套用</span>共用 AI 的每日次數上限、點貨紀錄的保護。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
           : syncReady() && myRole() === 'owner' && serverFastOff()
@@ -2461,18 +2659,30 @@ async function viewSettings() {
             : ''
     }
     <div class="settings-cols"><div class="settings-col">
-    <p class="section-title">Gemini API Key</p>
+    <p class="section-title">AI <span class="badge new">新</span></p>
+    ${
+      // 4.8：可以選 Claude 或 Gemini；檢視者不能用 AI，不用選
+      canEdit()
+        ? `<div class="seg ai-seg" role="tablist" aria-label="用哪一家的 AI">${['claude', 'gemini'].map((p) => `<button role="tab" aria-selected="${p === prov}" data-action="set-provider" data-provider="${p}">${p === 'claude' ? 'Claude' : 'Gemini'}</button>`).join('')}</div>
+      <p class="footnote" style="margin-bottom:12px">${prov === 'claude' ? 'Claude（Anthropic）：讀標籤、讀單子很強；<span class="nb">沒有免費額度</span>，照用量付費；送去的照片<span class="nb">預設不會拿去訓練</span>。' : 'Gemini（Google）：<span class="nb">畫框最準</span>、<span class="nb">有免費額度</span>；免費版的照片可能被拿去改善產品。'}<span class="nb">盤點、讀標籤、</span><span class="nb">讀單子、相似品比對</span><span class="nb">都用這裡選的。</span></p>`
+        : ''
+    }
     ${(() => {
-      const keyForm = `<input class="field" id="apikey" type="password" placeholder="貼上 API Key（AIza 開頭）" value="${esc(key)}" autocomplete="off" spellcheck="false">
+      const keyForm =
+        prov === 'claude'
+          ? `<input class="field" id="apikey" type="password" placeholder="貼上 Claude API Key（sk-ant- 開頭）" value="${esc(key)}" autocomplete="off" spellcheck="false">
       <div class="row-actions"><button class="btn small" data-action="save-key">儲存並測試</button><button class="btn small secondary" data-action="toggle-key">顯示／隱藏</button></div>
-      <p class="footnote" style="margin:0">沒有 Key？到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style="color:var(--tint)">Google AI Studio</a> 免費建立。Key 只存在這支手機，照片只會送到 Google Gemini 分析。</p>`
+      <p class="footnote">沒有 Key？到 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" style="color:var(--tint)">Claude Console</a> 申請<span class="nb">（要先在 Billing 儲值）</span>。Key 只存在這支手機，照片只會送到 <span class="nb">Anthropic 分析</span>。</p>`
+          : `<input class="field" id="apikey" type="password" placeholder="貼上 Gemini API Key（AIza 開頭）" value="${esc(key)}" autocomplete="off" spellcheck="false">
+      <div class="row-actions"><button class="btn small" data-action="save-key">儲存並測試</button><button class="btn small secondary" data-action="toggle-key">顯示／隱藏</button></div>
+      <p class="footnote">沒有 Key？到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style="color:var(--tint)">Google AI Studio</a> 免費建立。Key 只存在這支手機，照片只會送到 <span class="nb">Google Gemini 分析</span>。</p>`
       // 已經在用擁有者的共用金鑰：自己貼金鑰收進「進階」，同事才不會以為要自己去申請
       return aiSharedOn() && !key
         ? `<div class="stack">${aiShareRows(key)}${canEdit() ? `<details class="steps"><summary>進階：改用自己的金鑰</summary><div class="stack" style="margin-top:6px">${keyForm}</div></details>` : ''}</div>`
         : `<div class="stack">${keyForm}${aiShareRows(key)}</div>`
     })()}
     <p class="section-title">辨識模型</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model || '自動挑選')}</span><br><span class="meta">自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro</span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">${prov === 'claude' ? '自動挑最新的 Sonnet；忙線時改用 Haiku。相似品分不開時，可以改用 Opus（比較貴）' : '自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro'}</span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
       <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">AI 原本數的跟你確認後的比；也可以用標準答案考 AI</span></span>${chev}</button></div>
     <div id="models"></div>
     <p class="section-title">店內品項清單</p>
@@ -2570,7 +2780,7 @@ async function viewSettings() {
         <li><b>權限：</b>擁有者、管理員（可以邀請／移除人）、編輯者（可以盤點、修改）、檢視者（只能看）。改權限馬上生效，不用換連結碼。</li>
         <li><b>有人離職：</b>在「共用設定」把他「移除權限」就好，其他人不用改；他的手機下次連線時，App 裡的公司資料會自動清除。</li>
         <li><b>手機上也有一份：</b>每台裝置會存一份方便離線看；手機請設螢幕鎖。</li>
-        <li><b>拍照辨識：</b>照片會送到 Google Gemini 分析。免費版的條款寫明：Google 可以用送去的內容改善產品，也可能有人工審閱。擔心的話，到 Google AI Studio 開啟付費（照用量計費），付費版不會拿去改善產品。照片裡不要拍到價格單、客戶資料。</li>
+        <li><b>拍照辨識：</b>照片會送到設定裡選的那一家 AI 分析。<b>Claude（Anthropic）</b>：API 送去的內容預設不會拿去訓練模型。<b>Gemini（Google）</b>：免費版的條款寫明 Google 可以用送去的內容改善產品，也可能有人工審閱；到 Google AI Studio 開啟付費（照用量計費）就不會。不管用哪一家，照片裡都不要拍到價格單、客戶資料。</li>
       </ol>
     </details>` : ''}
     <p class="section-title">資料</p>
@@ -4019,7 +4229,7 @@ async function viewPickEdit() {
     ? `<div class="pk-ai-busy" role="status"><span class="spinner small" aria-hidden="true"></span><span class="grow"><b>AI 讀單子中…</b><br><span class="meta">大約 5～20 秒；只送框裡、沒遮住的部分</span></span></div>`
     : hasAi()
       ? `<div class="pk-ai"><div class="row-actions"><label class="btn secondary pk-ai-btn">${icon('camera', 20)}拍單子讓 AI 讀<input type="file" accept="image/*" capture="environment" id="pk-cam" class="sr-only"></label><label class="btn secondary pk-ai-btn">${icon('image', 20)}從相簿選<input type="file" accept="image/*" id="pk-album" class="sr-only"></label></div><p class="pk-privacy">${icon('shield', 16)}<span>拍完先框出品項、遮住單價和金額那幾欄；只會送框裡、沒遮住的部分給 AI。</span></p></div>`
-      : `<div class="pk-ai off"><div class="row-actions"><button class="btn secondary pk-ai-btn" data-action="pk-no-ai" aria-disabled="true">${icon('camera', 20)}拍單子讓 AI 讀</button></div><p class="pk-privacy">${icon('warning', 16)}<span>${syncReady() ? '要先設定 AI：請擁有者到「設定」把 AI 金鑰放到雲端，或在「設定」貼上自己的 Gemini API Key。' : '要先設定 AI：到「設定」貼上 Gemini API Key。'}打編號、搜品名不用 AI。</span></p></div>`
+      : `<div class="pk-ai off"><div class="row-actions"><button class="btn secondary pk-ai-btn" data-action="pk-no-ai" aria-disabled="true">${icon('camera', 20)}拍單子讓 AI 讀</button></div><p class="pk-privacy">${icon('warning', 16)}<span>${syncReady() ? '要先設定 AI：請擁有者到「設定」把 AI 金鑰放到雲端，或在「設定」貼上自己的 AI 金鑰。' : '要先設定 AI：到「設定」貼上 AI 金鑰。'}打編號、搜品名不用 AI。</span></p></div>`
   const right = copy
     ? `<button class="btn small plain" data-action="pk-cancel-edit">放棄修改</button>`
     : p.doneAt
@@ -6447,8 +6657,10 @@ const LABEL_SCHEMA = {
 }
 /** 問 AI 一次、回 JSON：同一個模型先有思考設定、再拿掉；不行就換下一個模型 */
 async function askJson(parts, schema, timeoutMs = 30000) {
+  // Claude 寫得比較慢：等久一點，不然逾時換模型＝多付一次錢
+  if (isClaude()) timeoutMs *= 2
   const first = await currentModel()
-  const list = modelCache ?? (await fetchModels().catch(() => [first]))
+  const list = cachedModels() ?? (await fetchModels().catch(() => [first]))
   const models = [first, ...list.filter((m) => m !== first)].slice(0, 3)
   let lastErr
   for (const model of models) {
@@ -6463,7 +6675,7 @@ async function askJson(parts, schema, timeoutMs = 30000) {
         lastErr = e
         if (e instanceof SyntaxError) break
         if (!(e instanceof ApiError)) throw e
-        if (e.status === 400 && think) continue
+        if (e.status === 400 && think && !isClaude()) continue
         if (e.status === 400 || !(retryable(e) || e.status === 404)) throw e
         break
       }
@@ -6741,9 +6953,11 @@ async function postSync(body, opt = {}) {
   if ('fast' in data) ls.set(LS.serverFast, data.fast ? '1' : '0')
   // 擁有者有沒有把 AI 金鑰放在雲端共用（新版雲端程式碼才會回這個）
   if ('ai' in data) {
-    const was = ls.get(LS.aiShared) === '1'
+    const was = `${ls.get(LS.aiShared)}|${ls.get(LS.aiSharedClaude)}`
     ls.set(LS.aiShared, data.ai ? '1' : '')
-    if (was !== !!data.ai) setTimeout(render, 0)
+    // aiClaude：擁有者有沒有放 Claude 的共用金鑰（舊版雲端程式碼沒有這個欄位＝沒有）
+    ls.set(LS.aiSharedClaude, data.aiClaude ? '1' : '')
+    if (was !== `${ls.get(LS.aiShared)}|${ls.get(LS.aiSharedClaude)}`) setTimeout(render, 0)
   }
   // 權限隨時可能被管理員改：每次回覆都更新
   if (data.me?.role) {
@@ -6774,7 +6988,7 @@ async function postSync(body, opt = {}) {
 /** 清除這台的資料（退出同步、被移除權限時） */
 async function wipeLocal(msg) {
   clearTimeout(syncTimer)
-  for (const k of [LS.moveHintOff, LS.aiShared, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId]) ls.set(k, '')
+  for (const k of [LS.moveHintOff, LS.aiShared, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId, LS.aiSharedClaude, LS.claudeKey, LS.claudeModel, LS.claudePinned, LS.provider]) ls.set(k, '')
   // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
   await idb.sessions.clear()
   await idb.items.clear()
@@ -7532,7 +7746,7 @@ function moveSheet() {
         state.moving = true // 搬家中：背景自動同步先停（網址會暫時切來切去）
         clearTimeout(syncTimer)
         // 共用的 AI 金鑰不會跟著搬（金鑰不從雲端傳回手機）：搬完要提醒擁有者在新位置再放一次
-        const aiWas = ls.get(LS.aiShared) === '1'
+        const aiWas = ls.get(LS.aiShared) === '1' || ls.get(LS.aiSharedClaude) === '1'
         try {
           status('1／4 先把最新的資料下載到這台…')
           await syncNow()
@@ -7553,10 +7767,11 @@ function moveSheet() {
           ls.set(LS.sheet, oldUrl)
           await postSync({ action: 'moveTo', url: newUrl })
           ls.set(LS.sheet, newUrl)
-          status(`搬家完成：大家的 App 下次同步會自動跟過來。舊的試算表和資料夾確認沒問題後可以刪掉。${aiWas ? '共用的 AI 金鑰沒有跟著搬：請到「設定 → Gemini API Key」再按一次「放到雲端」，同事才能繼續拍照辨識。' : ''}`)
+          status(`搬家完成：大家的 App 下次同步會自動跟過來。舊的試算表和資料夾確認沒問題後可以刪掉。${aiWas ? '共用的 AI 金鑰沒有跟著搬：請到「設定 → AI」再按一次「放到雲端」，同事才能繼續拍照辨識。' : ''}`)
           if (aiWas) {
             ls.set(LS.aiShared, '')
-            alert('搬家完成。\n\n共用的 AI 金鑰沒有跟著搬（金鑰不會從雲端傳回手機）。\n請到「設定 → Gemini API Key」再按一次「放到雲端」，同事才能繼續拍照辨識。')
+            ls.set(LS.aiSharedClaude, '')
+            alert('搬家完成。\n\n共用的 AI 金鑰沒有跟著搬（金鑰不會從雲端傳回手機）。\n請到「設定 → AI」再按一次「放到雲端」，同事才能繼續拍照辨識。')
             render()
           } else toast('搬家完成')
         } catch (e) {
@@ -7865,7 +8080,7 @@ async function viewQuality() {
 /** 用標準答案考 AI：那些照片重新辨識一次（不看你改過的），每一種比數量 */
 async function runGolden() {
   if (state.golden) return
-  if (!hasAi()) return toast('要先在設定貼上 Gemini API Key，或請擁有者把金鑰放到雲端共用')
+  if (!hasAi()) return toast('要先在設定貼上 AI 金鑰，或請擁有者把金鑰放到雲端共用')
   const sessions = (await db.all()).filter((s) => s.golden)
   const photos = sessions.flatMap((s) => s.photos.filter((p) => p.status === 'done').map((p) => ({ s, p })))
   if (!photos.length) return toast('先勾幾次「當成標準答案」才能考')
@@ -8397,19 +8612,45 @@ $app.addEventListener('click', async (e) => {
       if (syncReady()) syncNow().catch(() => {})
       return
     }
+    case 'set-provider': {
+      // 換一家 AI：模型清單重拿；金鑰、共用設定各自保留，切回來還在
+      // 剛剛貼在欄位裡、是另一家的金鑰（貼錯分頁）：切過去時一起帶過去，不用再貼一次
+      const typed = (document.getElementById('apikey')?.value || '').trim()
+      const carry = typed && ((d.provider === 'claude' && /^sk-ant-/.test(typed)) || (d.provider === 'gemini' && /^AIza/.test(typed))) ? typed : ''
+      ls.set(LS.provider, d.provider)
+      modelCache = null
+      modelCacheOf = ''
+      await render()
+      const el = document.getElementById('apikey')
+      if (carry && el && !el.value) el.value = carry
+      return toast(carry ? `改用 ${aiName(d.provider)}：金鑰已經帶過來，按「儲存並測試」` : `改用 ${aiName(d.provider)}${hasAi() ? '' : '：還要在下面貼上金鑰'}`)
+    }
     case 'save-key': {
       const v = document.getElementById('apikey').value.trim()
-      ls.set(LS.key, v)
-      ls.set(LS.model, '')
-      if (!v) return toast('已清除 API Key')
+      // 金鑰貼錯地方（Claude 的貼到 Gemini、或反過來）：先提醒，不要存
+      if (v && isClaude() && /^AIza/.test(v)) return toast('這是 Gemini 的金鑰（AIza 開頭）：要用 Gemini 請先點上面的「Gemini」')
+      if (v && !isClaude() && /^sk-ant-/.test(v)) return toast('這是 Claude 的金鑰（sk-ant- 開頭）：要用 Claude 請先點上面的「Claude」')
+      const prevKey = ls.get(K().key)
+      const prevModel = ls.get(K().model)
+      ls.set(K().key, v)
+      ls.set(K().model, '')
+      if (!v) {
+        toast(`已清除 ${keyName()}`)
+        return render()
+      }
       const done = busyBtn(t, '測試中…')
       try {
         const list = await fetchModels()
         if (!list.length) return toast('Key 可以用，但找不到能看圖的模型')
-        ls.set(LS.model, list[0])
-        toast(`可以用了！模型：${list[0]}`)
+        ls.set(K().model, list[0])
+        toast(`可以用了！模型：${modelLabel(list[0])}`)
         return render()
       } catch (err) {
+        // 金鑰錯（不是網路斷）：不要存錯的，放回原本的
+        if (err instanceof ApiError && [400, 401, 403].includes(err.status)) {
+          ls.set(K().key, prevKey)
+          ls.set(K().model, prevModel)
+        }
         return toast(err.message)
       } finally {
         done()
@@ -8423,21 +8664,26 @@ $app.addEventListener('click', async (e) => {
     case 'ai-share': {
       // 擁有者：把金鑰放到自己的 Apps Script（指令碼屬性），大家共用；同事手機上不會有金鑰
       // 只放「存好、測過」的金鑰：輸入框裡還沒按「儲存並測試」的不算（打錯一個字，大家都不能用）
-      const v = ls.get(LS.key).trim()
+      const v = ls.get(K().key).trim()
       const typed = (document.getElementById('apikey')?.value || '').trim()
       if (!v || (typed && typed !== v)) return toast('先在上面貼上 API Key、按「儲存並測試」確認可以用，再放到雲端')
-      if (!confirm('把這把金鑰放到你的 Apps Script（雲端）給大家共用？\n同事的手機不會拿到金鑰；大家用的次數都算在這把金鑰上（每人每天最多 300 次）。')) return
+      if (!confirm(`把這把 ${aiName()} 金鑰放到你的 Apps Script（雲端）給大家共用？\n同事的手機不會拿到金鑰；大家用的次數都算在這把金鑰上（每人每天最多 ${isClaude() ? '100' : '300'} 次）。${isClaude() ? '\nClaude 沒有免費額度，大家的用量都從你的 Claude 帳戶扣；Opus 預設不開放給同事。' : ''}`)) return
       const done = busyBtn(t, '測試中…')
       try {
+        // Claude：先確認雲端是新版（認得 Claude）。舊版不認得 provider，會把 Claude 金鑰存成 Gemini 的，蓋掉大家正在用的共用金鑰
+        if (isClaude()) {
+          const h = await postSync({ action: 'hello' })
+          if (!('aiClaude' in h)) return toast('雲端程式碼是舊版，還不會用 Claude：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本，再按一次「放到雲端」')
+        }
         // 放上去之前再測一次（金鑰可能已經被停用）
         try {
           await fetchModels()
         } catch (err) {
           return toast(`這把金鑰現在不能用，沒有放到雲端：${err.message}`)
         }
-        const r = await postSync({ action: 'aiKey', aiKey: v })
-        if (!('ai' in r)) return toast('雲端程式碼是舊版：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本')
-        ls.set(LS.aiShared, '1')
+        const r = await postSync({ action: 'aiKey', aiKey: v, ...(isClaude() ? { provider: 'claude' } : {}) })
+        if (!('ai' in r) || (isClaude() && !('aiClaude' in r))) return toast('雲端程式碼是舊版：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本')
+        ls.set(K().shared, '1')
         toast('已放到雲端：同事打開 App 就能拍照辨識，不用再跟你要金鑰')
         return render()
       } catch (err) {
@@ -8447,10 +8693,10 @@ $app.addEventListener('click', async (e) => {
       }
     }
     case 'ai-unshare': {
-      if (!confirm('停止共用金鑰？之後同事要拍照辨識，就得自己貼金鑰。')) return
+      if (!confirm(`停止共用 ${aiName()} 金鑰？之後同事要用 ${aiName()} 拍照辨識，就得自己貼金鑰。`)) return
       try {
-        await postSync({ action: 'aiKey', aiKey: '' }) // 雲端說不行（例如不是擁有者）會丟錯誤，下面會顯示
-        ls.set(LS.aiShared, '')
+        await postSync({ action: 'aiKey', aiKey: '', ...(isClaude() ? { provider: 'claude' } : {}) }) // 雲端說不行（例如不是擁有者）會丟錯誤，下面會顯示
+        ls.set(K().shared, '')
         toast('已停止共用金鑰')
         return render()
       } catch (err) {
@@ -8458,15 +8704,16 @@ $app.addEventListener('click', async (e) => {
       }
     }
     case 'lookup-no-ai':
-      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰拍標籤；打型號查詢可以用' : syncReady() ? '先請擁有者到「設定」把 AI 金鑰放到雲端，或到「設定」貼上自己的 Gemini API Key' : '先到「設定」貼上 Gemini API Key，才能拍標籤；打型號查詢不用')
+      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰拍標籤；打型號查詢可以用' : syncReady() ? '先請擁有者到「設定」把 AI 金鑰放到雲端，或到「設定」貼上自己的 AI 金鑰' : '先到「設定」貼上 AI 金鑰，才能拍標籤；打型號查詢不用')
     case 'pick-model':
-      if (!hasAi()) return toast(canEdit() ? '先在上面貼上 Gemini API Key' : '檢視者不能用公司共用的金鑰')
+      if (!hasAi()) return toast(canEdit() ? '先在上面貼上 AI 金鑰' : '檢視者不能用公司共用的金鑰')
       try {
         const list = await fetchModels()
-        const rows = (arr) => arr.map((m) => `<button class="row" data-action="use-model" data-model="${esc(m)}"><span class="grow">${esc(m)}</span>${m === ls.get(LS.model) ? `<span class="now-mark">${icon('check', 20)}</span>` : ''}</button>`).join('')
-        document.getElementById('models').innerHTML = `<p class="section-title">快速（Flash）</p><div class="group">${rows(list.slice(0, 6))}</div><p class="footnote">排越前面越推薦（新、穩定、快）。平常用這個。</p>${
+        const rows = (arr) => arr.map((m, i) => `<button class="row" data-action="use-model" data-model="${esc(m)}"><span class="grow">${esc(modelLabel(m))}${arr === list && i === 0 ? ' <span class="badge">推薦</span>' : ''}${modelLabel(m) !== m ? `<br><span class="meta">${esc(m)}</span>` : ''}</span>${m === ls.get(K().model) ? `<span class="now-mark">${icon('check', 20)}</span>` : ''}</button>`).join('')
+        const claude = isClaude()
+        document.getElementById('models').innerHTML = `<p class="section-title">${claude ? '平常（Sonnet／Haiku）' : '快速（Flash）'}</p><div class="group">${rows(list.slice(0, 6))}</div><p class="footnote">排越前面越推薦（新、穩定、快）。平常用這個。${claude ? 'Haiku 比較快、比較便宜，但相似品比較分不開。' : ''}</p>${
           proCache.length
-            ? `<p class="section-title">精細（Pro）</p><div class="group">${rows(proCache.slice(0, 3))}</div><p class="footnote">看得比較細，相似品比較分得開；但每張要等比較久，免費額度也比 Flash 少很多。Flash 分不出來、又不想存樣品照時再試。</p>`
+            ? `<p class="section-title">${claude ? '最強（Opus）' : '精細（Pro）'}</p><div class="group">${rows(proCache.slice(0, 3))}</div><p class="footnote">${claude ? '看得最細，但每張比較慢、費用大約是 Sonnet 的 2 倍。Sonnet 分不出來時再試。' : '看得比較細，相似品比較分得開；但每張要等比較久，免費額度也比 Flash 少很多。Flash 分不出來、又不想存樣品照時再試。'}</p>`
             : ''
         }`
         glueTails(document.getElementById('models'))
@@ -8475,30 +8722,38 @@ $app.addEventListener('click', async (e) => {
       }
       return
     case 'diagnose': {
-      if (!hasAi()) return toast(canEdit() ? '先在上面貼上 Gemini API Key' : '檢視者不能用公司共用的金鑰')
+      if (!hasAi()) return toast(canEdit() ? '先在上面貼上 AI 金鑰' : '檢視者不能用公司共用的金鑰')
       const out = document.getElementById('diag')
       const lines = []
       const show = () => (out.innerHTML = `<div class="group">${lines.map((l) => `<div class="row"><span class="grow" style="font-size:14px;word-break:break-all">${l}</span></div>`).join('')}</div>`)
       lines.push('版本 ' + esc(VERSION))
-      lines.push('API Key：' + (ls.get(LS.key) ? '有（' + esc(ls.get(LS.key).slice(0, 6)) + '…）' : aiViaSheet() ? '用公司共用的（放在雲端）' : '<b>沒有</b>'))
+      // 顯示後 4 碼才分得出是哪一把（Claude 的開頭都是 sk-ant）
+      lines.push('AI：' + aiName() + '・API Key：' + (ls.get(K().key) ? '有（…' + esc(ls.get(K().key).slice(-4)) + '）' : aiViaSheet() ? '用公司共用的（放在雲端）' : '<b>沒有</b>'))
       show()
       try {
         const list = await fetchModels()
-        lines.push(`<span class="diag-ok">${icon('check', 16)}</span>模型清單：找到 ` + list.length + ' 個可用（' + esc(list.slice(0, 3).join('、')) + '）')
+        lines.push(`<span class="diag-ok">${icon('check', 16)}</span>模型清單：找到 ` + (list.length + proCache.length) + ' 個可用（' + esc(list.slice(0, 3).map(modelLabel).join('、')) + '）')
         show()
         const model = await currentModel()
         const t0 = Date.now()
-        const data = await call('models/' + model + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: '只回答 OK' }] }] }) })
-        const reply = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '（沒有回覆）'
-        lines.push(`<span class="diag-ok">${icon('check', 16)}</span>` + esc(model) + ' 回覆「' + esc(reply.trim().slice(0, 20)) + '」，花 ' + ((Date.now() - t0) / 1000).toFixed(1) + ' 秒')
+        // 用跟盤點一樣的「照格式回 JSON」請求測（只問一句話，很便宜）：格式不被接受的話，這裡就會看到
+        const data = await call('models/' + model + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: '把 reply 填 OK' }] }], generationConfig: { temperature: 0, maxOutputTokens: 2048, responseMimeType: 'application/json', responseSchema: { type: 'OBJECT', properties: { reply: { type: 'STRING' } }, required: ['reply'] } } }) })
+        const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
+        let reply = '（沒有回覆）'
+        try {
+          reply = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, '')).reply || raw
+        } catch {
+          reply = raw || reply
+        }
+        lines.push(`<span class="diag-ok">${icon('check', 16)}</span>` + esc(modelLabel(model)) + ' 回覆「' + esc(reply.trim().slice(0, 20)) + '」，花 ' + ((Date.now() - t0) / 1000).toFixed(1) + ' 秒')
       } catch (err) {
         lines.push(`<span class="diag-bad">${icon('x', 16)}</span>` + esc(err.message) + (err.detail ? '<br><span class="muted">' + esc(err.detail) + '</span>' : ''))
       }
       return show()
     }
     case 'use-model':
-      ls.set(LS.model, d.model)
-      ls.set(LS.pinned, d.model) // 自己選的：之後照用，不會被自動換掉
+      ls.set(K().model, d.model)
+      ls.set(K().pinned, d.model) // 自己選的：之後照用，不會被自動換掉
       toast(`改用 ${d.model}`)
       return render()
     case 'save-catalog':
@@ -9050,7 +9305,7 @@ $app.addEventListener('click', async (e) => {
       }
     }
     case 'pk-no-ai':
-      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰' : syncReady() ? '先請擁有者到「設定」把 AI 金鑰放到雲端，或到「設定」貼上自己的 Gemini API Key；打編號、搜品名不用 AI' : '先到「設定」貼上 Gemini API Key，才能拍單子讓 AI 讀；打編號、搜品名不用 AI')
+      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰' : syncReady() ? '先請擁有者到「設定」把 AI 金鑰放到雲端，或到「設定」貼上自己的 AI 金鑰；打編號、搜品名不用 AI' : '先到「設定」貼上 AI 金鑰，才能拍單子讓 AI 讀；打編號、搜品名不用 AI')
     case 'pk-cross-last': {
       if (!canManage()) return toast('交叉比對只有擁有者或管理員看得到')
       const last = readJson(LS.pickCrossLast, null)

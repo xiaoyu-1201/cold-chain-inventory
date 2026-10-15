@@ -1,6 +1,6 @@
 // 讓 App 本身離線也能打開（AI 辨識還是要網路）
 // 更新：每次都先問 GitHub 有沒有新版（跳過手機的 10 分鐘暫存）；新版裝好後，App 在安全的頁面（不是拍照拍到一半）自動重新整理
-const CACHE = 'inventory-v49'
+const CACHE = 'inventory-v50'
 const SHELL = ['./', 'index.html', 'app.js', 'rules.js', 'icons.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'logo.svg', 'xlsx.js', 'google-sheets.gs']
 
 self.addEventListener('install', (e) => {
@@ -57,7 +57,7 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url)
-  // Gemini API 不快取
+  // AI（Claude、Gemini）和其他網站的請求不快取
   if (url.origin !== self.location.origin || e.request.method !== 'GET') return
   // 有網路：一律先問 GitHub 有沒有更新（no-cache＝沒變就很快回 304）；沒網路才用快取
   e.respondWith(
