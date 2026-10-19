@@ -1,28 +1,21 @@
 /**
  * 聖佳智慧庫存（聖佳冷凍材料；原名「拍照盤點」）
- * 拍貨架 → AI 視覺模型（Claude 或 Gemini，設定裡選）找出每個商品並框起來 → 原圖對照、＋／－ 修正 → 存在手機；總表一次匯出 Excel、同步 Google 試算表。
+ * 拍貨架 → AI 視覺模型（Claude）找出每個商品並框起來 → 原圖對照、＋／－ 修正 → 存在手機；總表一次匯出 Excel、同步 Google 試算表。
  * 品項庫：按「完成」時自動長出來（料號、各位置數量、帳面數、安全庫存）；查型號：拍標籤或打型號 → 解讀、店裡有沒有、替代品。
- * 沒有後端：API Key 只存在這支手機（localStorage），照片只送到選用的 AI（Anthropic Claude 或 Google Gemini）分析；擁有者也可以把金鑰放在自己的 Apps Script 共用。
+ * 沒有後端：API Key 只存在這支手機（localStorage），照片只送到 Anthropic Claude 分析；擁有者也可以把金鑰放在自己的 Apps Script 共用。
  */
 
 import { makeXlsx } from './xlsx.js'
 import { decode, normalizeModel, looseKey, canon, modelKey, linksFor } from './rules.js'
 import { icon } from './icons.js'
 
-const API = 'https://generativelanguage.googleapis.com/v1beta'
 const LS = {
-  key: 'inventory:apiKey',
-  /** 擁有者有沒有把 AI 金鑰放在雲端（Apps Script）給大家共用：'1'＝有 */
-  aiShared: 'inventory:aiShared',
-  model: 'inventory:model',
-  // Claude（4.8）：金鑰、共用、模型都跟 Gemini 分開存；provider＝這台選用哪一家（沒選＝有 Claude 就用 Claude）
+  // Claude 金鑰、擁有者有沒有把金鑰放在雲端（Apps Script）共用（'1'＝有）、用哪個模型（pinned＝自己在設定選的）
   claudeKey: 'inventory:claudeKey',
   aiSharedClaude: 'inventory:aiSharedClaude',
   claudeModel: 'inventory:claudeModel',
   claudePinned: 'inventory:claudePinned',
-  provider: 'inventory:aiProvider',
   catalog: 'inventory:catalog',
-  pinned: 'inventory:modelPinned',
   sheet: 'inventory:sheetUrl',
   autoSync: 'inventory:autoSync',
   locations: 'inventory:locations',
@@ -52,6 +45,8 @@ const LS = {
   serverVer: 'inventory:serverVer',
   // 雲端有沒有用到「同時讀寫」（4.7.6；'0'＝Google 那邊沒開 Drive API）
   serverFast: 'inventory:serverFast',
+  // 雲端還是 4.8 以前的程式碼、裡面還放著 Gemini 金鑰（4.9：提醒擁有者更新，新程式碼會自動刪掉那把金鑰）
+  serverGemini: 'inventory:serverGemini',
   // 首頁「桌面上的 App 要再接一次」按過「不用了」（4.7.7，只在這台）
   moveHintOff: 'inventory:moveHintOff',
   // 電腦、平板的側邊選單收起來了沒
@@ -95,7 +90,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.8.0（10/15・AI 可以選 Claude）'
+const VERSION = '4.9.0（10/19・比對只提醒、拿掉 Gemini）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -150,6 +145,13 @@ const ls = {
     }
   },
 }
+// 4.9 拿掉 Gemini：這台存過的 Gemini 金鑰、模型、共用狀態、選哪一家，開啟時清掉（不用的金鑰留著有外流風險；使用者 10/19 同意）
+for (const k of ['inventory:apiKey', 'inventory:model', 'inventory:modelPinned', 'inventory:aiShared', 'inventory:aiProvider'])
+  try {
+    localStorage.removeItem(k)
+  } catch {
+    /* 無痕模式：本來就沒存 */
+  }
 const catalogLines = () => (ls.get(LS.catalog) || DEFAULT_CATALOG).split('\n').map((l) => l.trim()).filter(Boolean)
 const catalogNames = () => catalogLines().map((l) => l.replace(/（.*$/, '').trim())
 /** AI 有時把清單整行（含括號說明）當品名，例如「銅管接頭（彎頭、三通…）」→ 只留「銅管接頭」 */
@@ -491,30 +493,19 @@ function boxZoomSvg(photo, box, color = '#0a84ff', ratio = 0) {
   </svg>`
 }
 
-// ───────────────────────── AI：Claude／Gemini ─────────────────────────
+// ───────────────────────── AI：Claude ─────────────────────────
 /**
- * 4.8：可以選 Claude（Anthropic）或 Gemini（Google）。盤點、相似品比對、讀標籤、讀單子的程式都照 Gemini 的格式寫，
- * 選 Claude 時由 call() 換成 Claude 的格式送出、回覆再換回來（toClaude／fromClaude），上面的程式不用分兩套。
- * 這台明確選過就照選的；沒選過：有 Claude 金鑰（自己的或擁有者共用的）就用 Claude，不然用 Gemini。
+ * 4.9 只用 Claude（Anthropic；10/19 使用者決定拿掉 Gemini）。盤點、相似品比對、讀標籤、讀單子的程式還是照 Gemini 的格式寫，
+ * 由 call() 換成 Claude 的格式送出、回覆再換回來（toClaude／fromClaude）：上面的程式不用改，風險最小。
  */
 const CLAUDE_API = 'https://api.anthropic.com'
-function aiProvider() {
-  const p = ls.get(LS.provider)
-  if (p === 'claude' || p === 'gemini') return p
-  // 自己的金鑰優先（自己付錢、自己選的）：自己的 Claude → 自己的 Gemini → 擁有者共用的 Claude → Gemini
-  if (ls.get(LS.claudeKey)) return 'claude'
-  if (ls.get(LS.key)) return 'gemini'
-  return sharedOn('claude') ? 'claude' : 'gemini'
-}
-const isClaude = () => aiProvider() === 'claude'
-/** 現在這一家的設定存在哪裡 */
-const K = (p = aiProvider()) =>
-  p === 'claude' ? { key: LS.claudeKey, model: LS.claudeModel, pinned: LS.claudePinned, shared: LS.aiSharedClaude } : { key: LS.key, model: LS.model, pinned: LS.pinned, shared: LS.aiShared }
-const aiName = (p = aiProvider()) => (p === 'claude' ? 'Claude' : 'Gemini')
-const keyName = (p = aiProvider()) => `${aiName(p)} API Key`
-/** 備用的快模型（Gemini 的 Lite、Claude 的 Haiku）：分不出相似品，只當備用，不會自動變成預設 */
-const isLite = (m) => /lite|haiku/.test(String(m))
-/** 給人看的模型名：claude-sonnet-5-5 →「Sonnet 5.5」、claude-haiku-4-5-20251001 →「Haiku 4.5（快、便宜）」；Gemini 照原名 */
+/** Claude 的設定存在哪裡 */
+const K = () => ({ key: LS.claudeKey, model: LS.claudeModel, pinned: LS.claudePinned, shared: LS.aiSharedClaude })
+/** 備用的快模型（Haiku）：分不出相似品，只當備用，不會自動變成預設 */
+const isLite = (m) => /haiku/.test(String(m))
+/** Opus（和更強的）：第一次就看得很清楚，背景比對只檢查它自己說沒把握的 */
+const isStrong = (m) => /opus|fable|mythos/.test(String(m))
+/** 給人看的模型名：claude-sonnet-5-5 →「Sonnet 5.5」、claude-haiku-4-5-20251001 →「Haiku 4.5（快、便宜）」 */
 function modelLabel(m) {
   const x = String(m).match(/^claude-(sonnet|haiku|opus)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/)
   if (!x) return String(m)
@@ -526,86 +517,31 @@ class ApiError extends Error {
   constructor(message, status, detail = '') {
     super(message)
     this.status = status
-    /** 原始錯誤（狀態碼＋Google 的訊息），顯示在小字，方便截圖回報 */
+    /** 原始錯誤（狀態碼＋Claude 的訊息），顯示在小字，方便截圖回報 */
     this.detail = detail
-    /** Google 建議等幾秒再試（429 會附） */
+    /** Claude 建議等幾秒再試（429 會附） */
     this.retryAfter = 0
   }
 }
 function friendly(status, msg = '') {
-  if (isClaude()) {
-    if (status === 401) return 'Claude API Key 不對或已經停用：請重新貼上正確的金鑰（設定 → AI）。'
-    if (status === 400 && /credit|balance|billing/i.test(msg)) return 'Claude 帳戶的餘額不夠了：請到 console.anthropic.com 的 Billing 儲值。'
-    if (status === 400) return `AI 看不懂這次的請求（${msg.slice(0, 80)}）`
-    if (status === 403) return '這把 Claude 金鑰沒有權限：請確認是在 console.anthropic.com 建立的金鑰。'
-    if (status === 404) return '這個 Claude 模型已經下架或不能用，已自動改用其他模型，請再試一次。'
-    if (status === 413) return '這次送的照片太大：請少放一些樣品照再試。'
-    if (status === 429) return 'Claude 短時間內用太多次了，等一下再試。'
-    if (status === 503) return 'Claude 現在太多人用，等幾分鐘再試。'
-    if (status >= 500) return 'Claude 那邊暫時出問題，已經自動重試；等一下再按「再試一次」。'
-    return msg || '連線失敗，請確認有網路。'
-  }
-  if (status === 400 && /api key/i.test(msg)) return 'API Key 不對：請到「設定」重新貼上。'
+  if (status === 401) return 'Claude API Key 不對或已經停用：請重新貼上正確的金鑰（設定 → AI）。'
+  if (status === 400 && /credit|balance|billing/i.test(msg)) return 'Claude 帳戶的餘額不夠了：請到 console.anthropic.com 的 Billing 儲值。'
   if (status === 400) return `AI 看不懂這次的請求（${msg.slice(0, 80)}）`
-  if (status === 403) return '這個 API Key 沒有權限用 Gemini，請確認是在 Google AI Studio 建立的金鑰。'
-  if (status === 404) return '這個模型已經下架或不能用，已自動改用其他模型，請再試一次。'
-  if (status === 429) return '免費額度一分鐘內用太多次了，等 1 分鐘再試。'
-  if (status === 503) return 'Google 的 AI 現在太多人用（免費版尖峰常見），已經自動重試和換模型，還是不行；等幾分鐘再按「再試一次」。'
-  if (status >= 500) return 'Google 那邊暫時出問題，已經自動重試；等一下再按「再試一次」。'
+  if (status === 403) return '這把 Claude 金鑰沒有權限：請確認是在 console.anthropic.com 建立的金鑰。'
+  if (status === 404) return '這個 Claude 模型已經下架或不能用，已自動改用其他模型，請再試一次。'
+  if (status === 413) return '這次送的照片太大：請少放一些樣品照再試。'
+  if (status === 429) return 'Claude 短時間內用太多次了，等一下再試。'
+  if (status === 503) return 'Claude 現在太多人用，等幾分鐘再試。'
+  if (status >= 500) return 'Claude 那邊暫時出問題，已經自動重試；等一下再按「再試一次」。'
   return msg || '連線失敗，請確認有網路。'
 }
-/** timeoutMs：等太久就放棄（之後會自動重試或換模型），不要讓人一直乾等 */
-async function call(path, opts = {}, timeoutMs = 0) {
-  if (isClaude()) return callClaude(path, opts, timeoutMs)
-  const key = ls.get(LS.key)
-  // 這台沒有自己的金鑰、擁有者有放共用金鑰：改由自己的 Apps Script 去問 Gemini（金鑰不會到這支手機）
-  if (!key && aiViaSheet()) return callViaSheet(path, opts, timeoutMs)
-  let res
-  const ctrl = new AbortController()
-  const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : 0
-  // opts.signal：另一個模型已經先回答了，這邊就取消
-  const outer = opts.signal
-  const onOuter = () => ctrl.abort()
-  outer?.addEventListener('abort', onOuter)
-  try {
-    if (outer?.aborted) throw new Error('aborted')
-    // 金鑰放在標頭（x-goog-api-key），不放網址：網址可能被記錄在紀錄檔或截圖裡
-    res = await fetch(`${API}/${path}`, { ...opts, headers: { ...(opts.headers || {}), 'x-goog-api-key': key }, signal: ctrl.signal })
-  } catch {
-    if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
-    if (ctrl.signal.aborted) throw new ApiError(`等了 ${Math.round(timeoutMs / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${timeoutMs / 1000}s`)
-    throw new ApiError('沒有網路，或連不到 Google。辨識時請不要切到別的 App、不要讓螢幕暗掉。', 0, 'network error')
-  } finally {
-    clearTimeout(timer)
-    outer?.removeEventListener('abort', onOuter)
-  }
-  const data = await res.json().catch(() => ({}))
-  return toResult(res.status, data)
-}
-/** Gemini 的回覆：成功就回資料；失敗換成看得懂的錯誤（直接連、經過 Apps Script 都用這個） */
-function toResult(status, data) {
-  // 沒有狀態碼（舊版雲端程式碼、回覆壞掉）也算失敗，不能當成功
-  if (!(status >= 200 && status < 300)) {
-    const msg = data?.error?.message || ''
-    const err = new ApiError(friendly(status, msg), status, `${status} ${data?.error?.status || ''} ${msg}`.trim().slice(0, 200))
-    // 429 會告訴你要等多久（例如 "17s"）
-    const retry = (data?.error?.details || []).find((d) => d.retryDelay)?.retryDelay
-    if (retry) err.retryAfter = Math.min(30, parseFloat(retry) || 0)
-    throw err
-  }
-  return data
-}
-/** 有沒有 AI 可以用：自己的金鑰，或擁有者放在雲端的共用金鑰（現在選的那一家） */
+/** 有沒有 AI 可以用：自己的金鑰，或擁有者放在雲端的共用金鑰 */
 function hasAi() {
   return !!ls.get(K().key) || aiViaSheet()
 }
-/** 擁有者有把某一家的金鑰放在雲端共用（不管這台能不能用） */
-function sharedOn(p) {
-  return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(K(p).shared) === '1'
-}
-/** 現在選的那一家有共用金鑰 */
+/** 擁有者有把 Claude 金鑰放在雲端共用（不管這台能不能用） */
 function aiSharedOn() {
-  return sharedOn(aiProvider())
+  return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(K().shared) === '1'
 }
 
 // ── Claude：把 Gemini 格式的請求換成 Claude 的 Messages API，回覆再換回 Gemini 的樣子 ──
@@ -684,15 +620,16 @@ function claudeResult(status, data, retryAfter = 0) {
   if (retryAfter) err.retryAfter = Math.min(30, retryAfter)
   throw err
 }
-async function callClaude(path, opts = {}, timeoutMs = 0) {
+/** 問 Claude（timeoutMs：等太久就放棄，之後會自動重試或換模型，不要讓人一直乾等） */
+async function call(path, opts = {}, timeoutMs = 0) {
   const req = toClaude(path, opts)
   const key = ls.get(LS.claudeKey)
   // 沒有自己的金鑰、擁有者有放共用的 Claude 金鑰：經過自己的 Apps Script 問（金鑰不會到這支手機）
   if (!key && aiViaSheet()) {
-    const data = await callViaSheet(req.cpath, { ...opts, body: req.body ? JSON.stringify(req.body) : '' }, timeoutMs, 'claude')
+    const data = await callViaSheet(req.cpath, { ...opts, body: req.body ? JSON.stringify(req.body) : '' }, timeoutMs)
     return fromClaude(req.cpath, data)
   }
-  if (!key) throw new ApiError(`還沒設定 ${keyName('claude')}：請到「設定」貼上。`, 401, 'claude: no key')
+  if (!key) throw new ApiError('還沒設定 Claude API Key：請到「設定」貼上。', 401, 'claude: no key')
   const ctrl = new AbortController()
   const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : 0
   const outer = opts.signal
@@ -725,8 +662,8 @@ function aiViaSheet() {
 }
 /** 經過 Apps Script 時多等的時間：雲端那邊收到後照樣會跑完、照樣計費，太早放棄再送一次＝花兩次錢 */
 const SHEET_GRACE = 20000
-/** 共用金鑰：請求送到自己的 Apps Script，由它拿雲端的金鑰問 Gemini（會多 1～2 秒） */
-async function callViaSheet(path, opts, timeoutMs, provider = 'gemini') {
+/** 共用金鑰：請求送到自己的 Apps Script，由它拿雲端的金鑰問 Claude（會多 1～2 秒） */
+async function callViaSheet(path, opts, timeoutMs) {
   const outer = opts.signal
   if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
   const ctrl = new AbortController()
@@ -741,11 +678,11 @@ async function callViaSheet(path, opts, timeoutMs, provider = 'gemini') {
   outer?.addEventListener('abort', onAbort)
   let r
   try {
-    r = await postSync({ action: 'ai', ...(provider === 'claude' ? { provider } : {}), path, body: opts.body || '' }, { signal: ctrl.signal })
+    r = await postSync({ action: 'ai', provider: 'claude', path, body: opts.body || '' }, { signal: ctrl.signal })
   } catch (e) {
     if (outer?.aborted) throw new ApiError('已取消', 499, 'cancelled')
     if (timedOut) throw new ApiError(`等了 ${Math.round((timeoutMs + SHEET_GRACE) / 1000)} 秒還沒回，自動重試。`, 408, `timeout ${(timeoutMs + SHEET_GRACE) / 1000}s (sheet)`)
-    throw sheetAiError(e, provider)
+    throw sheetAiError(e)
   } finally {
     clearTimeout(timer)
     outer?.removeEventListener('abort', onAbort)
@@ -756,20 +693,20 @@ async function callViaSheet(path, opts, timeoutMs, provider = 'gemini') {
   try {
     data = JSON.parse(r.body || '{}')
   } catch {
-    /* 回覆不是 JSON：當成空的，toResult 會依狀態碼處理 */
+    /* 回覆不是 JSON：當成空的，claudeResult 會依狀態碼處理 */
   }
-  return provider === 'claude' ? claudeResult(r.status, data) : toResult(r.status, data)
+  return claudeResult(r.status, data)
 }
 /**
  * 經過雲端問 AI 失敗：分清楚是「雲端說不行」（檢視者、被移除、今天次數到上限、不支援 → 不重試，直接顯示原因）
  * 還是「網路斷了、雲端暫時出錯」（可以重試）。以前全部當成網路斷線，一張照片會自動重試十幾次。
  */
-function sheetAiError(e, provider = 'gemini') {
+function sheetAiError(e) {
   const d = e?.data
   const msg = e?.message || '連不到 Google（沒有網路？）'
   if (!d || d.network) return new ApiError(msg, 0, `sheet ${msg}`.slice(0, 200))
   // 雲端還不認得 Claude（舊版程式碼）：會回「不支援的 AI 請求」
-  if (provider === 'claude' && /不支援的 AI 請求/.test(d.error || '')) return new ApiError('雲端的程式碼是舊版，還不會幫忙問 Claude：請擁有者到「設定 → Google 試算表」複製新的程式碼、貼上、部署新版本。', 403, 'sheet: old Apps Script (no claude)')
+  if (/不支援的 AI 請求/.test(d.error || '')) return new ApiError('雲端的程式碼是舊版，還不會幫忙問 Claude：請擁有者到「設定 → Google 試算表」複製新的程式碼、貼上、部署新版本。', 403, 'sheet: old Apps Script (no claude)')
   if (d.html) return Object.assign(new ApiError(msg, 503, `sheet html ${d.httpStatus || ''}`.trim()), { sheetDown: true })
   // 404＝共用金鑰不支援這個模型：換下一個模型試；其他都是雲端明確說不行：重試也一樣，不要浪費
   const status = d.status === 404 && !d.quota && !d.viewer && !d.revoked ? 404 : 403
@@ -779,20 +716,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /** 這些狀況值得自動重試：太多人用、伺服器暫時錯誤、額度每分鐘上限、等太久、網路斷一下 */
 const retryable = (e) => e instanceof ApiError && [0, 408, 429, 500, 502, 503, 504].includes(e.status)
 
-/**
- * 思考設定：新的 Gemini 預設會先「想」很久才回答（一張照片可以拖到一分鐘）。
- * 找東西、畫框不用想太多 → 調到最少；第二輪比對相似品才讓它想一點點。
- */
-function thinkingFor(model, purpose = 'detect') {
-  if (/2\.5-flash/.test(model)) return { thinkingBudget: purpose === 'detect' ? 0 : 512 }
-  if (/2\.5-pro/.test(model)) return { thinkingBudget: 128 }
-  if (/gemini-[3-9]/.test(model)) return { thinkingLevel: purpose === 'detect' && /flash/.test(model) ? 'minimal' : 'low' }
-  return null
-}
-/** 單次等待上限：第一輪找東西、第二輪比對 */
-const TIMEOUT = { detect: 40000, refine: 35000 }
-/** Claude 一次把整張照片的框寫完比較久（不會先想），等久一點才不會太早放棄、重送又多花一次錢 */
-const aiTimeout = (k) => (isClaude() ? { detect: 90000, refine: 80000 }[k] : TIMEOUT[k])
+/** 單次等待上限（第一輪找東西、第二輪比對）：Claude 一次把整張照片的框寫完比較久，等久一點才不會太早放棄、重送又多花一次錢 */
+const TIMEOUT = { detect: 90000, refine: 80000 }
 
 /**
  * Claude 的模型：Sonnet（平常）優先、Haiku（快、便宜，備用）其次；Opus（最強、比較貴）只在設定裡手動選。版本新的優先。
@@ -810,43 +735,24 @@ function rankClaude(models, kind = /sonnet|haiku/) {
     .filter((n) => /^claude-/.test(n) && kind.test(n) && ver(n) >= 4.5)
     .sort((a, b) => (/sonnet/.test(b) ? 1 : 0) - (/sonnet/.test(a) ? 1 : 0) || ver(b) - ver(a))
 }
-/** 自動挑模型：可用、會看圖、名字有 flash；穩定版優先、版本新的優先、lite 排後面 */
-function rankModels(models, kind = /flash/) {
-  const score = (name) => {
-    const v = parseFloat((name.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0')
-    const unstable = /preview|exp/.test(name) ? 1 : 0
-    const lite = /lite/.test(name) ? 1 : 0
-    const latest = /latest/.test(name) ? 0.05 : 0
-    return v * 10 - unstable * 25 - lite * 6 + latest
-  }
-  return models
-    .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
-    .map((m) => m.name.replace(/^models\//, ''))
-    .filter((n) => kind.test(n) && !/image|tts|audio|live|embedding|thinking|8b|computer|robotics/.test(n))
-    .sort((a, b) => score(b) - score(a))
-}
 let modelCache = null
-/** Pro：看得比較細（相似品分得比較開），但比較慢、免費額度比 Flash 少很多；只在設定裡手動選 */
+/** Opus：看得最細，但比較慢、比較貴；只在設定裡手動選 */
 let proCache = []
-/** 模型清單是哪一家的（換了一家就重新拿） */
-let modelCacheOf = ''
 async function fetchModels() {
-  const p = aiProvider()
   const data = await call('models?pageSize=200')
-  modelCache = p === 'claude' ? rankClaude(data.models || []) : rankModels(data.models || [])
-  proCache = p === 'claude' ? rankClaude(data.models || [], /opus/) : rankModels(data.models || [], /-pro/)
-  modelCacheOf = p
+  modelCache = rankClaude(data.models || [])
+  proCache = rankClaude(data.models || [], /opus/)
   return modelCache
 }
-/** 已經拿過、而且是現在這一家的模型清單 */
-const cachedModels = () => (modelCacheOf === aiProvider() ? modelCache : null)
+/** 已經拿過的模型清單（還沒拿過是 null） */
+const cachedModels = () => modelCache
 async function currentModel(force = false) {
   const k = K()
   const saved = ls.get(k.model)
-  // 之前忙線時自動換成備用（Lite／Haiku）的，下次重新挑；自己在設定選的就照用
+  // 之前忙線時自動換成備用（Haiku）的，下次重新挑；自己在設定選的就照用
   if (saved && !force && (!isLite(saved) || ls.get(k.pinned) === saved)) return saved
   const list = await fetchModels()
-  if (!list.length) throw new ApiError(`這個 API Key 找不到能看圖的 ${aiName()} 模型。`, 0)
+  if (!list.length) throw new ApiError('這個 API Key 找不到能看圖的 Claude 模型。', 0)
   ls.set(k.model, list[0])
   return list[0]
 }
@@ -920,9 +826,9 @@ const JSON_HINT = `
 
 /**
  * 用某個模型送一次辨識。
- * simple＝簡化請求（不帶 responseSchema、不帶思考設定）：有些時候完整設定會讓 Google 一直回 500，簡化後就過了。
+ * simple＝簡化請求（不帶 responseSchema，改在文字裡說格式）：忙線重試到最後一次才用。
  */
-async function generate(model, image, simple = false, refs = [], thinking = true, signal = undefined) {
+async function generate(model, image, simple = false, refs = [], signal = undefined) {
   // 有樣品照：先放樣品（每張前面寫正確名稱），最後才放要盤點的照片，緊接著說明
   const sampleParts = refs.length
     ? [
@@ -933,17 +839,9 @@ async function generate(model, image, simple = false, refs = [], thinking = true
     : []
   const body = {
     contents: [{ role: 'user', parts: [...sampleParts, { inline_data: { mime_type: 'image/jpeg', data: image } }, { text: prompt(refs.length) + (simple ? JSON_HINT : '') }] }],
-    generationConfig: simple
-      ? { temperature: 0, responseMimeType: 'application/json' }
-      : {
-          temperature: 0,
-          responseMimeType: 'application/json',
-          responseSchema: SCHEMA,
-          // 思考調到最少：找東西、畫框不用想，速度快很多
-          ...(thinking && thinkingFor(model) ? { thinkingConfig: thinkingFor(model) } : {}),
-        },
+    generationConfig: simple ? { temperature: 0, responseMimeType: 'application/json' } : { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA },
   }
-  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, aiTimeout('detect'))
+  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, TIMEOUT.detect)
   const cand = data?.candidates?.[0]
   const text = cand?.content?.parts?.map((p) => p.text || '').join('') || ''
   if (!text) throw new ApiError(cand?.finishReason === 'SAFETY' ? 'AI 拒絕分析這張照片，請換一張。' : 'AI 沒有回傳結果，請再試一次。', 0, `empty response ${cand?.finishReason || ''}`)
@@ -997,13 +895,6 @@ function dedupe(objects) {
   return { kept: objects.filter((o) => keep.has(o)), merged: objects.length - kept.length }
 }
 
-/**
- * 分析一張照片：
- * 1. 先用完整設定送；伺服器錯誤（5xx）或設定不被接受（400）→ 同一個模型改用簡化請求再試。
- * 2. 還是忙（503／429）→ 等 2 秒再試一次，不行就換下一個模型（例如 Flash → Flash-Lite），不要讓人一直等。
- * 3. 模型下架（404）→ 換下一個並重新挑預設模型。
- * onStatus 用來在畫面上顯示目前在做什麼。
- */
 /** 一次最多送幾張樣品照（越多越慢；新存的優先） */
 const MAX_SAMPLES = 30
 async function sampleRefs() {
@@ -1011,46 +902,17 @@ async function sampleRefs() {
   return Promise.all(list.map(async (s) => ({ label: s.label, brand: s.brand, model: s.model, spec: s.spec, data: await blobToBase64(s.blob) })))
 }
 
-/** 主模型等這麼久還沒回，就同時請備用模型做，誰先回就用誰 */
-const HEDGE_MS = 15000
-
+/**
+ * 分析一張照片：忙線（503／429）、網路斷一下 → 同一個模型再試；太慢、一直出錯 → 換 Haiku；模型下架（404）→ 換下一個並重新挑預設模型。
+ * Claude 沒有免費額度：最多試兩個模型（現在的 → Haiku），也不「同時請備用模型」（同時兩個＝每張慢的照片付兩次錢）。
+ * onStatus 用來在畫面上顯示目前在做什麼。
+ */
 async function analyze(photo, onStatus = () => {}, refs = []) {
   const image = await blobToBase64(photo.blob)
   const first = await currentModel()
   const list = cachedModels() ?? (await fetchModels().catch(() => [first]))
-  // 備用：最快的 Lite／Haiku（分組不夠細沒關係，背景的相似品比對會用強的模型再分一次）
   const backup = list.find((m) => m !== first && isLite(m)) ?? list.find((m) => m !== first)
-  // Claude 沒有免費額度：最多試兩個模型（現在的 → Haiku），不要一路換好幾個一樣慢的 Sonnet、每個都付錢
-  const models = isClaude() ? [first, backup].filter(Boolean) : [first, ...list.filter((m) => m !== first)].slice(0, 4)
-  const hedge = new AbortController()
-  const primary = attemptChain(models, image, refs, onStatus, hedge.signal)
-  // 用共用金鑰（經過 Apps Script）不要「同時請備用模型」：這邊取消了，雲端那邊照樣跑完、照樣計費，等於花兩次錢
-  // Claude 也不「同時請備用」：沒有免費額度，同時兩個＝每張慢的照片付兩次錢；主模型太慢會直接換 Haiku
-  if (!backup || viaSheetNow() || isClaude()) return primary.finally(() => hedge.abort())
-  let timer = 0
-  let started = false
-  const second = new Promise((resolve, reject) => {
-    timer = setTimeout(() => {
-      started = true
-      onStatus(`${first} 比較慢，同時請 ${backup} 一起做，誰先好就用誰`)
-      generate(backup, image, false, refs, true, hedge.signal).then(resolve, reject)
-    }, isClaude() ? 45000 : HEDGE_MS)
-    // 主模型在備用開始前就失敗（已經換過所有模型）：不用再等備用
-    primary.catch((e) => {
-      if (!started) {
-        clearTimeout(timer)
-        reject(e)
-      }
-    })
-  })
-  try {
-    return await Promise.any([primary, second])
-  } catch (agg) {
-    throw agg?.errors?.find((e) => e?.status !== 499) ?? agg?.errors?.[0] ?? agg
-  } finally {
-    clearTimeout(timer)
-    hedge.abort() // 輸的那一個取消掉，不浪費額度
-  }
+  return attemptChain([first, backup].filter(Boolean), image, refs, onStatus)
 }
 
 /** 這次的 AI 請求會經過 Apps Script（這台沒有自己的金鑰、用擁有者的共用金鑰） */
@@ -1058,7 +920,7 @@ const viaSheetNow = () => !ls.get(K().key) && aiViaSheet()
 /** 連續幾次「網路斷了」就停：網路真的不通，再試也是白等 */
 const MAX_NET_FAILS = 3
 
-/** 依序試：同一個模型（有思考設定 → 拿掉 → 簡化），不行就換下一個模型 */
+/** 依序試：同一個模型（照原樣 → 再送一次 → 簡化），不行就換下一個模型 */
 async function attemptChain(models, image, refs, onStatus, signal) {
   let lastErr
   let netFails = 0
@@ -1066,25 +928,23 @@ async function attemptChain(models, image, refs, onStatus, signal) {
     if (signal?.aborted) break
     onStatus(mi === 0 ? `用 ${model} 辨識中` : `改用 ${model} 再試`)
     const plan = [
-      { simple: false, thinking: true, wait: 0 },
-      // 不接受思考設定（400）或網路斷一下：同一個模型、拿掉思考設定再試
-      { simple: false, thinking: false, wait: 0 },
-      { simple: true, thinking: false, wait: 1500 },
+      { simple: false, wait: 0 },
+      // 網路斷一下、忙線：同一個模型再送一次
+      { simple: false, wait: 0 },
+      { simple: true, wait: 1500 },
     ]
     for (const [pi, step] of plan.entries()) {
       let t0 = Date.now()
       if (step.wait) {
         const ms = lastErr?.retryAfter ? Math.min(lastErr.retryAfter * 1000, 15000) : step.wait
-        onStatus(`${isClaude() ? 'Claude' : 'Google'} 忙線，${Math.round(ms / 100) / 10} 秒後再試（${model}）`)
+        onStatus(`Claude 忙線，${Math.round(ms / 100) / 10} 秒後再試（${model}）`)
         await sleep(ms)
       }
       try {
-        // 第二次：上一次是 400（不接受思考設定）才拿掉；網路斷一下就照原本的快速設定再送
-        const think = pi === 1 ? lastErr?.status !== 400 : step.thinking
         t0 = Date.now()
-        const r = await generate(model, image, step.simple, refs, think, signal)
+        const r = await generate(model, image, step.simple, refs, signal)
         onStatus(`${model} 完成（${Math.round((Date.now() - t0) / 1000)} 秒，找到 ${r.objects.length} 個）`)
-        // 這個模型比較順：之後先用它（但不要換成 Lite：Lite 分不出相似品，只當備用）
+        // 這個模型比較順：之後先用它（但不要換成 Haiku：分不出相似品，只當備用）
         if (mi > 0 && !isLite(model)) ls.set(K().model, model)
         return r
       } catch (e) {
@@ -1105,13 +965,7 @@ async function attemptChain(models, image, refs, onStatus, signal) {
           } else onStatus(`${model} 太慢，換比較快的模型`)
           break
         }
-        // 400：先拿掉思考設定、再改簡化請求；都不行就是別的問題（Key、照片）
-        if (e.status === 400) {
-          // Claude 沒有「思考設定不被接受」這回事：同一個請求再送也是 400（例如餘額不足），不要白送三次；
-          // 任何一家的金鑰錯、餘額不足也一樣，直接停
-          if (!isClaude() && !/credit|billing|api key/i.test(e.detail || '') && pi < plan.length - 1) continue
-          throw e
-        }
+        // 400：同一個請求再送也是 400（例如餘額不足、照片太大），不要白送三次，直接停
         if (!retryable(e)) throw e
         // 網路斷了、Apps Script 整個出錯（回網頁不是 JSON）：連續 3 次就停，換模型也沒用
         if (e.status === 0 || e.sheetDown) {
@@ -1126,33 +980,37 @@ async function attemptChain(models, image, refs, onStatus, signal) {
   throw lastErr ?? new ApiError('已取消', 499, 'cancelled')
 }
 
-// ───────────────────────── 相似品再比對（第二輪） ─────────────────────────
+// ───────────────────────── 相似品再比對（第二輪：檢查員，只提醒、不改答案） ─────────────────────────
 /**
- * 第一輪是整張照片一起看，同類的小東西（三通、彎頭）常被歸成同一種。
- * 第二輪：把同一類的框用「同一個比例」切成小圖並排給 AI 比（東西越大、小圖越大），一個一個比粗細和接口，再分組。
+ * 4.9：以前比對會直接蓋掉第一次的答案，常把 Opus 第一次對的改錯（使用者 10/19 回報）。
+ * 現在是「檢查員」：給它整張照片（縮小、編號紅框）＋同一比例的特寫小圖＋第一次的答案，
+ * 它覺得錯的才回（附理由和信心）→ 存成建議 o.suggest、標成「要確認」，你按「改成…」才會改。
  */
 const REFINE_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    groups: {
+    changes: {
       type: 'ARRAY',
       items: {
         type: 'OBJECT',
         properties: {
-          ids: { type: 'ARRAY', items: { type: 'INTEGER' }, description: '這一組的物件編號' },
+          id: { type: 'INTEGER', description: '物件編號' },
           label: { type: 'STRING' },
           brand: { type: 'STRING' },
           model: { type: 'STRING' },
-          spec: { type: 'STRING', description: '這一組跟其他組的差別，例如 等徑・粗、異徑・側口細、4分×3分' },
-          why: { type: 'STRING', description: '一句話說這一組的特徵' },
+          spec: { type: 'STRING', description: '尺寸／規格，例如 4分、4分×3分、等徑・粗' },
+          why: { type: 'STRING', description: '20 字以內：看到什麼證據' },
+          confidence: { type: 'NUMBER', description: '0～1，有多確定第一次錯了' },
         },
-        required: ['ids', 'label', 'brand', 'model', 'spec', 'why'],
+        required: ['id', 'label', 'brand', 'model', 'spec', 'why', 'confidence'],
       },
     },
   },
-  required: ['groups'],
+  required: ['changes'],
 }
 const MAX_REFINE = 24
+/** 比對的建議要多確定才提醒（太沒把握的只會讓人多看） */
+const SUGGEST_MIN = 0.6
 
 /** 框的實際大小（像素） */
 function boxPx(photo, o) {
@@ -1165,8 +1023,10 @@ function boxPx(photo, o) {
 /**
  * 哪些框值得再比一次：同一個品名有 2 個以上，而且框的大小差很多（差 15% 以上＝可能是不同尺寸）；
  * 或者有這個品名的樣品照。全部大小都一樣（例如一排同樣的過濾器）就不用多花一次。
+ * onlyUnsure（第一次用 Opus）：只比 AI 自己說沒把握的（odd、信心 < 0.6），省時間也省錢。
  */
-function refineCandidates(photo, objects, refs = []) {
+function refineCandidates(photo, objects, refs = [], onlyUnsure = false) {
+  if (onlyUnsure) return objects.flatMap((o, i) => (o.odd || o.confidence < 0.6 ? [i] : [])).slice(0, MAX_REFINE)
   const byLabel = new Map()
   objects.forEach((o, i) => {
     const k = norm(o.label)
@@ -1184,36 +1044,67 @@ function refineCandidates(photo, objects, refs = []) {
   return out.slice(0, MAX_REFINE)
 }
 
-/** 用同一個比例切小圖：最大的那個長邊 384px，其他照比例縮（夠看清楚粗細，圖小送得快） */
-async function sameScaleCrops(photo, objects, indices) {
-  const bmp = await createImageBitmap(photo.blob)
-  const boxes = indices.map((i) => {
-    const [y1, x1, y2, x2] = objects[i].box.map((n) => n / 1000)
+/**
+ * 比對要送的圖（照片只讀一次）：
+ * - overview：整張照片縮到長邊 1024，要檢查的框畫紅框＋編號（看得到貨架位置、旁邊是什麼、相對大小）
+ * - crops：同一種品名的框用同一個比例切（那一種最大的長邊 384px，超過 12 個縮到 256px）：小圖越大，東西越大。
+ *   不同種各自算比例：壓縮機和小接頭一起送時，小接頭才不會只剩幾十 px
+ * 都不超過 2000px：一次超過 20 張圖時，Claude 規定每張都不能超過 2000px（官方文件，10/19 查）
+ */
+async function refineImages(photo, objs) {
+  const bmp = await bitmapOf(photo.blob)
+  const jpeg = async (canvas, q) => {
+    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', q))
+    if (!blob) throw new ApiError('照片處理失敗（手機記憶體可能不夠），請再試一次', 0, 'refine: toBlob null')
+    return blobToBase64(blob)
+  }
+  const boxes = objs.map((o) => {
+    const [y1, x1, y2, x2] = o.box.map((n) => n / 1000)
     const padX = (x2 - x1) * 0.1
     const padY = (y2 - y1) * 0.1
     const sx = Math.max(0, (x1 - padX) * bmp.width)
     const sy = Math.max(0, (y1 - padY) * bmp.height)
     const ex = Math.min(bmp.width, (x2 + padX) * bmp.width)
     const ey = Math.min(bmp.height, (y2 + padY) * bmp.height)
-    return { sx, sy, sw: ex - sx, sh: ey - sy }
+    return { sx, sy, sw: ex - sx, sh: ey - sy, k: norm(o.label) }
   })
-  // 物件很多時小圖再小一點（送得快）；還是同一個比例
-  const side = indices.length > 12 ? 256 : 384
-  const scale = Math.min(2, side / Math.max(...boxes.map((b) => Math.max(b.sw, b.sh))))
+  const side = objs.length > 12 ? 256 : 384
+  const longest = new Map()
+  for (const b of boxes) longest.set(b.k, Math.max(longest.get(b.k) || 1, b.sw, b.sh))
   const crops = []
   for (const b of boxes) {
+    const scale = Math.min(2, side / longest.get(b.k))
     const canvas = document.createElement('canvas')
     canvas.width = Math.max(1, Math.round(b.sw * scale))
     canvas.height = Math.max(1, Math.round(b.sh * scale))
     canvas.getContext('2d').drawImage(bmp, b.sx, b.sy, b.sw, b.sh, 0, 0, canvas.width, canvas.height)
-    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.9))
-    crops.push({ data: await blobToBase64(blob), w: canvas.width, h: canvas.height })
+    crops.push({ data: await jpeg(canvas, 0.9), w: canvas.width, h: canvas.height })
   }
+  const canvas = document.createElement('canvas')
+  const s = Math.min(1, 1024 / Math.max(bmp.width, bmp.height))
+  canvas.width = Math.max(1, Math.round(bmp.width * s))
+  canvas.height = Math.max(1, Math.round(bmp.height * s))
+  const ctx = canvas.getContext('2d')
+  ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height)
   bmp.close?.()
-  return crops
+  const fs = Math.max(14, Math.round(canvas.width / 45))
+  ctx.font = `bold ${fs}px sans-serif`
+  ctx.lineWidth = 3
+  objs.forEach((o, k) => {
+    const [y1, x1, y2, x2] = o.box.map((n) => n / 1000)
+    const x = x1 * canvas.width
+    const y = y1 * canvas.height
+    ctx.strokeStyle = ctx.fillStyle = '#ff2d55'
+    ctx.strokeRect(x, y, (x2 - x1) * canvas.width, (y2 - y1) * canvas.height)
+    const t = String(k + 1)
+    ctx.fillRect(x, y, ctx.measureText(t).width + 8, fs + 6)
+    ctx.fillStyle = '#fff'
+    ctx.fillText(t, x + 4, y + fs)
+  })
+  return { crops, overview: await jpeg(canvas, 0.85) }
 }
 
-/** 第二輪用最強的非 Lite 模型（Lite 看不出粗細差別） */
+/** 第二輪用最強的非 Haiku 模型（Haiku 看不出粗細差別） */
 async function refineModel() {
   const list = cachedModels() ?? (await fetchModels().catch(() => []))
   const saved = ls.get(K().model)
@@ -1221,12 +1112,23 @@ async function refineModel() {
   return list.find((m) => !isLite(m)) ?? saved ?? list[0]
 }
 
-/** 把 objects 裡 indices 這些框重新分組；失敗就保留原本的結果 */
-async function refineObjects(photo, objects, indices, refs = [], onStatus = () => {}) {
-  if (indices.length < 2) return { changed: 0 }
-  const crops = await sameScaleCrops(photo, objects, indices)
+/** 建議的那一種，給人看的名字：「三通・4分」 */
+const suggestName = (x) => `${x.label}${x.spec ? `・${x.spec}` : ''}`
+/** 「要確認」的理由：AI 再檢查一次，覺得可能是「三通・4分」：側口比較細（新人看不懂「比對」是誰，所以寫 AI 再檢查） */
+const suggestReason = (x) => `AI 再檢查一次，覺得可能是「${suggestName(x)}」${x.why ? `：${x.why}` : ''}`
+
+/**
+ * 檢查 objects 裡 indices 這些框：不同意第一次答案、而且有把握的，存成建議 o.suggest（不改答案）；
+ * 也記下比對的答案 o.aiRefine（同意＝跟第一次一樣），「AI 準不準」才能比「第一次」和「照比對改」哪個準。
+ * recheck（你按 ✎「再比對」）：你確認過「一樣」的框也照樣給建議，而且讓它重新出現在「要確認」；
+ * 背景自動跑的就不動你確認過的。回傳有幾個建議；失敗就丟錯誤（答案不會被動到）。
+ */
+async function refineObjects(photo, objects, indices, refs = [], onStatus = () => {}, { recheck = false } = {}) {
+  if (!indices.length) return { suggested: 0 }
+  const objs = indices.map((i) => objects[i])
+  const { crops, overview } = await refineImages(photo, objs)
   const model = await refineModel()
-  onStatus(`用 ${model} 比對相似品（${indices.length} 個）`)
+  onStatus(`用 ${model} 檢查 ${objs.length} 個`)
   const sampleParts = refs.length
     ? [
         { text: '【店內樣品】每張只拍一個商品，名稱是正確的：' },
@@ -1234,38 +1136,37 @@ async function refineObjects(photo, objects, indices, refs = [], onStatus = () =
       ]
     : []
   const objectParts = [
-    { text: '【要比對的物件】每張小圖都是從同一張照片、用同一個比例切下來的：小圖越大，東西越大。' },
-    ...crops.flatMap((c, k) => [{ text: `物件 ${k + 1}（小圖 ${c.w}×${c.h} px）` }, { inline_data: { mime_type: 'image/jpeg', data: c.data } }]),
+    { text: '【整張照片】縮小過；紅框和編號是要檢查的物件：' },
+    { inline_data: { mime_type: 'image/jpeg', data: overview } },
+    { text: '【特寫小圖】從原照片切下來；第一次答案是同一種品名的，用同一個比例切：小圖越大，東西越大。每張前面附第一次的答案（品名｜品牌｜型號｜規格）。' },
+    ...crops.flatMap((c, k) => [{ text: `物件 ${k + 1}（小圖 ${c.w}×${c.h} px）第一次的答案：${[objs[k].label, objs[k].brand, objs[k].model, objs[k].spec].map((v) => v || '—').join('｜')}` }, { inline_data: { mime_type: 'image/jpeg', data: c.data } }]),
   ]
-  const text = `這些物件在照片裡都被認成「${objects[indices[0]].label}」這一類。請一個一個仔細比較，再分組：
+  const text = `你是盤點的檢查員。第一次的答案大多是對的，請一個一個檢查：
 1. 形狀：三通、彎頭、直接頭……
-2. 主管有多粗：比較小圖的大小和管口的圓有多大（小圖是同一個比例）。
+2. 主管有多粗：比較小圖的大小和管口的圓有多大（同一種品名的小圖是同一個比例）。
 3. 每個接口是不是一樣粗：一樣粗＝等徑；有一個比較細＝異徑。
-4. 長短比例。
-完全一樣的才放同一組；只要形狀、粗細或接口不一樣，就分成不同組。每個物件編號都要出現在剛好一組裡。
-每組的 label 是品名（用店內品項清單的寫法，不要把括號裡的說明寫進去）；spec 寫出這組跟其他組的差別（例如「等徑・粗」「等徑・細」「異徑・側口細」，看得出分數就寫「4分」「4分×3分」）；brand、model 看不出來就空字串；why 用一句話說這組的特徵。
-${refs.length ? '如果某一組跟某張樣品一樣，label、brand、model、spec 就照那張樣品填，一字不差。\n' : ''}店內品項清單：
+4. 長短比例；也看它在貨架上的位置、旁邊放的是什麼。
+只有看得出第一次「明顯錯了」才列進 changes：id 是物件編號；label、brand、model、spec 寫你認為正確的答案（label 用店內品項清單的寫法，不要把括號裡的說明寫進去；brand、model 看不出來就空字串）；why 用 20 字以內寫你看到的證據；confidence 寫 0～1，有多確定第一次錯了。
+沒把握、看不清楚、或只是寫法不同（例如「3分 三通」和「三通 3分」），都不要列。全部都對就回空的 changes。
+${refs.length ? '跟某張樣品一樣的，label、brand、model、spec 照那張樣品填，一字不差。\n' : ''}店內品項清單：
 ${catalogLines().join('\n')}`
   // 物件越多，給 AI 的時間越多（背景在跑，不會卡住畫面）
-  const timeout = Math.min(isClaude() ? 120000 : 60000, aiTimeout('refine') + indices.length * 1000)
-  const send = (think) => {
-    const body = {
-      contents: [{ role: 'user', parts: [...sampleParts, ...objectParts, { text }] }],
-      generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: REFINE_SCHEMA, ...(think ? { thinkingConfig: think } : {}) },
-    }
-    return call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeout)
+  const timeout = Math.min(120000, TIMEOUT.refine + objs.length * 1000)
+  const body = {
+    contents: [{ role: 'user', parts: [...sampleParts, ...objectParts, { text }] }],
+    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: REFINE_SCHEMA },
   }
+  const send = () => call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeout)
   const t0 = Date.now()
   let data
   try {
-    data = await send(thinkingFor(model, 'refine'))
+    data = await send()
   } catch (e) {
-    if (!(e instanceof ApiError)) throw e
-    // 等太久或網路斷：思考再調少一點；不接受思考設定（400）：拿掉再送；其他錯誤不重試
-    const retry = [0, 408].includes(e.status) && /gemini-[3-9]/.test(model) ? { thinkingLevel: 'minimal' } : [0, 400, 408].includes(e.status) ? null : undefined
-    if (retry === undefined) throw e
+    // 網路斷一下、Claude 太忙（429／503，沒做就不收錢）才再送一次；等太久（那邊可能還在做、照樣計費）、金鑰、餘額這些再送也一樣
+    if (!(e instanceof ApiError) || ![0, 429, 503].includes(e.status)) throw e
     onStatus(`比對第一次沒成功（${e.detail || e.status}），再試一次`)
-    data = await send(retry)
+    if (e.status) await sleep(e.retryAfter ? Math.min(e.retryAfter * 1000, 15000) : 2000)
+    data = await send()
   }
   const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
   let parsed
@@ -1275,22 +1176,27 @@ ${catalogLines().join('\n')}`
     throw new ApiError('比對結果格式壞掉', 0, `bad json: ${raw.slice(0, 80) || data?.candidates?.[0]?.finishReason || 'empty'}`)
   }
   onStatus(`${model} 比對完成（${Math.round((Date.now() - t0) / 1000)} 秒）`)
-  let changed = 0
-  let used = 0
-  for (const g of parsed.groups || []) {
-    if ((g.ids || []).some((id) => indices[id - 1] !== undefined)) used += 1
-    for (const id of g.ids || []) {
-      const idx = indices[id - 1]
-      if (idx === undefined) continue
-      const o = objects[idx]
-      // 比對要等一陣子：這段時間你手動改過的框，以你改的為準，不要蓋掉
-      if (o.edited) continue
-      const next = { label: cleanLabel(g.label) || o.label, brand: String(g.brand || '').trim(), model: String(g.model || '').trim(), spec: String(g.spec || '').trim() }
-      if (FIELDS.some((f) => (o[f] || '') !== next[f])) changed += 1
-      Object.assign(o, next, { refined: true })
-    }
-  }
-  return { changed, groups: used, model }
+  const byId = new Map((Array.isArray(parsed?.changes) ? parsed.changes : []).map((c) => [Number(c?.id), c]))
+  let suggested = 0
+  objs.forEach((o, k) => {
+    // 比對要等一陣子：這段時間你改過、刪掉的框，以你的為準；背景跑的也不動你確認過「一樣」的
+    if (o.edited || !photo.objects.includes(o) || (o.checked && !recheck)) return
+    const c = byId.get(k + 1)
+    const fix = c && Number(c.confidence) >= SUGGEST_MIN ? { label: cleanLabel(c.label) || o.label, brand: String(c.brand || '').trim(), model: normalizeModel(c.model), spec: String(c.spec || '').trim() } : null
+    // 寫法統一（跟第一次辨識一樣）：就是品項庫的某一項，照品項庫寫；這張照片已經有同一種（只是寫法不同），照那一種寫，才不會多出一列一樣的
+    const it = fix && itemsCache && findItem(itemsCache, fix)
+    const same = fix && photo.objects.find((x) => looseKey(x) === looseKey(fix))
+    const src = it || same || fix
+    const next = src && { label: src.label, brand: src.brand || '', model: src.model || '', spec: src.spec || '' }
+    if (next && looseKey(next) !== looseKey(o)) {
+      o.suggest = { ...next, why: String(c.why || '').trim().slice(0, 30) }
+      o.aiFlag = true // 有被標成「要確認」（「錯的有標出來」要算進去）
+      if (recheck) delete o.checked
+      suggested += 1
+    } else delete o.suggest
+    if (o.ai) o.aiRefine = o.suggest ? keyOf(o.suggest) : o.ai
+  })
+  return { suggested, model }
 }
 
 // ───────────────────────── 盤點結果：把框合併成品項 ─────────────────────────
@@ -1338,6 +1244,7 @@ function groupsOf(session) {
 /**
  * 「要確認」的框：自動挑出可能不一樣的，你只要看這幾個（不用一個一個看）。
  * 理由（照順序判斷，一個框只列一個理由）：
+ * ⓪ 相似品比對覺得它可能是別的（o.suggest；按「改成…」才會改）
  * ① AI 自己說跟同一種的其他個不一樣（odd）
  * ② 大小跟同一種的其他個差很多（同一張照片裡比；3 個以上差 30%、只有 2 個差 35%）
  * ③ AI 沒把握（信心 < 0.6）
@@ -1366,7 +1273,8 @@ function photoDoubts(photo, skip = () => false) {
       if (skip(o)) return
       const diff = sizes[i] / med - 1
       let reason = ''
-      if (o.odd) reason = o.oddReason ? `AI 說這一個${o.oddReason}` : 'AI 覺得跟同一種的其他個不太一樣'
+      if (o.suggest && !o.edited) reason = suggestReason(o.suggest)
+      else if (o.odd) reason = o.oddReason ? `AI 說這一個${o.oddReason}` : 'AI 覺得跟同一種的其他個不太一樣'
       else if (objs.length >= 3 && Math.abs(diff) > 0.3) reason = `比同一種的其他個${diff > 0 ? '大' : '小'}約 ${Math.round(Math.abs(diff) * 100)}%`
       else if (pairGap > 1.35) reason = '這一種只有 2 個，但大小差很多'
       else if (o.confidence < 0.6) reason = 'AI 不太確定這是什麼'
@@ -1378,12 +1286,13 @@ function photoDoubts(photo, skip = () => false) {
 
 // ───────────────────────── AI 準不準：記下 AI 原本的答案，人工修改後就知道對不對 ─────────────────────────
 /**
- * 辨識（和背景的相似品比對）一好，就把 AI 的答案記在每個框上：o.ai＝AI 說的種類、o.aiFlag＝AI 有沒有標成「要確認」。
+ * 辨識一好，就把 AI 第一次的答案記在每個框上：o.ai＝AI 說的種類、o.aiFlag＝AI 有沒有標成「要確認」。
+ * 比對的答案另外記在 o.aiRefine（4.9；不蓋掉 o.ai），兩個都能跟你確認後的比。
  * 之後你補框（o.added）、刪框（記在 photo.aiGone）、改種類、改數量，按「完成」時就能算出 AI 原本對不對。
  */
-function markAi(photo, objs = photo.objects) {
+function markAi(photo) {
   const flagged = new Set(photoDoubts(photo).map((d) => d.o))
-  for (const o of objs) {
+  for (const o of photo.objects) {
     if (o.added) continue
     o.ai = keyOf(o)
     o.aiFlag = flagged.has(o)
@@ -1396,6 +1305,7 @@ function markAi(photo, objs = photo.objects) {
  * - 拆開看：漏數（你補的框＋你把數量加上去的）、多數（刪掉的框＋你把數量減下來的）、分錯（框改成別的種類）。
  * - 要確認抓到幾個：AI 錯的框（刪掉、分錯）裡，有幾個事先被標成「要確認」。越高，代表只看要確認的就夠。
  * 手動新增的種類（沒有框）不算；舊版本的盤點沒有記 AI 答案，回傳 null。
+ * refine（4.9）：相似品比對檢查過的框，第一次的答案對幾個、照比對的建議改對幾個；這次沒跑比對＝null（畫面顯示「—」）。
  */
 function evalSession(s) {
   const done = s.photos.filter((p) => p.status === 'done')
@@ -1450,7 +1360,30 @@ function evalSession(s) {
     caught,
     flagged: objs.filter((o) => o.aiFlag).length + gone.filter((x) => x.flag).length,
     unchecked: groups.filter((g) => open.has(g.key)).length,
+    refine: refineScore(objs, keyOf),
   }
+}
+
+/**
+ * 相似品比對有沒有幫忙：只看比對「有提建議」、而且你看過（照改＝edited，或按「一樣」＝checked）的框。
+ * - 建議對＝你最後選的跟建議一模一樣；第一次對＝你最後選的就是第一次的答案（整組改名照樣算對）。
+ * - 「整組改名」只從比對同意的框學：比對把一組的多數拆走時，對應才不會翻過去，把對的算成錯的。
+ * - 用種類數量比的話，比對亂拆出一種、你沒照改，會被整組改名蓋過去，數字永遠偏向比對，所以一個框一個框比。
+ * 沒有比對紀錄（舊盤點、沒跑比對）回傳 null。keyOf 用傳的（測試檔可以單獨拿這個函式跑）。
+ */
+function refineScore(objs, keyOf) {
+  const ran = objs.filter((o) => o.ai && o.aiRefine)
+  if (!ran.length) return null
+  const votes = new Map()
+  for (const o of ran)
+    if (o.aiRefine === o.ai) {
+      const v = votes.get(o.ai) || new Map()
+      v.set(keyOf(o), (v.get(keyOf(o)) || 0) + 1)
+      votes.set(o.ai, v)
+    }
+  const renamed = (a) => [...(votes.get(a) || [])].sort((x, y) => y[1] - x[1])[0]?.[0] ?? a
+  const seen = ran.filter((o) => o.aiRefine !== o.ai && (o.edited || o.checked))
+  return { n: seen.length, first: seen.filter((o) => keyOf(o) === renamed(o.ai)).length, refined: seen.filter((o) => keyOf(o) === o.aiRefine).length }
 }
 
 /** 很多次盤點合起來算：完全正確率、平均差幾個、漏數／多數／分錯、要確認抓到幾成 */
@@ -1473,8 +1406,12 @@ function qualityStats(sessions) {
     caught: sum('caught'),
     flagged: sum('flagged'),
     unchecked: sum('unchecked'),
+    // 有跑比對的那幾次：比對檢查過的框，第一次的答案對幾個、照比對的建議改對幾個
+    refine: { n: sumRefine(sessions, 'n'), first: sumRefine(sessions, 'first'), refined: sumRefine(sessions, 'refined') },
+    refineSessions: sessions.filter((s) => s.eval.refine).length,
   }
 }
+const sumRefine = (sessions, k) => sessions.reduce((a, s) => a + (s.eval.refine?.[k] || 0), 0)
 const pct = (x) => (x == null ? '—' : `${Math.round(x * 100)}%`)
 
 /** 改數量（手動新增的存在品項上；AI 的存成覆寫值） */
@@ -2352,7 +2289,7 @@ async function viewHome() {
         : syncReady()
           ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>還不能拍照盤點：AI 金鑰還沒放到雲端</b><p>到「設定 → AI」貼上金鑰，再按<span class="nb">「放到雲端」</span>，這台和同事就都能用。</p>' : '<b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → AI」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 AI 金鑰。</p>'}<button class="btn small" data-go="settings">去設定</button></div></div>`
           : freshPhone()
-            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'} <span class="badge new">新</span></b>${joinHow()}<p>自己是擁有者、第一次用：按<span class="nb">「去設定」</span>，貼上 <span class="nb">AI 金鑰</span><span class="nb">（Claude 或 Gemini）</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
+            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'} <span class="badge new">新</span></b>${joinHow()}<p>自己是擁有者、第一次用：按<span class="nb">「去設定」</span>，貼上 <span class="nb">Claude 的 AI 金鑰</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
             : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 AI 金鑰<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>收到同事的邀請：在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>，不用 Key。</p><div class="row-actions"><button class="btn small" data-go="settings">去設定</button><button class="btn small secondary" data-action="paste-invite">貼上邀請並加入</button></div></div></div>`
     }
     </div>
@@ -2499,8 +2436,11 @@ function viewReview() {
             </div>
             ${
               doubts.length
-                ? `<button class="sum-doubt edit-only" data-action="review-doubts"><span class="sum-dot" aria-hidden="true">?</span><span class="grow"><b>${doubts.length} 個要確認</b><br><span class="meta">可能尺寸不同，或 AI 沒把握</span></span>${chev}</button>`
-                : `<div class="sum-ok">${icon('check', 20)}沒有需要確認的${state.refining && state.refining.session === s.id ? '（相似品還在比對）' : ''}</div>`
+                ? `<button class="sum-doubt edit-only" data-action="review-doubts"><span class="sum-dot" aria-hidden="true">?</span><span class="grow"><b>${doubts.length} 個要確認</b><br><span class="meta">${
+                    // 手機上「正在比對」提示卡在最下面、被工具列擋住：比對的狀態放在這張卡上
+                    state.refining?.session === s.id ? '<span class="nb">AI 還在再檢查相似品，</span><span class="nb">可能會再多幾個</span>' : doubts.some((d) => d.o.suggest) ? `<span class="nb">其中 ${doubts.filter((d) => d.o.suggest).length} 個是</span> <span class="nb">AI 再檢查後的建議</span>` : '可能尺寸不同，或 AI 沒把握'
+                  }</span></span>${chev}</button>`
+                : `<div class="sum-ok">${icon('check', 20)}沒有需要確認的${state.refining?.session === s.id ? '<span class="nb">（AI 還在再檢查相似品）</span>' : ''}</div>`
             }
             ${
               s.eval?.types.length
@@ -2542,7 +2482,7 @@ function viewReview() {
           </div>`
         : ''
     }
-    ${state.refining && state.refining.session === s.id ? `<div class="hint-card" role="status" style="margin-top:12px"><b>正在比對相似品…</b>（${state.refining.done}/${state.refining.total} 張）好了會自動更新，可以先看結果。</div>` : ''}
+    ${state.refining && state.refining.session === s.id ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在再檢查相似品…</b><span class="nb">（${state.refining.done}/${state.refining.total} 張）</span>可以先看結果；<span class="nb">它不會改答案，</span><span class="nb">覺得不一樣的</span><span class="nb">會標成「要確認」。</span></div>` : ''}
     ${notes}
     ${s.photos
       .map((p, i) => (p.trace?.length ? `<details class="trace"><summary>辨識過程${s.photos.length > 1 ? `（第 ${i + 1} 張）` : ''}：花了多久、用哪個模型</summary>${p.trace.map((l) => `<div>${esc(l)}</div>`).join('')}</details>` : ''))
@@ -2593,7 +2533,7 @@ function aiShareRows(key) {
   if (myRole() === 'owner')
     rows.push(
       ls.get(K().shared) === '1'
-        ? `<div class="row"><span class="grow"><span class="title">${aiName()} 金鑰已放在雲端給大家共用</span>${fresh}<br><span class="meta">同事不用跟你要金鑰；大家的用量都算在這把金鑰上。</span></span><button class="btn small secondary" data-action="ai-unshare">停止共用</button></div>`
+        ? `<div class="row"><span class="grow"><span class="title">Claude 金鑰已放在雲端給大家共用</span>${fresh}<br><span class="meta">同事不用跟你要金鑰；大家的用量都算在這把金鑰上。</span></span><button class="btn small secondary" data-action="ai-unshare">停止共用</button></div>`
         : `<div class="row"><span class="grow"><span class="title">把金鑰放到雲端，大家共用</span>${fresh}<br><span class="meta">金鑰存在你的 Apps Script，同事的手機不會有，不用一個一個給。</span></span><button class="btn small" data-action="ai-share">放到雲端</button></div>`,
     )
   return rows.length ? `<div class="group">${rows.join('')}</div>` : ''
@@ -2610,7 +2550,7 @@ const diagSection = () =>
     <p class="footnote">辨識一直失敗時按這個，把結果截圖傳給擁有者（管理這個 App 的人）。</p>`
     : ''
 /** 還沒設定任何同步、也沒有金鑰的新手機（大多是剛收到邀請的同事） */
-const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.key) && !ls.get(LS.claudeKey)
+const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.claudeKey)
 /**
  * 4.7.7：在瀏覽器裡用、資料跟桌面 App 分開的（iPhone 的 Safari／Chrome、LINE 裡打開的）。
  * 使用者回報：在 Safari 早就連好，打開桌面 App 卻是全新的，大家一定都會這樣 → 「複製到桌面 App」
@@ -2636,7 +2576,6 @@ function moveCard() {
   return `<div class="setup-card move-card"><span class="setup-ico" aria-hidden="true">${icon('copy', 26)}</span><div class="grow"><b>桌面的 App 要再接一次 <span class="badge new">新</span></b><p>桌面的 App 跟瀏覽器的資料是分開的：</p><ol class="steps-list"><li>按「複製到桌面 App」。</li><li>打開桌面的「聖佳庫存」<span class="nb">（還沒有：分享</span>→<span class="nb">加入主畫面）</span>。</li><li>按<span class="nb">「貼上邀請並加入」</span>。</li></ol><p class="move-note">只貼到自己的 App，<span class="nb">不要傳給別人</span>；點到一半的點貨單先按完成。</p>${keyNote}<div class="row-actions"><button class="btn small" data-action="move-to-app">複製到桌面 App</button><button class="btn small plain" data-action="move-hint-off">不用了</button></div></div></div>`
 }
 async function viewSettings() {
-  const prov = aiProvider()
   const key = ls.get(K().key)
   const model = ls.get(K().model)
   const samples = await idb.samples.all().catch(() => [])
@@ -2654,6 +2593,8 @@ async function viewSettings() {
         <p class="footnote">自己就是擁有者（管理這個 App 的人）：<span class="nb">不用填這裡</span>，往下設定 <span class="nb">AI 金鑰</span>、<span class="nb">Google 試算表</span>。</p></div>`
         : serverSlow() && myRole() === 'owner'
           ? `<div class="hint-card stack fast-hint"><div><b>同步可以快很多</b> <span class="badge new">新</span><br>把 Google 那邊的程式碼更新成新版，<span class="nb">同步上傳、下載</span>會快很多，<span class="nb">也會套用</span>共用 AI 的每日次數上限、點貨紀錄的保護。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
+          : syncReady() && myRole() === 'owner' && ls.get(LS.serverGemini) === '1'
+            ? `<div class="hint-card stack fast-hint"><div><b>雲端還放著舊的 Gemini 金鑰</b> <span class="badge new">新</span><br>App 已經不用 Gemini 了，<span class="nb">不用的金鑰</span><span class="nb">留著有外流風險</span>。把 Google 那邊的程式碼更新成新版，<span class="nb">會自動刪掉它</span>。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
           : syncReady() && myRole() === 'owner' && serverFastOff()
             ? `<div class="hint-card stack fast-hint"><div><b>快速同步還沒打開</b> <span class="badge new">新</span><br>Google 那邊沒有開「Drive API」，同步還是一筆一筆來（資料不會錯，只是比較慢）。請用電腦做一次，<span class="nb">約 2 分鐘：</span><ol class="steps-list" style="margin:8px 0 0"><li>打開當初那個 Google 試算表 →<span class="nb">「擴充功能」</span>→<span class="nb">「Apps Script」</span>。</li><li>左邊<span class="nb">「服務」</span>旁的 <b>＋</b> → 選<span class="nb">「Drive API」</span>→<span class="nb">「新增」</span>。</li><li>右上「部署」→<span class="nb">「<b>管理部署作業</b>」</span>→ 鉛筆 → 版本選<span class="nb">「<b>新版本</b>」</span>→ 部署。</li></ol></div></div>`
             : ''
@@ -2661,29 +2602,23 @@ async function viewSettings() {
     <div class="settings-cols"><div class="settings-col">
     <p class="section-title">AI <span class="badge new">新</span></p>
     ${
-      // 4.8：可以選 Claude 或 Gemini；檢視者不能用 AI，不用選
+      // 4.9 只用 Claude（拿掉 Gemini）；檢視者不能用 AI，不用看說明
       canEdit()
-        ? `<div class="seg ai-seg" role="tablist" aria-label="用哪一家的 AI">${['claude', 'gemini'].map((p) => `<button role="tab" aria-selected="${p === prov}" data-action="set-provider" data-provider="${p}">${p === 'claude' ? 'Claude' : 'Gemini'}</button>`).join('')}</div>
-      <p class="footnote" style="margin-bottom:12px">${prov === 'claude' ? 'Claude（Anthropic）：讀標籤、讀單子很強；<span class="nb">沒有免費額度</span>，照用量付費；送去的照片<span class="nb">預設不會拿去訓練</span>。' : 'Gemini（Google）：<span class="nb">畫框最準</span>、<span class="nb">有免費額度</span>；免費版的照片可能被拿去改善產品。'}<span class="nb">盤點、讀標籤、</span><span class="nb">讀單子、相似品比對</span><span class="nb">都用這裡選的。</span></p>`
+        ? '<p class="footnote" style="margin-bottom:12px">用 Claude（Anthropic）辨識：<span class="nb">沒有免費額度，</span><span class="nb">照用量付費；</span>送去的照片<span class="nb">預設不會拿去訓練。</span><span class="nb">盤點、讀標籤、</span><span class="nb">讀單子、相似品比對</span><span class="nb">都用這把金鑰。</span></p>'
         : ''
     }
     ${(() => {
-      const keyForm =
-        prov === 'claude'
-          ? `<input class="field" id="apikey" type="password" placeholder="貼上 Claude API Key（sk-ant- 開頭）" value="${esc(key)}" autocomplete="off" spellcheck="false">
+      const keyForm = `<input class="field" id="apikey" type="password" placeholder="貼上 Claude API Key（sk-ant- 開頭）" value="${esc(key)}" autocomplete="off" spellcheck="false">
       <div class="row-actions"><button class="btn small" data-action="save-key">儲存並測試</button><button class="btn small secondary" data-action="toggle-key">顯示／隱藏</button></div>
       <p class="footnote">沒有 Key？到 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" style="color:var(--tint)">Claude Console</a> 申請<span class="nb">（要先在 Billing 儲值）</span>。Key 只存在這支手機，照片只會送到 <span class="nb">Anthropic 分析</span>。</p>`
-          : `<input class="field" id="apikey" type="password" placeholder="貼上 Gemini API Key（AIza 開頭）" value="${esc(key)}" autocomplete="off" spellcheck="false">
-      <div class="row-actions"><button class="btn small" data-action="save-key">儲存並測試</button><button class="btn small secondary" data-action="toggle-key">顯示／隱藏</button></div>
-      <p class="footnote">沒有 Key？到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style="color:var(--tint)">Google AI Studio</a> 免費建立。Key 只存在這支手機，照片只會送到 <span class="nb">Google Gemini 分析</span>。</p>`
       // 已經在用擁有者的共用金鑰：自己貼金鑰收進「進階」，同事才不會以為要自己去申請
       return aiSharedOn() && !key
         ? `<div class="stack">${aiShareRows(key)}${canEdit() ? `<details class="steps"><summary>進階：改用自己的金鑰</summary><div class="stack" style="margin-top:6px">${keyForm}</div></details>` : ''}</div>`
         : `<div class="stack">${keyForm}${aiShareRows(key)}</div>`
     })()}
     <p class="section-title">辨識模型</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">${prov === 'claude' ? '自動挑最新的 Sonnet；忙線時改用 Haiku。相似品分不開時，可以改用 Opus（比較貴）' : '自動挑能看圖、最新又快的 Flash；被下架會自動換。相似品分不開時，可以改用 Pro'}</span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
-      <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">AI 原本數的跟你確認後的比；也可以用標準答案考 AI</span></span>${chev}</button></div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">自動挑最新的 Sonnet；<span class="nb">忙線時改用 Haiku。</span>相似品分不開時，<span class="nb">可以改用 Opus（比較貴）</span></span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
+      <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準 <span class="badge new">新</span></span><br><span class="meta">AI 原本數的跟你確認後的比、相似品比對有沒有幫忙；也可以用標準答案考 AI</span></span>${chev}</button></div>
     <div id="models"></div>
     <p class="section-title">店內品項清單</p>
     <textarea class="field" id="catalog" spellcheck="false" ${canEdit() ? '' : 'readonly aria-readonly="true"'}>${esc(catalogLines().join('\n'))}</textarea>
@@ -2780,7 +2715,7 @@ async function viewSettings() {
         <li><b>權限：</b>擁有者、管理員（可以邀請／移除人）、編輯者（可以盤點、修改）、檢視者（只能看）。改權限馬上生效，不用換連結碼。</li>
         <li><b>有人離職：</b>在「共用設定」把他「移除權限」就好，其他人不用改；他的手機下次連線時，App 裡的公司資料會自動清除。</li>
         <li><b>手機上也有一份：</b>每台裝置會存一份方便離線看；手機請設螢幕鎖。</li>
-        <li><b>拍照辨識：</b>照片會送到設定裡選的那一家 AI 分析。<b>Claude（Anthropic）</b>：API 送去的內容預設不會拿去訓練模型。<b>Gemini（Google）</b>：免費版的條款寫明 Google 可以用送去的內容改善產品，也可能有人工審閱；到 Google AI Studio 開啟付費（照用量計費）就不會。不管用哪一家，照片裡都不要拍到價格單、客戶資料。</li>
+        <li><b>拍照辨識：</b>照片會送到 <b>Claude（Anthropic）</b>分析；API 送去的內容預設不會拿去訓練模型。照片裡還是不要拍到價格單、客戶資料。</li>
       </ol>
     </details>` : ''}
     <p class="section-title">資料</p>
@@ -5002,7 +4937,7 @@ async function sendNote(p, cropped) {
   state.pickBusyId = p.id
   if (state.view === 'pick-edit') render()
   try {
-    const res = await askJson([{ inline_data: { mime_type: 'image/jpeg', data: await blobToBase64(cropped) } }, { text: NOTE_PROMPT }], NOTE_SCHEMA, 40000)
+    const res = await askJson([{ inline_data: { mime_type: 'image/jpeg', data: await blobToBase64(cropped) } }, { text: NOTE_PROMPT }], NOTE_SCHEMA, 80000)
     const rows = cleanNoteRows(res)
     // 讀的時候：這張被刪掉了、按完成了、或「改一下」已經放棄 → 讀到的不加進去
     if (p._gone) return
@@ -5744,7 +5679,14 @@ const undoTo = (s, snap) => ({
      <p class="sheet-sub">${g.manual ? '手動新增的品項' : `照片裡 ${g.boxes} 個框會一起改；只有其中幾個不一樣，請在照片上點那個框`}</p>
      ${fieldsHtml(g, sug)}
      <div class="row-actions" style="margin-top:16px"><button class="btn" style="flex:1" id="e-save">儲存</button><button class="btn danger" id="e-del">刪掉</button></div>
-     ${g.manual || g.boxes < 2 ? '' : `<button class="btn secondary block" id="e-refine" style="margin-top:10px">再比對一次：把這 ${g.boxes} 個分得更細</button><p class="footnote" style="margin:8px 2px 0">把這一列的框切成小圖並排給 AI，一個一個比粗細和接口（要網路，約 10～30 秒）。</p>`}
+     ${
+       g.manual || g.boxes < 2
+         ? ''
+         : // 整組都是你改過的（例如整組改過名）：以你的為準，不給比對（按了也只會說「以你改的為準」）
+           g.refs.every((r) => s.photos[r.pi].objects[r.oi].edited)
+           ? '<p class="footnote" style="margin:10px 2px 0">這一種是你改過的，<span class="nb">以你的為準。</span>只有其中幾個不一樣：<span class="nb">請點照片上那個框。</span></p>'
+           : `<button class="btn secondary block" id="e-refine" style="margin-top:10px">再比對一次：找出不一樣的 <span class="badge new">新</span></button><p class="footnote" style="margin:8px 2px 0">AI 再看一次這 ${g.boxes} 個<span class="nb">（整張照片＋每個框的特寫）。</span><span class="nb">覺得不一樣的</span><span class="nb">會標成「要確認」，</span><span class="nb">你按「改成」才會改</span><span class="nb">（要網路，約 10～30 秒）。</span></p>`
+     }
      ${g.manual ? '' : '<button class="btn secondary block" id="e-sample" style="margin-top:10px">儲存，並存成樣品照</button><p class="footnote" style="margin:8px 2px 0">用照片上第一個框當樣品。這一列混了不同尺寸的話，請先點照片上那一個框、再點一次，從那裡存。</p>'}`,
     (el, close) => {
       el.querySelector('#e-save').onclick = async () => {
@@ -5761,30 +5703,35 @@ const undoTo = (s, snap) => ({
       }
       el.querySelector('#e-refine')?.addEventListener('click', async (ev) => {
         const btn = ev.currentTarget
+        // 先記住框本身（等待時刪框、索引會變）；你改過的框以你的為準，不用再花錢比
+        const todo = g.refs.map((r) => ({ photo: s.photos[r.pi], o: s.photos[r.pi].objects[r.oi] })).filter((x) => !x.o.edited)
+        if (!todo.length) return toast('這幾個都是你改過的，以你改的為準；要改請點照片上的框')
+        if (todo.some((x) => !x.photo.blob)) return toast('照片還在下載（或不見了），等照片出來再比對')
+        const label = btn.innerHTML
         btn.disabled = true
         btn.textContent = '比對中…（約 10～30 秒）'
         try {
           const refs = await sampleRefs()
-          const snap = snapSession(s)
           // 同一張照片的框一起比（大小比較才有意義）
-          const byPhoto = new Map()
-          g.refs.forEach((r) => byPhoto.set(r.pi, [...(byPhoto.get(r.pi) || []), r.oi]))
-          let groups = 0
-          for (const [pi, ois] of byPhoto) {
-            const rr = await refineObjects(s.photos[pi], s.photos[pi].objects, ois, refs, (m) => (btn.textContent = m))
-            groups = Math.max(groups, rr.groups || 0)
+          let suggested = 0
+          for (const photo of new Set(todo.map((x) => x.photo))) {
+            const ois = todo.filter((x) => x.photo === photo).map((x) => photo.objects.indexOf(x.o)).filter((i) => i >= 0)
+            suggested += (await refineObjects(photo, photo.objects, ois, refs, (m) => (btn.textContent = m), { recheck: true })).suggested
           }
-          // 原本手動改過的數量是給「一整列」的，分組後不再適用
-          if (s.counts) delete s.counts[g.key]
+          // 比對要等一陣子：這段時間關掉了這次盤點、或另一台更新了它，結果就不存（不然會存到別份、蓋掉比較新的）
+          if (state.session !== s) return toast('比對好了，但你已經離開這次盤點（或另一台改過它），結果沒有存；請回到這次盤點再比一次')
           state.focus = null
           await save()
           close()
           render()
-          toast(groups > 1 ? `分成 ${groups} 種了，請對照照片確認` : 'AI 比對後還是認為是同一種；可以點框個別修改，或存樣品照', groups > 1 ? undoTo(s, snap) : undefined)
+          if (!suggested) return toast('比對後覺得都跟現在一樣；只有其中幾個不一樣的話，請點照片上那個框')
+          // 有建議：一個一個給你看，按「改成…」才會改
+          const list = todo.map((x) => ({ pi: s.photos.indexOf(x.photo), o: x.o })).filter((x) => x.pi >= 0 && x.o.suggest && s.photos[x.pi].objects.includes(x.o))
+          if (state.view === 'review' && list.length) quickSheet(list.map((x) => ({ ...x, reason: suggestReason(x.o.suggest) })), 0, { doubt: true })
         } catch (e) {
           btn.disabled = false
-          btn.textContent = `再比對一次：把這 ${g.boxes} 個分得更細`
-          toast(e.message || '比對失敗，請再試一次')
+          btn.innerHTML = label
+          toast(e instanceof ApiError ? e.message : '比對失敗，請再試一次')
         }
       })
       el.querySelector('#e-sample')?.addEventListener('click', async () => {
@@ -5868,9 +5815,16 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
       close()
       render()
     }
+    // 視窗開著時 AI 再檢查才跑完：新冒出來的「要確認」接在後面，不要說「都看完了」
+    const more = () => {
+      if (!doubt || state.session !== s) return false
+      const add = doubtsOf(s).filter((d) => !order.some((x) => x.o === d.o))
+      order.push(...add)
+      return add.length > 0
+    }
     const go = (i) => {
       if (i < 0) return
-      if (i >= order.length) {
+      if (i >= order.length && !more()) {
         if (doubt) toast('要確認的都看完了')
         return finish()
       }
@@ -5943,7 +5897,7 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
         toast(`已把這 1 個改成「${name}」`, undo)
         return finish()
       }
-      if (cur + 1 >= order.length) {
+      if (cur + 1 >= order.length && !more()) {
         toast(`已改成「${name}」；要確認的都看完了`, undo)
         return finish()
       }
@@ -5964,9 +5918,15 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
           <span class="q-count"><span class="nb">${doubt ? '要確認的' : ''}第 ${cur + 1} / ${order.length} 個</span>${s.photos.length > 1 ? `・<span class="nb">第 ${pi + 1} 張照片</span>` : ''}</span>
         </div>
         <div class="q-zoom"${zoomAttrs(urlOf(photo), `框起來的這一個・${o.label}${s.photos.length > 1 ? `・第 ${pi + 1} 張照片` : ''}`, { box: o.box, color: mine?.color })}></div>
-        ${reason ?`<p class="doubt-reason">為什麼要看：${esc(reason)}</p>` : ''}
+        ${(() => {
+          // 視窗開著時才來的建議：理由照最新的；「」裡的名稱不拆開換行（「4分」的「分」才不會掉到下一行）
+          const why = o.suggest && !o.edited ? suggestReason(o.suggest) : reason
+          return why ? `<p class="doubt-reason">為什麼要看：${esc(why).replace(/「[^」]{1,14}」/g, (m) => `<span class="nb">${m}</span>`)}</p>` : ''
+        })()}
         <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${detailHtml(o)}` : ''}` : esc(o.label)}</p>
-        ${doubt ? `<button class="btn block" id="q-same" style="margin-bottom:12px">${icon('check', 20)}一樣，就是「${esc(mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label)}」</button><p class="sheet-sub" style="margin:0 0 8px">不一樣的話，選它是哪一種：</p>` : ''}
+        ${doubt ? `<button class="btn block" id="q-same" style="margin-bottom:12px">${icon('check', 20)}一樣，就是「${esc(mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label)}」</button>` : ''}
+        ${o.suggest && !o.edited ? `<button class="btn secondary block" id="q-suggest" style="margin-bottom:12px"><span>改成「<span class="nb">${esc(o.suggest.label)}</span>${o.suggest.spec ? `・<span class="nb">${esc(o.suggest.spec)}</span>` : ''}」</span><span class="badge new">新</span></button>` : ''}
+        ${doubt ? '<p class="sheet-sub" style="margin:0 0 8px">不一樣的話，選它是哪一種：</p>' : ''}
         <div class="group">
           ${groups
             .map(
@@ -5993,28 +5953,44 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
       // 確認一樣：記成「看過了」再存；存不進去就還原
       const confirmSame = async () => {
         const was = o.checked
+        const sug = o.suggest
         o.checked = true
+        delete o.suggest // 你確認一樣：比對的建議不再提（比對的答案還記在 o.aiRefine）
         try {
           await save()
           return true
         } catch {
           o.checked = was
+          if (sug) o.suggest = sug
           failed()
           return false
         }
       }
+      // 連點：第二下點到的是上一個框的舊按鈕，等它打完勾，畫面已經換到下一個框了 → 不動，不然會改到下一個框
+      const moved = () => order[cur]?.o !== o
       body.querySelector('#q-same')?.addEventListener('click', async (e) => {
         if (guarded() || stale()) return
         await tick(e.currentTarget)
+        if (moved()) return
         if (!(await confirmSame())) return
         render()
         if (cur + 1 < order.length) toast('確認了，換下一個')
         advance()
       })
+      // 照比對的建議改：跟手動選一樣算你改的（o.edited），可以復原
+      body.querySelector('#q-suggest')?.addEventListener('click', async (e) => {
+        if (guarded() || stale()) return
+        await tick(e.currentTarget)
+        if (moved() || !o.suggest) return
+        guardUntil = 0
+        const { label, brand, model, spec } = o.suggest
+        assign({ label, brand, model, spec })
+      })
       body.querySelectorAll('[data-q]').forEach((b) =>
         b.addEventListener('click', async () => {
           if (guarded() || stale()) return
           await tick(b)
+          if (moved()) return
           const g = groups[Number(b.dataset.q)]
           if (g === mine) {
             // 選了目前這一種＝確認一樣（點一個框來看的：直接關掉）
@@ -6655,30 +6631,24 @@ const LABEL_SCHEMA = {
   },
   required: ['label', 'brand', 'model', 'spec', 'code', 'text'],
 }
-/** 問 AI 一次、回 JSON：同一個模型先有思考設定、再拿掉；不行就換下一個模型 */
-async function askJson(parts, schema, timeoutMs = 30000) {
-  // Claude 寫得比較慢：等久一點，不然逾時換模型＝多付一次錢
-  if (isClaude()) timeoutMs *= 2
+/** 問 AI 一次、回 JSON：不行（忙線、太慢、格式壞掉、模型下架）就換下一個模型。Claude 寫得比較慢，等 60 秒，不然逾時換模型＝多付一次錢 */
+async function askJson(parts, schema, timeoutMs = 60000) {
   const first = await currentModel()
   const list = cachedModels() ?? (await fetchModels().catch(() => [first]))
   const models = [first, ...list.filter((m) => m !== first)].slice(0, 3)
   let lastErr
   for (const model of models) {
-    for (const think of [true, false]) {
-      try {
-        const generationConfig = { temperature: 0, responseMimeType: 'application/json', responseSchema: schema, ...(think && thinkingFor(model) ? { thinkingConfig: thinkingFor(model) } : {}) }
-        const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig }) }, timeoutMs)
-        const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
-        // aiModel：用哪個 AI 模型（不能叫 model，會蓋掉零件的型號欄位）
-        return { ...JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, '')), aiModel: model }
-      } catch (e) {
-        lastErr = e
-        if (e instanceof SyntaxError) break
-        if (!(e instanceof ApiError)) throw e
-        if (e.status === 400 && think && !isClaude()) continue
-        if (e.status === 400 || !(retryable(e) || e.status === 404)) throw e
-        break
-      }
+    try {
+      const generationConfig = { temperature: 0, responseMimeType: 'application/json', responseSchema: schema }
+      const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig }) }, timeoutMs)
+      const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
+      // aiModel：用哪個 AI 模型（不能叫 model，會蓋掉零件的型號欄位）
+      return { ...JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, '')), aiModel: model }
+    } catch (e) {
+      lastErr = e
+      if (e instanceof SyntaxError) continue
+      if (!(e instanceof ApiError)) throw e
+      if (e.status === 400 || !(retryable(e) || e.status === 404)) throw e
     }
   }
   throw lastErr instanceof SyntaxError ? new ApiError('AI 回傳的格式壞掉了，請再拍一次。', 0) : lastErr
@@ -6952,12 +6922,13 @@ async function postSync(body, opt = {}) {
   if (data.ver) ls.set(LS.serverVer, String(data.ver))
   if ('fast' in data) ls.set(LS.serverFast, data.fast ? '1' : '0')
   // 擁有者有沒有把 AI 金鑰放在雲端共用（新版雲端程式碼才會回這個）
-  if ('ai' in data) {
-    const was = `${ls.get(LS.aiShared)}|${ls.get(LS.aiSharedClaude)}`
-    ls.set(LS.aiShared, data.ai ? '1' : '')
-    // aiClaude：擁有者有沒有放 Claude 的共用金鑰（舊版雲端程式碼沒有這個欄位＝沒有）
+  // aiClaude：擁有者有沒有放 Claude 的共用金鑰（4.8 以前的雲端程式碼只回 ai、沒有這個欄位＝沒有）
+  if ('ai' in data || 'aiClaude' in data) {
+    const was = `${ls.get(LS.aiSharedClaude)}|${ls.get(LS.serverGemini)}`
     ls.set(LS.aiSharedClaude, data.aiClaude ? '1' : '')
-    if (was !== `${ls.get(LS.aiShared)}|${ls.get(LS.aiSharedClaude)}`) setTimeout(render, 0)
+    // 只有舊版雲端會回 ai；ai＝true 代表那邊還放著 Gemini 金鑰
+    ls.set(LS.serverGemini, data.ai ? '1' : '')
+    if (was !== `${ls.get(LS.aiSharedClaude)}|${ls.get(LS.serverGemini)}`) setTimeout(render, 0)
   }
   // 權限隨時可能被管理員改：每次回覆都更新
   if (data.me?.role) {
@@ -6988,7 +6959,7 @@ async function postSync(body, opt = {}) {
 /** 清除這台的資料（退出同步、被移除權限時） */
 async function wipeLocal(msg) {
   clearTimeout(syncTimer)
-  for (const k of [LS.moveHintOff, LS.aiShared, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.key, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId, LS.aiSharedClaude, LS.claudeKey, LS.claudeModel, LS.claudePinned, LS.provider]) ls.set(k, '')
+  for (const k of [LS.moveHintOff, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId, LS.aiSharedClaude, LS.claudeKey, LS.claudeModel, LS.claudePinned, LS.serverGemini]) ls.set(k, '')
   // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
   await idb.sessions.clear()
   await idb.items.clear()
@@ -7746,7 +7717,7 @@ function moveSheet() {
         state.moving = true // 搬家中：背景自動同步先停（網址會暫時切來切去）
         clearTimeout(syncTimer)
         // 共用的 AI 金鑰不會跟著搬（金鑰不從雲端傳回手機）：搬完要提醒擁有者在新位置再放一次
-        const aiWas = ls.get(LS.aiShared) === '1' || ls.get(LS.aiSharedClaude) === '1'
+        const aiWas = ls.get(LS.aiSharedClaude) === '1'
         try {
           status('1／4 先把最新的資料下載到這台…')
           await syncNow()
@@ -7769,7 +7740,6 @@ function moveSheet() {
           ls.set(LS.sheet, newUrl)
           status(`搬家完成：大家的 App 下次同步會自動跟過來。舊的試算表和資料夾確認沒問題後可以刪掉。${aiWas ? '共用的 AI 金鑰沒有跟著搬：請到「設定 → AI」再按一次「放到雲端」，同事才能繼續拍照辨識。' : ''}`)
           if (aiWas) {
-            ls.set(LS.aiShared, '')
             ls.set(LS.aiSharedClaude, '')
             alert('搬家完成。\n\n共用的 AI 金鑰沒有跟著搬（金鑰不會從雲端傳回手機）。\n請到「設定 → AI」再按一次「放到雲端」，同事才能繼續拍照辨識。')
             render()
@@ -8010,7 +7980,11 @@ async function viewQuality() {
   }
   const worst = [...byItem.values()].filter((x) => x.exact < x.n).sort((a, b) => b.n - b.exact - (a.n - a.exact) || b.err - a.err).slice(0, 6)
   const byModel = new Map()
-  for (const s of sessions) byModel.set(s.eval.model || '沒有記錄', [...(byModel.get(s.eval.model || '沒有記錄') || []), s])
+  // 照第一次辨識的模型分（「（含相似品比對）」「＋ X 比對」是後面加上去的，不要因為這樣多分出一列）
+  for (const s of sessions) {
+    const m = (s.eval.model || '沒有記錄').replace(/（含相似品比對）$| ＋ \S+ 比對$/, '')
+    byModel.set(m, [...(byModel.get(m) || []), s])
+  }
   const run = state.golden
   return `
   <main class="app">
@@ -8034,6 +8008,20 @@ async function viewQuality() {
             <div class="row"><span class="grow"><span class="title">分錯種類</span><br><span class="meta">框改成別的一種（例如 2分 看成 3分）</span></span><span class="qty"><b>${q.misclass}</b></span></div>
             <div class="row"><span class="grow"><span class="title">AI 一共框了</span><br><span class="meta">標成「要確認」的 ${q.flagged} 個，其中真的有錯 ${q.caught} 個</span></span><span class="qty"><b>${q.boxes}</b></span></div>
           </div>
+          <p class="section-title">相似品比對有沒有幫忙 <span class="badge new">新</span></p>
+          <div class="group">
+            ${[
+              ['比對的建議對了', q.refine.refined, '你照建議改的'],
+              ['第一次的答案對了', q.refine.first, '你維持第一次答案的'],
+            ]
+              .map(([t, x, how]) => `<div class="row"><span class="grow"><span class="title">${t}</span><br><span class="meta">${q.refine.n ? `<span class="nb">${q.refine.n} 個建議裡，</span><span class="nb">${how} ${x} 個</span>` : q.refineSessions ? '<span class="nb">AI 再檢查都同意第一次的答案，</span><span class="nb">還沒有建議可以比</span>' : '還沒有資料'}</span></span><span class="qty"><b>${pct(q.refine.n ? x / q.refine.n : null)}</b></span></div>`)
+              .join('')}
+          </div>
+          <p class="footnote">${
+            q.refineSessions
+              ? `${q.refineSessions} 次盤點有跑比對；<span class="nb">只算你看過的建議</span><span class="nb">（照改或按「一樣」）。</span>${q.refine.n < 20 ? `<span class="nb">建議還不到 20 個，</span><span class="nb">數字還不準，</span><span class="nb">多盤幾次再看。</span>` : ''}`
+              : '這段時間沒有跑比對的盤點<span class="nb">（用 Opus 時 AI 有把握就不比；</span><span class="nb">這一版以前的盤點</span><span class="nb">沒有比對紀錄），</span><span class="nb">所以是「—」。</span>'
+          }比對不會自己改答案，<span class="nb">只會標成「要確認」。</span>盤幾次之後，如果<span class="nb">「比對的建議對了」</span><span class="nb">沒有比較高，</span><span class="nb">比對就可以拿掉、省錢。</span></p>
           ${
             worst.length
               ? `<p class="section-title">最常數錯的</p><div class="group">${worst.map((w) => `<div class="row"><span class="grow"><span class="title">${esc(w.label)}</span><br><span class="meta">${w.n} 次裡 ${w.n - w.exact} 次數量不對，一共差 ${w.err} 個</span></span></div>`).join('')}</div>
@@ -8045,7 +8033,8 @@ async function viewQuality() {
               ? `<p class="section-title">各模型</p><div class="group">${[...byModel]
                   .map(([m, ss]) => {
                     const x = qualityStats(ss)
-                    return `<div class="row"><span class="grow"><span class="title">${esc(m)}</span><br><span class="meta">${x.sessions} 次盤點・${x.n} 種・平均差 ${x.mae.toFixed(1)} 個</span></span><span class="qty"><b>${pct(x.rate)}</b></span></div>`
+                    // 這個模型的盤點全部還有「要確認」沒看：沒有可以算的種類（mae 是 null），顯示「—」，不能讓整頁打不開
+                    return `<div class="row"><span class="grow"><span class="title">${esc(m)}</span><br><span class="meta">${x.sessions} 次盤點・${x.n} 種・平均差 ${x.mae == null ? '—' : `${x.mae.toFixed(1)} 個`}</span></span><span class="qty"><b>${pct(x.rate)}</b></span></div>`
                   })
                   .join('')}</div>`
               : ''
@@ -8071,6 +8060,7 @@ async function viewQuality() {
         <li><b>數量一個不差：</b>每一種商品，AI 原本數的跟你確認後的一樣，就算一個不差。整組改名不算錯，數量對就算對。</li>
         <li><b>平均差幾個：</b>每一種差幾個（多或少都算），平均起來。</li>
         <li><b>錯的有標出來：</b>AI 錯的框（被你刪掉、改種類的）裡，有幾成事先被標成「要確認」。</li>
+        <li><b>相似品比對：</b>只看 AI 再檢查後提了建議、你也看過的框。你最後選的跟建議一樣，算<span class="nb">「比對的建議對了」；</span>跟 AI 一開始說的一樣，算<span class="nb">「第一次的答案對了」。</span>你選了別的種類，<span class="nb">就兩個都不算對。</span></li>
         <li>手動新增的種類（沒有框）不算；這一版以前的盤點沒有記 AI 原本的答案，所以不算。</li>
       </ol>
     </details>
@@ -8235,7 +8225,7 @@ async function runAnalysis(indices) {
       }
       try {
         const r = await analyze(photo, log, refs)
-        Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '', aiGone: [] })
+        Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '', aiGone: [], model: r.model })
         markAi(photo) // 記下 AI 原本的答案（算準確率用）
         s.model = r.model
         // 拍到儲位標籤：沒填位置就自動填（有建立過的儲位用那個寫法）
@@ -8265,42 +8255,60 @@ async function runAnalysis(indices) {
 }
 
 /**
- * 第二輪在背景跑：同一類、但大小不一樣的框，切小圖並排再比一次。
- * 先記住要比的那幾個框（物件本身），等待時你刪了或改了框也不會對錯位置；你改過的框不會被蓋掉。
+ * 第二輪在背景跑：同一類、但大小不一樣的框，再檢查一次；只給建議（標成「要確認」），不改答案。
+ * 第一次用 Opus：只檢查它自己說沒把握的（odd、信心 < 0.6），沒有就不跑（省時間、省錢）。
+ * 先記住要比的那幾個框（物件本身），等待時你刪了或改了框也不會對錯位置。
+ * 這次盤點在別處有比較新的一份（另一台同步進來、或從首頁重新打開又改了）：停下來不存，不然會蓋掉比較新的修改。
  */
 async function backgroundRefine(s, photos, refs) {
   const jobs = photos
     .filter((p) => p?.status === 'done' && s.photos.includes(p))
-    .map((p) => ({ photo: p, objs: refineCandidates(p, p.objects, refs).map((oi) => p.objects[oi]) }))
-    .filter((j) => j.objs.length >= 2)
+    .map((p) => ({ photo: p, objs: refineCandidates(p, p.objects, refs, isStrong(p.model || s.model)).map((oi) => p.objects[oi]) }))
+    .filter((j) => j.objs.length)
   if (!jobs.length) return
-  state.refining = { session: s.id, total: jobs.length, done: 0 }
+  // 每次比對自己一個進度（兩次盤點的比對同時在跑時，才不會互相清掉）
+  const prog = { session: s.id, total: jobs.length, done: 0 }
+  state.refining = prog
   if (state.session === s && state.view === 'review') render()
-  let groups = 0
+  const newer = async () => {
+    if (state.session?.id === s.id && state.session !== s) return true
+    const cur = await db.get(s.id).catch(() => null)
+    return !cur || (cur.updatedAt || 0) > (s.updatedAt || 0)
+  }
+  let suggested = 0
   let failed = 0
+  let dropped = false
   for (const { photo, objs } of jobs) {
-    const free = objs.filter((o) => !o.edited && photo.objects.includes(o))
+    // 你確認過「一樣」的不用再花錢比
+    const free = objs.filter((o) => !o.edited && !o.checked && photo.objects.includes(o))
     const t0 = Date.now()
     const log = (msg) => (photo.trace ??= []).push(`比對 ${Math.round((Date.now() - t0) / 100) / 10} 秒｜${msg}`)
+    if ((dropped = await newer())) break
     try {
       const rr = await refineObjects(photo, free, free.map((_, k) => k), refs, log)
-      // 比對也是 AI 的答案：還沒被你改過的框，更新成比對後的種類
-      markAi(photo, free.filter((o) => !o.edited && photo.objects.includes(o)))
-      groups += rr.groups || 0
+      suggested += rr.suggested || 0
       if (rr.model && !/比對/.test(s.model || '')) s.model = rr.model === s.model ? `${s.model}（含相似品比對）` : `${s.model} ＋ ${rr.model} 比對`
     } catch (e) {
       failed += 1
       log(`沒成功：${e.detail || e.message}`)
-      photo.note = [photo.note, 'AI 沒辦法分出相似品的尺寸：請點照片上的框，直接選它是哪一種。'].filter(Boolean).join(' ')
+      photo.note = [photo.note, '相似品比對沒有成功（答案沒有被改）：長得像、只差尺寸的，請點照片上的框確認。'].filter(Boolean).join(' ')
     }
-    state.refining.done += 1
+    prog.done += 1
+    if ((dropped = await newer())) break
     await db.put(s)
     if (state.session === s && state.view === 'review') render()
   }
-  state.refining = null
+  if (state.refining === prog) state.refining = null
+  if (dropped) {
+    if (state.session?.id === s.id && state.view === 'review') {
+      render()
+      toast('這次盤點剛剛在另一台（或首頁）改過，AI 再檢查的結果沒有存；要的話按品項旁的 ✎ 再比對一次')
+    }
+    return
+  }
   if (state.session === s && state.view === 'review') {
     render()
-    toast(failed ? '相似品沒有比對成功：點照片上的框，直接選它是哪一種' : groups > 1 ? '相似品比對完成，已經分開不同尺寸' : '相似品比對完成：AI 認為都是同一種')
+    toast(failed ? '相似品再檢查沒有成功（答案沒有被改）：長得像的，請點照片上的框確認' : suggested ? `AI 再檢查後，有 ${suggested} 個可能不一樣：按上面「要確認」一個一個看` : '相似品再檢查完成：沒有要改的建議')
   }
 }
 
@@ -8390,7 +8398,11 @@ $app.addEventListener('click', async (e) => {
     return render()
   }
   if (d.open || d.openDoubts) {
-    const s = await db.get(d.open || d.openDoubts)
+    // 打開的就是手上這一份（例如背景比對還在跑時回首頁再點進來）：沿用同一份，不要讀出第二份、兩邊各改各的
+    // （資料庫裡的比較新，例如首頁多選按了完成，才用資料庫的）
+    const id = d.open || d.openDoubts
+    const cur = await db.get(id)
+    const s = state.session?.id === id && cur && (state.session.updatedAt || 0) >= (cur.updatedAt || 0) ? state.session : cur
     if (!s) return toast('找不到這次盤點（可能在別台被刪掉了）')
     state.session = s
     delete state.session.edits // 第一版的舊欄位，不再使用
@@ -8612,30 +8624,16 @@ $app.addEventListener('click', async (e) => {
       if (syncReady()) syncNow().catch(() => {})
       return
     }
-    case 'set-provider': {
-      // 換一家 AI：模型清單重拿；金鑰、共用設定各自保留，切回來還在
-      // 剛剛貼在欄位裡、是另一家的金鑰（貼錯分頁）：切過去時一起帶過去，不用再貼一次
-      const typed = (document.getElementById('apikey')?.value || '').trim()
-      const carry = typed && ((d.provider === 'claude' && /^sk-ant-/.test(typed)) || (d.provider === 'gemini' && /^AIza/.test(typed))) ? typed : ''
-      ls.set(LS.provider, d.provider)
-      modelCache = null
-      modelCacheOf = ''
-      await render()
-      const el = document.getElementById('apikey')
-      if (carry && el && !el.value) el.value = carry
-      return toast(carry ? `改用 ${aiName(d.provider)}：金鑰已經帶過來，按「儲存並測試」` : `改用 ${aiName(d.provider)}${hasAi() ? '' : '：還要在下面貼上金鑰'}`)
-    }
     case 'save-key': {
       const v = document.getElementById('apikey').value.trim()
-      // 金鑰貼錯地方（Claude 的貼到 Gemini、或反過來）：先提醒，不要存
-      if (v && isClaude() && /^AIza/.test(v)) return toast('這是 Gemini 的金鑰（AIza 開頭）：要用 Gemini 請先點上面的「Gemini」')
-      if (v && !isClaude() && /^sk-ant-/.test(v)) return toast('這是 Claude 的金鑰（sk-ant- 開頭）：要用 Claude 請先點上面的「Claude」')
+      // 貼到以前的 Gemini 金鑰：先提醒，不要存
+      if (/^AIza/.test(v)) return toast('這是 Gemini 的金鑰（AIza 開頭）：App 現在只用 Claude，請貼 sk-ant- 開頭的金鑰')
       const prevKey = ls.get(K().key)
       const prevModel = ls.get(K().model)
       ls.set(K().key, v)
       ls.set(K().model, '')
       if (!v) {
-        toast(`已清除 ${keyName()}`)
+        toast('已清除 Claude API Key')
         return render()
       }
       const done = busyBtn(t, '測試中…')
@@ -8667,22 +8665,20 @@ $app.addEventListener('click', async (e) => {
       const v = ls.get(K().key).trim()
       const typed = (document.getElementById('apikey')?.value || '').trim()
       if (!v || (typed && typed !== v)) return toast('先在上面貼上 API Key、按「儲存並測試」確認可以用，再放到雲端')
-      if (!confirm(`把這把 ${aiName()} 金鑰放到你的 Apps Script（雲端）給大家共用？\n同事的手機不會拿到金鑰；大家用的次數都算在這把金鑰上（每人每天最多 ${isClaude() ? '100' : '300'} 次）。${isClaude() ? '\nClaude 沒有免費額度，大家的用量都從你的 Claude 帳戶扣；Opus 預設不開放給同事。' : ''}`)) return
+      if (!confirm('把這把 Claude 金鑰放到你的 Apps Script（雲端）給大家共用？\n同事的手機不會拿到金鑰；大家用的次數都算在這把金鑰上（每人每天最多 100 次）。\nClaude 沒有免費額度，大家的用量都從你的 Claude 帳戶扣；Opus 預設不開放給同事。')) return
       const done = busyBtn(t, '測試中…')
       try {
-        // Claude：先確認雲端是新版（認得 Claude）。舊版不認得 provider，會把 Claude 金鑰存成 Gemini 的，蓋掉大家正在用的共用金鑰
-        if (isClaude()) {
-          const h = await postSync({ action: 'hello' })
-          if (!('aiClaude' in h)) return toast('雲端程式碼是舊版，還不會用 Claude：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本，再按一次「放到雲端」')
-        }
+        // 先確認雲端是新版（認得 Claude）。4.8 以前的不認得 provider，會把 Claude 金鑰存成別的
+        const h = await postSync({ action: 'hello' })
+        if (!('aiClaude' in h)) return toast('雲端程式碼是舊版，還不會用 Claude：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本，再按一次「放到雲端」')
         // 放上去之前再測一次（金鑰可能已經被停用）
         try {
           await fetchModels()
         } catch (err) {
           return toast(`這把金鑰現在不能用，沒有放到雲端：${err.message}`)
         }
-        const r = await postSync({ action: 'aiKey', aiKey: v, ...(isClaude() ? { provider: 'claude' } : {}) })
-        if (!('ai' in r) || (isClaude() && !('aiClaude' in r))) return toast('雲端程式碼是舊版：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本')
+        const r = await postSync({ action: 'aiKey', aiKey: v, provider: 'claude' })
+        if (!('aiClaude' in r)) return toast('雲端程式碼是舊版：請先到「Google 試算表」複製試算表程式碼、貼上、部署新版本')
         ls.set(K().shared, '1')
         toast('已放到雲端：同事打開 App 就能拍照辨識，不用再跟你要金鑰')
         return render()
@@ -8693,9 +8689,9 @@ $app.addEventListener('click', async (e) => {
       }
     }
     case 'ai-unshare': {
-      if (!confirm(`停止共用 ${aiName()} 金鑰？之後同事要用 ${aiName()} 拍照辨識，就得自己貼金鑰。`)) return
+      if (!confirm('停止共用 Claude 金鑰？之後同事要拍照辨識，就得自己貼金鑰。')) return
       try {
-        await postSync({ action: 'aiKey', aiKey: '', ...(isClaude() ? { provider: 'claude' } : {}) }) // 雲端說不行（例如不是擁有者）會丟錯誤，下面會顯示
+        await postSync({ action: 'aiKey', aiKey: '', provider: 'claude' }) // 雲端說不行（例如不是擁有者）會丟錯誤，下面會顯示
         ls.set(K().shared, '')
         toast('已停止共用金鑰')
         return render()
@@ -8709,11 +8705,10 @@ $app.addEventListener('click', async (e) => {
       if (!hasAi()) return toast(canEdit() ? '先在上面貼上 AI 金鑰' : '檢視者不能用公司共用的金鑰')
       try {
         const list = await fetchModels()
-        const rows = (arr) => arr.map((m, i) => `<button class="row" data-action="use-model" data-model="${esc(m)}"><span class="grow">${esc(modelLabel(m))}${arr === list && i === 0 ? ' <span class="badge">推薦</span>' : ''}${modelLabel(m) !== m ? `<br><span class="meta">${esc(m)}</span>` : ''}</span>${m === ls.get(K().model) ? `<span class="now-mark">${icon('check', 20)}</span>` : ''}</button>`).join('')
-        const claude = isClaude()
-        document.getElementById('models').innerHTML = `<p class="section-title">${claude ? '平常（Sonnet／Haiku）' : '快速（Flash）'}</p><div class="group">${rows(list.slice(0, 6))}</div><p class="footnote">排越前面越推薦（新、穩定、快）。平常用這個。${claude ? 'Haiku 比較快、比較便宜，但相似品比較分不開。' : ''}</p>${
+        const rows = (arr, top = false) => arr.map((m, i) => `<button class="row" data-action="use-model" data-model="${esc(m)}"><span class="grow">${esc(modelLabel(m))}${top && i === 0 ? ' <span class="badge">推薦</span>' : ''}${modelLabel(m) !== m ? `<br><span class="meta">${esc(m)}</span>` : ''}</span>${m === ls.get(K().model) ? `<span class="now-mark">${icon('check', 20)}</span>` : ''}</button>`).join('')
+        document.getElementById('models').innerHTML = `<p class="section-title">平常（Sonnet／Haiku）</p><div class="group">${rows(list.slice(0, 6), true)}</div><p class="footnote">排越前面越推薦（新、穩定、快）。平常用這個。Haiku 比較快、比較便宜，但相似品比較分不開。</p>${
           proCache.length
-            ? `<p class="section-title">${claude ? '最強（Opus）' : '精細（Pro）'}</p><div class="group">${rows(proCache.slice(0, 3))}</div><p class="footnote">${claude ? '看得最細，但每張比較慢、費用大約是 Sonnet 的 2 倍。Sonnet 分不出來時再試。' : '看得比較細，相似品比較分得開；但每張要等比較久，免費額度也比 Flash 少很多。Flash 分不出來、又不想存樣品照時再試。'}</p>`
+            ? `<p class="section-title">最強（Opus）</p><div class="group">${rows(proCache.slice(0, 3))}</div><p class="footnote">看得最細，但每張比較慢、費用大約是 Sonnet 的 2 倍。Sonnet 分不出來時再試。</p>`
             : ''
         }`
         glueTails(document.getElementById('models'))
@@ -8728,11 +8723,11 @@ $app.addEventListener('click', async (e) => {
       const show = () => (out.innerHTML = `<div class="group">${lines.map((l) => `<div class="row"><span class="grow" style="font-size:14px;word-break:break-all">${l}</span></div>`).join('')}</div>`)
       lines.push('版本 ' + esc(VERSION))
       // 顯示後 4 碼才分得出是哪一把（Claude 的開頭都是 sk-ant）
-      lines.push('AI：' + aiName() + '・API Key：' + (ls.get(K().key) ? '有（…' + esc(ls.get(K().key).slice(-4)) + '）' : aiViaSheet() ? '用公司共用的（放在雲端）' : '<b>沒有</b>'))
+      lines.push('AI：Claude・API Key：' + (ls.get(K().key) ? '有（…' + esc(ls.get(K().key).slice(-4)) + '）' : aiViaSheet() ? '用公司共用的（放在雲端）' : '<b>沒有</b>'))
       show()
       try {
         const list = await fetchModels()
-        lines.push(`<span class="diag-ok">${icon('check', 16)}</span>模型清單：找到 ` + (list.length + proCache.length) + ' 個可用（' + esc(list.slice(0, 3).map(modelLabel).join('、')) + '）')
+        lines.push(`<span class="diag-ok">${icon('check', 16)}</span>模型清單：找到 ` + (list.length + proCache.length) + ' 個可用（' + esc([...list, ...proCache].slice(0, 4).map(modelLabel).join('、')) + '）')
         show()
         const model = await currentModel()
         const t0 = Date.now()
@@ -8866,6 +8861,8 @@ $app.addEventListener('click', async (e) => {
     case 'finish': {
       // 完成：記進品項庫；有設定 Google 試算表又開著自動同步，就順便寫進去（在背景送，不用等）
       const s = state.session
+      // 比對還沒跑完就完成：建議會在完成之後才出來，品項庫要再按一次完成才會更新，也不會算進「比對有沒有幫忙」
+      if (s && state.refining?.session === s.id) return toast('AI 還在再檢查相似品（通常 1 分鐘內），好了再按「完成」')
       // 還有「要確認」沒看過：先提醒（按取消＝回去一個一個確認；按確定＝還是完成，沒確認的不算進「AI 準不準」）
       const open = s ? doubtsOf(s).length : 0
       if (open && !confirm(`還有 ${open} 個「要確認」沒看過。\n\n按「取消」回去一個一個確認；\n按「確定」還是完成（沒確認的不會算進「AI 準不準」）。`)) return quickSheet(doubtsOf(s), 0, { doubt: true })

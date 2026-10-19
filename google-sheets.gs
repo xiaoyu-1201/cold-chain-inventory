@@ -21,16 +21,13 @@
  * - 每個人一組自己的連結碼（只存雜湊值）；有人離職，管理員在 App 按「移除權限」，只有他失效，其他人不用改；被移除的裝置下次連線會自動清除資料。
  * - 擁有者的手機不見了：Apps Script 左邊「專案設定」→ 最下面「指令碼屬性」→ 刪掉 SYNC_KEY，再從 App 重新開啟同步（其他人的權限會保留）。
  *
- * 共用 AI 金鑰（4.5 起）：擁有者在 App「設定 → 把金鑰放到雲端」→ 金鑰存在這裡的指令碼屬性 GEMINI_KEY。
- * 同事拍照時，請求送到這裡，由這裡拿金鑰去問 Gemini，同事的手機不會有金鑰；移除權限的人就不能再用。
- * 第一次更新到這一版，部署時 Google 會再問一次授權（多了「連到外部網站」，用來連 Gemini），按允許即可。
- *
- * 4.6.1：共用金鑰加上費用上限（只准 Flash／Flash-Lite／Pro、每人每天 300 次、一次最多 8 MB）；
+ * 共用 AI 金鑰：擁有者在 App「設定 → AI → 放到雲端」→ 金鑰存在這裡的指令碼屬性 CLAUDE_KEY。
+ * 同事拍照時，請求送到這裡，由這裡拿金鑰去問 Claude，同事的手機不會有金鑰；移除權限的人就不能再用。
+ * 費用上限（Claude 沒有免費額度，擁有者付錢）：只准 Haiku／Sonnet（Opus 要 CLAUDE_ALLOW_OPUS＝1）、每人每天 100 次（CLAUDE_DAILY_LIMIT）、一次最多 8 MB、不准工具。
  * 編輯者不能改盲盤／複盤規則、不能匯入正航產品表、不能一次刪光盤點紀錄（雲端也擋）。
  * 更新方法：整段重新貼上 → 存檔 →「部署」→「管理部署作業」→ 鉛筆 → 版本選「新版本」→ 部署（網址不會變）。
  *
- * 4.8：共用金鑰也可以放 Claude（指令碼屬性 CLAUDE_KEY；App「設定 → AI」選 Claude 再按「放到雲端」）。
- * 費用上限比 Gemini 緊（Claude 沒有免費額度）：只准 Haiku／Sonnet（Opus 要 CLAUDE_ALLOW_OPUS＝1）、每人每天 100 次（CLAUDE_DAILY_LIMIT）、一次最多 8 MB、不准工具。
+ * 4.9：拿掉 Gemini。舊的共用 Gemini 金鑰（指令碼屬性 GEMINI_KEY）和它的用量紀錄、次數上限（AI_USAGE、AI_DAILY_LIMIT），部署新版本後第一次有人連線就自動刪掉。
  *
  * 4.7.6：同步變快——很多筆資料、照片「同時」讀寫（Drive API），不再一筆一筆來；
  * 記住目錄檔的位置，不用每次搜尋。Drive API 用不了會自動改回舊方法（結果一樣，只是比較慢），
@@ -51,6 +48,12 @@ function doPost(e) {
   // 一次讀完全部設定（讀寫次數有每日上限）
   const props = PropertiesService.getScriptProperties()
   const P = props.getProperties()
+  // 4.9 拿掉 Gemini：不用的金鑰留著有外流風險，自動刪掉（使用者 10/19 同意）
+  for (const k of ['GEMINI_KEY', 'AI_USAGE', 'AI_DAILY_LIMIT'])
+    if (P[k]) {
+      props.deleteProperty(k)
+      delete P[k]
+    }
   // 還沒開啟同步：只有使用者在 App 按「開啟同步」（hello）才能設定擁有者；背景同步不能設定，也讀不到資料
   if (!P.SYNC_KEY && data.action === 'hello' && data.key && String(data.key).length >= 16) {
     props.setProperty('SYNC_KEY', String(data.key))
@@ -89,25 +92,29 @@ function doPost(e) {
         }),
       )
     : []
-  // 共用 AI 金鑰：ai＝擁有者有沒有放；每個回覆都帶，App 才知道能不能用
+  // 共用 AI 金鑰：aiClaude＝擁有者有沒有放 Claude 的共用金鑰（指令碼屬性 CLAUDE_KEY）；每個回覆都帶，App 才知道能不能用
   if (!who && (data.action === 'ai' || data.action === 'aiKey')) return json({ ok: false, error: '還沒開啟同步，不能用共用的 AI 金鑰' })
-  const ai = !!P.GEMINI_KEY
-  // aiClaude（4.8）：擁有者有沒有放 Claude 的共用金鑰（指令碼屬性 CLAUDE_KEY）
   const aiClaude = !!P.CLAUDE_KEY
+  // 4.9 只用 Claude：舊版 App 要放、要用 Gemini 金鑰的都擋掉（不然 Gemini 金鑰會被存成 CLAUDE_KEY）
+  const oldApp = '這個 App 是舊版（還在用 Gemini）：請在 App「設定」最下面按「檢查更新」，更新後改用 Claude'
   if (who && data.action === 'aiKey') {
-    if (who.role !== 'owner') return json({ ok: false, ai: ai, aiClaude: aiClaude, me: me, error: '只有擁有者可以設定共用的 AI 金鑰' })
-    const prop = data.provider === 'claude' ? 'CLAUDE_KEY' : 'GEMINI_KEY'
-    if (data.aiKey) props.setProperty(prop, String(data.aiKey))
-    else props.deleteProperty(prop)
-    return json({ ok: true, ai: prop === 'GEMINI_KEY' ? !!data.aiKey : ai, aiClaude: prop === 'CLAUDE_KEY' ? !!data.aiKey : aiClaude, me: me })
+    if (who.role !== 'owner') return json({ ok: false, aiClaude: aiClaude, me: me, error: '只有擁有者可以設定共用的 AI 金鑰' })
+    if (data.provider !== 'claude') return json({ ok: false, aiClaude: aiClaude, me: me, error: oldApp })
+    if (data.aiKey) props.setProperty('CLAUDE_KEY', String(data.aiKey))
+    else props.deleteProperty('CLAUDE_KEY')
+    return json({ ok: true, aiClaude: !!data.aiKey, me: me })
   }
-  if (who && data.action === 'ai') return json(canEdit ? Object.assign(data.provider === 'claude' ? claudeProxy(data, P, props, who) : aiProxy(data, P, props, who), { ai: ai, aiClaude: aiClaude, me: me }) : { ok: false, viewer: true, ai: ai, aiClaude: aiClaude, me: me, error: '你是檢視者，只能看' })
+  if (who && data.action === 'ai') {
+    if (!canEdit) return json({ ok: false, viewer: true, aiClaude: aiClaude, me: me, error: '你是檢視者，只能看' })
+    if (data.provider !== 'claude') return json({ ok: false, status: 403, aiClaude: aiClaude, me: me, error: oldApp })
+    return json(Object.assign(claudeProxy(data, P, props, who), { aiClaude: aiClaude, me: me }))
+  }
   // ver 2：盤點的照片分開存（photo:盤點ID:照片ID），下載只拿資料，照片用 photos 另外要；App 看到 ver 才改用新格式上傳
   // fast：有沒有用到「同時讀寫」（4.7.6）；沒有的話，App 會教擁有者打開 Drive API
-  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, ai: ai, aiClaude: aiClaude, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster, fast: driveApiEnabled() })
-  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, ai: ai, aiClaude: aiClaude, me: me, roster: roster, fast: driveApiEnabled() }))
-  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, ai: ai, aiClaude: aiClaude, me: me }))
-  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, ai: ai, aiClaude: aiClaude, me: me }) : { ok: false, viewer: true, ai: ai, aiClaude: aiClaude, me: me, error: '你是檢視者，只能看' })
+  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, aiClaude: aiClaude, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster, fast: driveApiEnabled() })
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, aiClaude: aiClaude, me: me, roster: roster, fast: driveApiEnabled() }))
+  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, aiClaude: aiClaude, me: me }))
+  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, aiClaude: aiClaude, me: me }) : { ok: false, viewer: true, aiClaude: aiClaude, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
   if (!canEdit) return json({ ok: false, viewer: true, error: '你是檢視者，只能看' })
   const lock = LockService.getScriptLock()
@@ -139,79 +146,11 @@ function doPost(e) {
   }
 }
 
-/**
- * 共用 AI 金鑰：幫 App 問 Gemini（金鑰只在這裡）。只准兩種請求：列出模型、看圖回答（generateContent），
- * 不能拿這把金鑰做別的事。費用也有上限（擁有者付錢）：
- * - 模型只准 Gemini 的 Flash／Flash-Lite／Pro（不准畫圖、語音那些比較貴的）
- * - 不准用工具（Google 搜尋等）、快取；一次最多回 8192 個字詞、只回一個答案
- * - 一次最多 8 MB（一張照片＋30 張樣品照大約 2～4 MB）
- * - 每個人每天最多 300 次（可以在「專案設定 → 指令碼屬性」加 AI_DAILY_LIMIT 改次數）
- */
+/** 一次最多 8 MB（一張照片＋30 張樣品照大約 2～4 MB） */
 const AI_MAX_BYTES = 8 * 1024 * 1024
-const AI_MAX_OUTPUT = 8192
-const AI_DAILY_LIMIT = 300
-function aiModelOk(name) {
-  const m = String(name || '').replace(/^models\//, '')
-  return /^gemini-(\d+(\.\d+)?-)?(flash|flash-lite|pro)(-[a-z0-9.\-]+)?$/.test(m) && !/image|tts|audio|live|embedding|thinking|8b|computer|robotics/.test(m)
-}
-function aiProxy(data, P, props, who) {
-  if (!P.GEMINI_KEY) return { ok: false, status: 403, error: '擁有者還沒把 AI 金鑰放到雲端（或已經停止共用）' }
-  const path = typeof data.path === 'string' ? data.path : ''
-  const list = /^models\?pageSize=\d+$/.test(path)
-  const gen = /^models\/([\w.\-]+):generateContent$/.exec(path)
-  if (!list && !gen) return { ok: false, status: 400, error: '不支援的 AI 請求' }
-  if (gen && !aiModelOk(gen[1])) return { ok: false, status: 404, error: '共用金鑰不能用這個模型（' + gen[1] + '）：只能用 Gemini 的 Flash、Flash-Lite、Pro' }
-  const opt = { method: 'get', headers: { 'x-goog-api-key': P.GEMINI_KEY }, muteHttpExceptions: true }
-  if (gen) {
-    const raw = typeof data.body === 'string' ? data.body : JSON.stringify(data.body || {})
-    if (raw.length > AI_MAX_BYTES) return { ok: false, status: 400, error: '這次送的照片太大（超過 8 MB）：請少放一些樣品照再試' }
-    let body
-    try {
-      body = JSON.parse(raw)
-    } catch (e) {
-      body = null
-    }
-    if (!body || typeof body !== 'object' || !Array.isArray(body.contents)) return { ok: false, status: 400, error: 'AI 請求的格式不對' }
-    delete body.tools
-    delete body.toolConfig
-    delete body.cachedContent
-    const gc = body.generationConfig && typeof body.generationConfig === 'object' ? body.generationConfig : {}
-    gc.maxOutputTokens = Math.min(Number(gc.maxOutputTokens) || AI_MAX_OUTPUT, AI_MAX_OUTPUT)
-    gc.candidateCount = 1
-    body.generationConfig = gc
-    // 每人每天的次數：先算再問（鎖住只為了加一，不會卡住別人）
-    const used = aiCount(props, P, who)
-    if (used < 0) return { ok: false, status: 429, quota: true, error: '今天用共用 AI 的次數已經到上限（每人每天 ' + aiLimit(P) + ' 次），明天會自動恢復；急用請找擁有者' }
-    opt.method = 'post'
-    opt.contentType = 'application/json'
-    opt.payload = JSON.stringify(body)
-  }
-  let res
-  try {
-    res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/' + path, opt)
-  } catch (e) {
-    // 連不到 Gemini（逾時、Google 這邊的每日上限）：照 Gemini 忙線的格式回，App 會等一下再試，不會顯示看不懂的錯誤頁
-    return { ok: true, status: 503, body: JSON.stringify({ error: { code: 503, status: 'UNAVAILABLE', message: 'Apps Script 連不到 Gemini：' + String((e && e.message) || e).slice(0, 150) } }) }
-  }
-  const status = res.getResponseCode()
-  let text = res.getContentText()
-  // 列模型：只給 App 能用的那些（App 就不會挑到共用金鑰不能用的模型）
-  if (list && status === 200) {
-    try {
-      const all = JSON.parse(text)
-      all.models = (all.models || []).filter(function (m) {
-        return aiModelOk(m.name)
-      })
-      text = JSON.stringify(all)
-    } catch (e) {
-      /* 回覆不是 JSON：原樣給 App */
-    }
-  }
-  return { ok: true, status: status, body: text }
-}
 /**
  * 共用 Claude 金鑰（4.8）：幫 App 問 Claude（金鑰只在這裡，指令碼屬性 CLAUDE_KEY）。只准兩種請求：列出模型、看圖回答（v1/messages）。
- * Claude 沒有免費額度（擁有者付錢），上限比 Gemini 緊：
+ * Claude 沒有免費額度（擁有者付錢），所以有上限：
  * - 每人每天最多 100 次（指令碼屬性 CLAUDE_DAILY_LIMIT 可以改）、一次最多 8 MB
  * - 模型只准 Haiku、Sonnet；Opus 比較貴，要在指令碼屬性加 CLAUDE_ALLOW_OPUS＝1 才放行
  * - 一次最多回 16000 個字詞；只准一則訊息、內容只能是文字和照片；不准工具（網路搜尋、程式執行等）
@@ -292,13 +231,8 @@ function claudeProxy(data, P, props, who) {
   }
   return { ok: true, status: status, body: text }
 }
-function aiLimit(P) {
-  return Number(P.AI_DAILY_LIMIT) > 0 ? Number(P.AI_DAILY_LIMIT) : AI_DAILY_LIMIT
-}
-/** 這個人今天第幾次用共用 AI；超過上限回 -1（台灣時間每天 0 點重算）。Claude 另外算（AI_USAGE_CLAUDE、上限比較低） */
+/** 這個人今天第幾次用共用 AI（記在指令碼屬性 prop）；超過 limit 回 -1（台灣時間每天 0 點重算） */
 function aiCount(props, P, who, prop, limit) {
-  prop = prop || 'AI_USAGE'
-  limit = limit || aiLimit(P)
   const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
   // 用試算表的鎖（跟同步用的鎖分開）：同步上傳照片要鎖比較久，問 AI 不用跟著等
   const lock = (LockService.getDocumentLock && LockService.getDocumentLock()) || LockService.getScriptLock()

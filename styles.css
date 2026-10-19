@@ -135,7 +135,7 @@ img {
 }
 
 /* 分組清單（Inset Grouped） */
-/* 區塊小標：不轉大寫（「Gemini API Key」「Google 試算表」照原本寫法） */
+/* 區塊小標：不轉大寫（「Claude API Key」「Google 試算表」照原本寫法） */
 .section-title {
   margin: 22px 16px 6px;
   font-size: 13px;
@@ -2668,7 +2668,7 @@ h2,
 .place-input {
   min-height: 44px;
 }
-/* 「Google AI Studio」連結：點的範圍放大到 44px 高 */
+/* 說明文字裡的連結（例如「Claude Console」）：點的範圍放大到 44px 高 */
 .footnote a {
   display: inline-block;
   padding: 13px 2px;
