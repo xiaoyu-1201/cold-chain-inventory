@@ -106,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.11.2（10/28・入口精簡、擁有者隱藏入口、頂端不模糊）'
+const VERSION = '4.11.3（10/28・AI 金鑰統一放雲端、同事不用輸入）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -542,7 +542,7 @@ class ApiError extends Error {
   }
 }
 function friendly(status, msg = '') {
-  if (status === 401) return 'Claude API Key 不對或已經停用：請重新貼上正確的金鑰（設定 → AI）。'
+  if (status === 401) return myRole() === 'owner' ? 'Claude API Key 不對或已經停用：請重新貼上正確的金鑰（設定 → AI）。' : 'AI 金鑰有問題：請通知擁有者檢查（你不用做任何設定）。'
   if (status === 400 && /credit|balance|billing/i.test(msg)) return 'Claude 帳戶的餘額不夠了：請到 console.anthropic.com 的 Billing 儲值。'
   if (status === 400) return `AI 看不懂這次的請求（${msg.slice(0, 80)}）`
   if (status === 403) return '這把 Claude 金鑰沒有權限：請確認是在 console.anthropic.com 建立的金鑰。'
@@ -647,7 +647,7 @@ async function call(path, opts = {}, timeoutMs = 0) {
     const data = await callViaSheet(req.cpath, { ...opts, body: req.body ? JSON.stringify(req.body) : '' }, timeoutMs)
     return fromClaude(req.cpath, data)
   }
-  if (!key) throw new ApiError('還沒設定 Claude API Key：請到「設定」貼上。', 401, 'claude: no key')
+  if (!key) throw new ApiError(myRole() === 'owner' ? '還沒設定 Claude API Key：請到「設定」貼上。' : '擁有者還沒開通 AI：請通知擁有者。', 401, 'claude: no key')
   const ctrl = new AbortController()
   const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : 0
   const outer = opts.signal
@@ -2308,7 +2308,7 @@ async function viewHome() {
         : hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">${icon('camera', 30)}</span><span class="grow"><b>新盤點</b><span class="meta">拍一格貨架，AI 幫你數<br>拍到 ${locTag(locations()[0]?.code || 'A-03', 'sm')} 會自動填位置</span></span>${chev}</button>`
         : syncReady()
-          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>還不能拍照盤點：AI 金鑰還沒放到雲端</b><p>到「設定 → AI」貼上金鑰，再按<span class="nb">「放到雲端」</span>，這台和同事就都能用。</p>' : '<b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → AI」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 AI 金鑰。</p>'}<button class="btn small" data-go="settings">去設定</button></div></div>`
+          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>還不能拍照盤點：AI 金鑰還沒放到雲端</b><p>到「設定 → AI」貼上金鑰，再按<span class="nb">「放到雲端」</span>，這台和同事就都能用。</p>' : '<b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → AI」按「放到雲端」，大家就能直接用，你不用輸入任何金鑰。</p>'}${myRole() === 'owner' ? '<button class="btn small" data-go="settings">去設定</button>' : ''}</div></div>`
           : joinCard()
     }
     </div>
@@ -2673,9 +2673,9 @@ async function viewSettings() {
       <div class="row-actions"><button class="btn small" data-action="save-key">儲存並測試</button><button class="btn small secondary" data-action="toggle-key">顯示／隱藏</button></div>
       <p class="footnote">沒有 Key？到 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" style="color:var(--tint)">Claude Console</a> 申請<span class="nb">（要先在 Billing 儲值）</span>。Key 只存在這支手機，照片只會送到 <span class="nb">Anthropic 分析</span>。</p>`
       // 已經在用擁有者的共用金鑰：自己貼金鑰收進「進階」，同事才不會以為要自己去申請
-      return aiSharedOn() && !key
-        ? `<div class="stack">${aiShareRows(key)}${canEdit() ? `<details class="steps"><summary>進階：改用自己的金鑰</summary><div class="stack" style="margin-top:6px">${keyForm}</div></details>` : ''}</div>`
-        : `<div class="stack">${keyForm}${aiShareRows(key)}</div>`
+      // 金鑰統一放在擁有者的 Apps Script：只有擁有者看得到輸入欄；同事的手機沒有金鑰、也不用輸入（4.11.3）
+      if (myRole() !== 'owner' || !syncReady()) return syncReady() ? (aiSharedOn() ? `<div class="stack">${aiShareRows(key)}</div>` : '<div class="group"><div class="row"><span class="grow"><span class="title">AI 由擁有者統一設定</span><br><span class="meta">擁有者開通後就能拍照辨識，你不用輸入任何金鑰。</span></span></div></div>') : ''
+      return `<div class="stack">${keyForm}${aiShareRows(key)}</div>`
     })()}
     <p class="section-title">辨識模型</p>
     <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">自動挑最新的 Sonnet；<span class="nb">忙線時改用 Haiku。</span>相似品分不開時，<span class="nb">可以改用 Opus（比較貴）</span></span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
@@ -6985,6 +6985,7 @@ async function postSync(body, opt = {}) {
   if ('ai' in data || 'aiClaude' in data) {
     const was = `${ls.get(LS.aiSharedClaude)}|${ls.get(LS.serverGemini)}`
     ls.set(LS.aiSharedClaude, data.aiClaude ? '1' : '')
+    if (data.aiClaude && data.me?.role && data.me.role !== 'owner' && ls.get(LS.claudeKey)) ls.set(LS.claudeKey, '') // 同事不留金鑰：統一用雲端那把
     // 只有舊版雲端會回 ai；ai＝true 代表那邊還放著 Gemini 金鑰
     ls.set(LS.serverGemini, data.ai ? '1' : '')
     if (was !== `${ls.get(LS.aiSharedClaude)}|${ls.get(LS.serverGemini)}`) setTimeout(render, 0)
@@ -8513,7 +8514,7 @@ async function viewQuality() {
 /** 用標準答案考 AI：那些照片重新辨識一次（不看你改過的），每一種比數量 */
 async function runGolden() {
   if (state.golden) return
-  if (!hasAi()) return toast('要先在設定貼上 AI 金鑰，或請擁有者把金鑰放到雲端共用')
+  if (!hasAi()) return toast(myRole() === 'owner' ? '要先在設定貼上 AI 金鑰，再放到雲端' : '擁有者還沒開通 AI：請通知擁有者')
   const sessions = (await db.all()).filter((s) => s.golden)
   const photos = sessions.flatMap((s) => s.photos.filter((p) => p.status === 'done').map((p) => ({ s, p })))
   if (!photos.length) return toast('先勾幾次「當成標準答案」才能考')
@@ -9143,7 +9144,7 @@ $app.addEventListener('click', async (e) => {
       }
     }
     case 'ai-unshare': {
-      if (!confirm('停止共用 Claude 金鑰？之後同事要拍照辨識，就得自己貼金鑰。')) return
+      if (!confirm('停止共用 Claude 金鑰？之後同事就不能拍照辨識，要重新「放到雲端」才會恢復。')) return
       try {
         await postSync({ action: 'aiKey', aiKey: '', provider: 'claude' }) // 雲端說不行（例如不是擁有者）會丟錯誤，下面會顯示
         ls.set(K().shared, '')
@@ -9154,7 +9155,7 @@ $app.addEventListener('click', async (e) => {
       }
     }
     case 'lookup-no-ai':
-      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰拍標籤；打型號查詢可以用' : syncReady() ? '先請擁有者到「設定」把 AI 金鑰放到雲端，或到「設定」貼上自己的 AI 金鑰' : '先到「設定」貼上 AI 金鑰，才能拍標籤；打型號查詢不用')
+      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰拍標籤；打型號查詢可以用' : syncReady() ? '擁有者還沒開通 AI：請通知擁有者；打型號查詢不用 AI' : '先接上大家的資料才能拍標籤；打型號查詢不用')
     case 'pick-model':
       if (!hasAi()) return toast(canEdit() ? '先在上面貼上 AI 金鑰' : '檢視者不能用公司共用的金鑰')
       try {
@@ -9780,7 +9781,7 @@ $app.addEventListener('click', async (e) => {
       }
     }
     case 'pk-no-ai':
-      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰' : syncReady() ? '先請擁有者到「設定」把 AI 金鑰放到雲端，或到「設定」貼上自己的 AI 金鑰；打編號、搜品名不用 AI' : '先到「設定」貼上 AI 金鑰，才能拍單子讓 AI 讀；打編號、搜品名不用 AI')
+      return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰' : syncReady() ? '擁有者還沒開通 AI：請通知擁有者；打編號、搜品名不用 AI' : '先接上大家的資料才能拍單子；打編號、搜品名不用 AI')
     case 'pk-cross-last': {
       if (!canManage()) return toast('交叉比對只有擁有者或管理員看得到')
       const last = readJson(LS.pickCrossLast, null)
