@@ -106,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.11.8（10/28・膠囊與齒輪改純色無邊框）'
+const VERSION = '4.11.9（10/28・自動更新不再讓畫面跳一下）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -9899,9 +9899,14 @@ addEventListener('beforeunload', (e) => {
   e.preventDefault()
   e.returnValue = ''
 })
+document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && updateReady && safeToReload() && location.reload())
 function tryReload() {
   if (!updateReady) return
-  if (safeToReload()) return location.reload()
+  if (safeToReload()) {
+    // 看得到畫面時重新整理會「跳一下」：等使用者離開 App（切到別的 App、鎖螢幕）再悄悄換；沒等到的話，下次打開自然就是新版
+    if (document.visibilityState === 'hidden') location.reload()
+    return
+  }
   if (!updateTold) {
     updateTold = true
     toast('新版已經下載好：這一頁做完、換頁時會自動更新')
