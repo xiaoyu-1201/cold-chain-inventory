@@ -106,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.12.0（10/28・畫面用字統一精簡）'
+const VERSION = '4.12.1（10/28・新加入只先抓最近 5 次的照片）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -6843,13 +6843,16 @@ function fetchPhotos(s, { quiet = true, skipMissing = false } = {}) {
 }
 /** 同步完，趁沒事慢慢把還沒下載的照片抓下來（新的先），首頁縮圖才會慢慢出現；一次一筆、不影響使用 */
 let prefetching = false
+const PREFETCH_SESSIONS = 5
 async function prefetchPhotos() {
   if (prefetching || !syncReady()) return
   prefetching = true
   try {
     for (let i = 0; i < 200; i++) {
       if (document.visibilityState !== 'visible' || state.view === 'analyzing' || state.busy) break
-      const s = (await db.all()).find((x) => x.photos.some((p) => p.pending && !missingRecently(x.id, p.id)))
+      // 只自動抓最近 PREFETCH_SESSIONS 次盤點的照片：新加入的人不用等全部照片下載完（以前要等快 5 分鐘）；更早的打開那次盤點時才抓
+      const recent = (await db.all()).sort((x, y) => y.createdAt - x.createdAt).slice(0, PREFETCH_SESSIONS)
+      const s = recent.find((x) => x.photos.some((p) => p.pending && !missingRecently(x.id, p.id)))
       if (!s) break
       try {
         await fetchPhotos(s, { skipMissing: true })
