@@ -5094,18 +5094,6 @@ html.is-scrolled .nav {
     bottom: calc(var(--dock-b) + var(--dock-h) + 14px);
   }
 }
-/* 4.11.7 狀態列（時間、電量）後面：新版 iOS 會把捲到那裡的內容模糊淡出 → 蓋一條實心底色，內容不會在那裡糊成一片 */
-body::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: var(--safe-t);
-  background: var(--bg);
-  z-index: 30;
-  pointer-events: none;
-}
 /* 「還沒按完成」不要被拆成兩行（只剩「按完成」掉到下一行） */
 .unfinished {
   white-space: nowrap;
@@ -5175,4 +5163,21 @@ body::before {
 }
 .chip[aria-pressed='true'] {
   box-shadow: none;
+}
+/* 4.12.4 標題列：字級跟著螢幕寬度縮、齒輪小一點，同步時間不會被蓋住 */
+.title-row .large-title {
+  font-size: clamp(26px, 7.6vw, 32px);
+}
+.title-actions .icon-btn {
+  width: 40px;
+  height: 40px;
+}
+.title-actions .icon-btn svg {
+  width: 22px;
+  height: 22px;
+}
+.sync-pill {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
 }
