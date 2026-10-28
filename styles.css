@@ -5109,3 +5109,14 @@ body::before {
 .unfinished {
   white-space: nowrap;
 }
+/* 4.11.8 膠囊（同步時間、選取）和齒輪：純色圓角、沒有邊框、沒有陰影（高解析螢幕上細框的邊緣會看起來糊） */
+.btn.plain,
+.icon-btn:not(.small) {
+  box-shadow: none;
+  border: 0;
+  background: var(--card);
+}
+.btn.plain:active,
+.icon-btn:not(.small):active {
+  background: color-mix(in srgb, var(--tint) 12%, var(--card));
+}
