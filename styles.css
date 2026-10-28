@@ -5206,9 +5206,10 @@ html.is-scrolled .nav {
   body.no-scroll #app {
     overflow: hidden;
   }
+  /* 頂端留 28px：iOS 的模糊淡出帶大約到狀態列下面 16pt，內容往下放一點，標題就不會落在淡出帶裡 */
   .app {
     min-height: calc(100dvh - var(--safe-t));
-    padding-top: 8px;
+    padding-top: 28px;
   }
   .pk-progress {
     top: 0;
