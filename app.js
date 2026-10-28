@@ -106,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.11.4（10/28・拿掉「新」標示）'
+const VERSION = '4.11.5（10/28・全部拿掉「新」、按鈕不再有光暈、上方標題列不黏住）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2274,7 +2274,7 @@ function homeStats(sessions, items) {
     const tag = attrs && n ? 'button' : 'div'
     return `<${tag} class="tile ${n ? tone : 'zero'}" ${n ? attrs || '' : ''}><span class="tile-num">${n}<small>${unit}</small></span><span class="tile-label">${label}</span>${tag === 'button' ? chev : ''}</${tag}>`
   }
-  return `<p class="section-title">現在要處理的 <span class="badge new">新</span></p><div class="home-stats" role="group" aria-label="現在要處理的">
+  return `<p class="section-title">現在要處理的</p><div class="home-stats" role="group" aria-label="現在要處理的">
     ${tile({ n: reportOf(today).total, unit: '件', label: `今天盤了・${today.length} 次`, tone: 'brand', attrs: 'data-go="report"' })}
     ${tile({ n: doubts, unit: '個', label: '要確認', tone: 'warn', attrs: doubtful.length && canEdit() ? `data-open-doubts="${esc(doubtful[0][0].id)}"` : '' })}
     ${tile({ n: order, unit: '種', label: '該叫貨', tone: 'bad', attrs: 'data-go="items" data-item-filter="order"' })}
@@ -2423,7 +2423,7 @@ function viewAnalyzing() {
       </div>
       <div class="wait-time" id="elapsed">已經 0 秒</div>
       <div class="wait-card">
-        <div class="lead">等的時候看一下・怎麼拍比較準 <span class="badge new">新</span></div>
+        <div class="lead">等的時候看一下・怎麼拍比較準</div>
         <div class="wait-tips" aria-hidden="true">${WAIT_TIPS.map(([ic, t]) => `<div class="wait-tip"><span class="ti">${icon(ic, 22)}</span><p>${t}</p></div>`).join('')}</div>
         <div class="wait-pager" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
       </div>
@@ -2589,7 +2589,7 @@ function viewReview() {
 function aiShareRows(key) {
   if (!syncReady()) return ''
   const rows = []
-  const fresh = '<span class="badge new">新</span>'
+  const fresh = ''
   // 擁有者只看下面「金鑰已放在雲端給大家共用」那一列就好（不然兩列說的是同一件事）
   if (aiSharedOn() && !key && myRole() !== 'owner')
     rows.push(
@@ -2638,7 +2638,7 @@ function moveCard() {
         ? '<p class="move-note">API Key 不會帶過去：先到<span class="nb">「設定」</span>按<span class="nb">「放到雲端」</span>。</p>'
         : '<p class="move-note">API Key 不會帶過去，<span class="nb">桌面 App 裡</span><span class="nb">要再貼一次</span>。</p>'
       : ''
-  return `<div class="setup-card move-card"><span class="setup-ico" aria-hidden="true">${icon('copy', 26)}</span><div class="grow"><b>桌面的 App 要再接一次 <span class="badge new">新</span></b><p>桌面的 App 跟瀏覽器的資料是分開的：</p><ol class="steps-list"><li>按「複製到桌面 App」。</li><li>打開桌面的「聖佳庫存」<span class="nb">（還沒有：分享</span>→<span class="nb">加入主畫面）</span>。</li><li>按<span class="nb">「貼上邀請並加入」</span>。</li></ol><p class="move-note">只貼到自己的 App，<span class="nb">不要傳給別人</span>；點到一半的點貨單先按完成。</p>${keyNote}<div class="row-actions"><button class="btn small" data-action="move-to-app">複製到桌面 App</button><button class="btn small plain" data-action="move-hint-off">不用了</button></div></div></div>`
+  return `<div class="setup-card move-card"><span class="setup-ico" aria-hidden="true">${icon('copy', 26)}</span><div class="grow"><b>桌面的 App 要再接一次</b><p>桌面的 App 跟瀏覽器的資料是分開的：</p><ol class="steps-list"><li>按「複製到桌面 App」。</li><li>打開桌面的「聖佳庫存」<span class="nb">（還沒有：分享</span>→<span class="nb">加入主畫面）</span>。</li><li>按<span class="nb">「貼上邀請並加入」</span>。</li></ol><p class="move-note">只貼到自己的 App，<span class="nb">不要傳給別人</span>；點到一半的點貨單先按完成。</p>${keyNote}<div class="row-actions"><button class="btn small" data-action="move-to-app">複製到桌面 App</button><button class="btn small plain" data-action="move-hint-off">不用了</button></div></div></div>`
 }
 async function viewSettings() {
   const key = ls.get(K().key)
@@ -2653,15 +2653,15 @@ async function viewSettings() {
       freshPhone()
         ? joinCard()
         : serverSlow() && myRole() === 'owner'
-          ? `<div class="hint-card stack fast-hint"><div><b>同步可以快很多</b> <span class="badge new">新</span><br>把 Google 那邊的程式碼更新成新版，<span class="nb">同步上傳、下載</span>會快很多，<span class="nb">也會套用</span>共用 AI 的每日次數上限、點貨紀錄的保護。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
+          ? `<div class="hint-card stack fast-hint"><div><b>同步可以快很多</b><br>把 Google 那邊的程式碼更新成新版，<span class="nb">同步上傳、下載</span>會快很多，<span class="nb">也會套用</span>共用 AI 的每日次數上限、點貨紀錄的保護。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
           : syncReady() && myRole() === 'owner' && ls.get(LS.serverGemini) === '1'
-            ? `<div class="hint-card stack fast-hint"><div><b>雲端還放著舊的 Gemini 金鑰</b> <span class="badge new">新</span><br>App 已經不用 Gemini 了，<span class="nb">不用的金鑰</span><span class="nb">留著有外流風險</span>。把 Google 那邊的程式碼更新成新版，<span class="nb">會自動刪掉它</span>。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
+            ? `<div class="hint-card stack fast-hint"><div><b>雲端還放著舊的 Gemini 金鑰</b><br>App 已經不用 Gemini 了，<span class="nb">不用的金鑰</span><span class="nb">留著有外流風險</span>。把 Google 那邊的程式碼更新成新版，<span class="nb">會自動刪掉它</span>。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
           : syncReady() && myRole() === 'owner' && serverFastOff()
-            ? `<div class="hint-card stack fast-hint"><div><b>快速同步還沒打開</b> <span class="badge new">新</span><br>Google 那邊沒有開「Drive API」，同步還是一筆一筆來（資料不會錯，只是比較慢）。請用電腦做一次，<span class="nb">約 2 分鐘：</span><ol class="steps-list" style="margin:8px 0 0"><li>打開當初那個 Google 試算表 →<span class="nb">「擴充功能」</span>→<span class="nb">「Apps Script」</span>。</li><li>左邊<span class="nb">「服務」</span>旁的 <b>＋</b> → 選<span class="nb">「Drive API」</span>→<span class="nb">「新增」</span>。</li><li>右上「部署」→<span class="nb">「<b>管理部署作業</b>」</span>→ 鉛筆 → 版本選<span class="nb">「<b>新版本</b>」</span>→ 部署。</li></ol></div></div>`
+            ? `<div class="hint-card stack fast-hint"><div><b>快速同步還沒打開</b><br>Google 那邊沒有開「Drive API」，同步還是一筆一筆來（資料不會錯，只是比較慢）。請用電腦做一次，<span class="nb">約 2 分鐘：</span><ol class="steps-list" style="margin:8px 0 0"><li>打開當初那個 Google 試算表 →<span class="nb">「擴充功能」</span>→<span class="nb">「Apps Script」</span>。</li><li>左邊<span class="nb">「服務」</span>旁的 <b>＋</b> → 選<span class="nb">「Drive API」</span>→<span class="nb">「新增」</span>。</li><li>右上「部署」→<span class="nb">「<b>管理部署作業</b>」</span>→ 鉛筆 → 版本選<span class="nb">「<b>新版本</b>」</span>→ 部署。</li></ol></div></div>`
             : ''
     }
     <div class="settings-cols"><div class="settings-col">
-    <p class="section-title">AI <span class="badge new">新</span></p>
+    <p class="section-title">AI</p>
     ${
       // 4.9 只用 Claude（拿掉 Gemini）；檢視者不能用 AI，不用看說明
       canEdit()
@@ -2679,7 +2679,7 @@ async function viewSettings() {
     })()}
     <p class="section-title">辨識模型</p>
     <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">自動挑最新的 Sonnet；<span class="nb">忙線時改用 Haiku。</span>相似品分不開時，<span class="nb">可以改用 Opus（比較貴）</span></span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
-      <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準 <span class="badge new">新</span></span><br><span class="meta">AI 原本數的跟你確認後的比、相似品比對有沒有幫忙；也可以用標準答案考 AI</span></span>${chev}</button></div>
+      <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">AI 原本數的跟你確認後的比、相似品比對有沒有幫忙；也可以用標準答案考 AI</span></span>${chev}</button></div>
     <div id="models"></div>
     <p class="section-title">店內品項清單</p>
     <textarea class="field" id="catalog" spellcheck="false" ${canEdit() ? '' : 'readonly aria-readonly="true"'}>${esc(catalogLines().join('\n'))}</textarea>
@@ -2743,7 +2743,7 @@ async function viewSettings() {
             }
             ${
               browserSeparate()
-                ? `<button class="row" data-action="move-to-app"><span class="grow"><span class="title" style="color:var(--tint)">複製到桌面 App <span class="badge new">新</span></span><br><span class="meta">桌面的「聖佳庫存」跟瀏覽器資料分開：複製這台的連線，到桌面 App 按<span class="nb">「貼上邀請並加入」</span>（只貼到自己的 App，不要傳給別人）</span></span>${chev}</button>`
+                ? `<button class="row" data-action="move-to-app"><span class="grow"><span class="title" style="color:var(--tint)">複製到桌面 App</span><br><span class="meta">桌面的「聖佳庫存」跟瀏覽器資料分開：複製這台的連線，到桌面 App 按<span class="nb">「貼上邀請並加入」</span>（只貼到自己的 App，不要傳給別人）</span></span>${chev}</button>`
                 : ''
             }
             ${googleId() && !joinPending() ? `<button class="row" data-action="google-bind"><span class="grow"><span class="title" style="color:var(--tint)">綁定我的 Google 帳號</span><br><span class="meta">${ls.get(LS.gEmail) ? `已綁定 ${esc(ls.get(LS.gEmail))}；` : ''}換手機時用 Google 登入就能接回來</span></span>${chev}</button>` : ''}
@@ -2775,7 +2775,7 @@ async function viewSettings() {
     <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
     ${myRole() === 'owner' ? '' : diagSection()}
     </div></div>
-    <p class="footnote" style="margin-top:18px;text-align:center">聖佳智慧庫存 版本 ${VERSION} <span class="badge new">新</span></p>
+    <p class="footnote" style="margin-top:18px;text-align:center">聖佳智慧庫存 版本 ${VERSION}</p>
     <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
     <p class="footnote" style="text-align:center">有新版會自動更新；不放心就按這裡。盤點紀錄、樣品照、API Key 都不會被刪。</p>
   </main>`
@@ -3513,7 +3513,7 @@ function lookupResults() {
     ${decoded.length ? `<p class="section-title">這是什麼</p><div class="group">${decoded.map((x) => `<div class="row decode"><span class="grow"><span class="title">${esc(x.title)}</span>${x.facts.map((t) => `<br><span class="meta">・${esc(t)}</span>`).join('')}</span></div>`).join('')}</div>` : ''}
     <p class="section-title">店裡有的（${matches.length}）</p>
     ${matches.length ? `<div class="group">${matches.map(itemRow).join('')}</div>` : `<div class="group"><div class="row muted">品項庫裡沒有${fields.model || fields.label ? `「${esc(read ? read.model || read.label : q)}」` : ''}。</div></div>`}
-    ${near.length ? `<p class="section-title">型號相近的（${near.length}）<span class="badge new">新</span></p><div class="group">${near.map((it) => itemRow(it) + (nearNote(it) ? `<div class="row near-note"><span class="warn-line">${icon('warning', 16)}<span>${esc(nearNote(it))}</span></span></div>` : '')).join('')}</div><p class="footnote">型號只差一點（例如尾巴多一個字母），不一定能互換；請看規格再確認。</p>` : ''}
+    ${near.length ? `<p class="section-title">型號相近的（${near.length}）</p><div class="group">${near.map((it) => itemRow(it) + (nearNote(it) ? `<div class="row near-note"><span class="warn-line">${icon('warning', 16)}<span>${esc(nearNote(it))}</span></span></div>` : '')).join('')}</div><p class="footnote">型號只差一點（例如尾巴多一個字母），不一定能互換；請看規格再確認。</p>` : ''}
     ${
       eq.rule.length || eq.linked.length
         ? `<p class="section-title">替代品（同規格，可以互換）</p><div class="group">${eq.rule.map(equivRow).join('')}${eq.linked.map((x) => equivRow({ brand: x.brand, model: x.model || itemTitle(x), item: x, linked: true })).join('')}</div>${decoded.find((x) => x.note)?.note ? `<p class="footnote">${esc(decoded.find((x) => x.note).note)}</p>` : ''}`
@@ -4127,13 +4127,13 @@ function crossCard(last) {
   const when = last ? `・${fmtTime(last.at)}` : ''
   const n = last?.total ?? last?.items?.length ?? 0
   const meta = !last ? '匯入正航產品表時會自動比對' : last.first ? `下次匯入才開始比對${when}` : n ? `上次匯入有 ${n} 項要查一下${when}` : `上次匯入沒有要查的${when}`
-  return `<div class="group pk-cross-card"><button class="row" data-action="pk-cross-last"><span class="row-ico" aria-hidden="true">${icon('chart')}</span><span class="grow"><span class="title">交叉比對（測試版）</span><span class="badge new">新</span><br><span class="meta">${esc(meta)}</span></span>${n ? `<span class="pk-chip bad">${n} 項</span>` : ''}${chev}</button></div>`
+  return `<div class="group pk-cross-card"><button class="row" data-action="pk-cross-last"><span class="row-ico" aria-hidden="true">${icon('chart')}</span><span class="grow"><span class="title">交叉比對（測試版）</span><br><span class="meta">${esc(meta)}</span></span>${n ? `<span class="pk-chip bad">${n} 項</span>` : ''}${chev}</button></div>`
 }
 /** 設定頁：交叉比對開關（只有擁有者、管理員看得到） */
 function pickCrossSettings() {
   const last = readJson(LS.pickCrossLast, null)
   const n = last?.total ?? last?.items?.length ?? 0
-  return `<p class="section-title">點貨（測試版） <span class="badge new">新</span></p>
+  return `<p class="section-title">點貨（測試版）</p>
     <div class="group">
       <label class="row"><span class="grow"><span class="title">匯入正航時，跟點貨紀錄交叉比對（測試版）</span><br><span class="meta">只比上次匯入後有點過貨的產品：點貨記的進出跟正航的進出不一樣，就列出來查一下。第一次只記基準，下次匯入才開始比。開關只在這台。</span></span><input type="checkbox" id="rule-pick-cross" ${ls.get(LS.pickCross) === '1' ? 'checked' : ''} style="width:22px;height:22px"></label>
       ${last ? `<button class="row" data-action="pk-cross-last"><span class="grow"><span class="title" style="color:var(--tint)">看上次的比對結果</span><br><span class="meta">${esc(fmtTime(last.at))}・${esc(last.first ? '下次匯入才開始比對' : `${n} 項要查一下`)}</span></span>${chev}</button>` : ''}
@@ -5017,7 +5017,7 @@ function crossDoneSheet(msg, c) {
         : '上次匯入後沒有點過貨的產品（或點貨紀錄還沒同步到這台）。上次的比對結果保留著。'
   sheet(
     `<h2 class="sheet-title">匯入完成</h2><p class="sheet-sub">${esc(msg)}</p>
-     <div class="pk-cross-sum ${n ? 'bad' : 'ok'}"><span class="pk-cross-k">交叉比對（測試版） <span class="badge new">新</span></span><b>${esc(head)}</b><p>${esc(sub)}</p></div>
+     <div class="pk-cross-sum ${n ? 'bad' : 'ok'}"><span class="pk-cross-k">交叉比對（測試版）</span><b>${esc(head)}</b><p>${esc(sub)}</p></div>
      <div class="row-actions" style="margin-top:14px">${n ? '<button class="btn secondary" id="cd-ok" style="flex:1">等一下再看</button><button class="btn" id="cd-open" style="flex:1">打開清單</button>' : '<button class="btn block" id="cd-ok">知道了</button>'}</div>`,
     (el, close) => {
       el.querySelector('#cd-ok').onclick = close
@@ -5737,7 +5737,7 @@ const undoTo = (s, snap) => ({
          : // 整組都是你改過的（例如整組改過名）：以你的為準，不給比對（按了也只會說「以你改的為準」）
            g.refs.every((r) => s.photos[r.pi].objects[r.oi].edited)
            ? '<p class="footnote" style="margin:10px 2px 0">這一種是你改過的，<span class="nb">以你的為準。</span>只有其中幾個不一樣：<span class="nb">請點照片上那個框。</span></p>'
-           : `<button class="btn secondary block" id="e-refine" style="margin-top:10px">再比對一次：找出不一樣的 <span class="badge new">新</span></button><p class="footnote" style="margin:8px 2px 0">AI 再看一次這 ${g.boxes} 個<span class="nb">（整張照片＋每個框的特寫）。</span><span class="nb">覺得不一樣的</span><span class="nb">會標成「要確認」，</span><span class="nb">你按「改成」才會改</span><span class="nb">（要網路，約 10～30 秒）。</span></p>`
+           : `<button class="btn secondary block" id="e-refine" style="margin-top:10px">再比對一次：找出不一樣的</button><p class="footnote" style="margin:8px 2px 0">AI 再看一次這 ${g.boxes} 個<span class="nb">（整張照片＋每個框的特寫）。</span><span class="nb">覺得不一樣的</span><span class="nb">會標成「要確認」，</span><span class="nb">你按「改成」才會改</span><span class="nb">（要網路，約 10～30 秒）。</span></p>`
      }
      ${g.manual ? '' : '<button class="btn secondary block" id="e-sample" style="margin-top:10px">儲存，並存成樣品照</button><p class="footnote" style="margin:8px 2px 0">用照片上第一個框當樣品。這一列混了不同尺寸的話，請先點照片上那一個框、再點一次，從那裡存。</p>'}`,
     (el, close) => {
@@ -5977,7 +5977,7 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
         })()}
         <p class="sheet-sub" style="margin:0 0 10px">目前：${mine ? `<b style="color:${mine.color}">${groups.indexOf(mine) + 1}</b> ${esc(o.label)}${detailOf(o) ? `・${detailHtml(o)}` : ''}` : esc(o.label)}</p>
         ${doubt ? `<button class="btn block" id="q-same" style="margin-bottom:12px">${icon('check', 20)}一樣，就是「${esc(mine ? `${mine.label}${mine.spec ? `・${mine.spec}` : ''}` : o.label)}」</button>` : ''}
-        ${o.suggest && !o.edited ? `<button class="btn secondary block" id="q-suggest" style="margin-bottom:12px"><span>改成「<span class="nb">${esc(o.suggest.label)}</span>${o.suggest.spec ? `・<span class="nb">${esc(o.suggest.spec)}</span>` : ''}」</span><span class="badge new">新</span></button>` : ''}
+        ${o.suggest && !o.edited ? `<button class="btn secondary block" id="q-suggest" style="margin-bottom:12px"><span>改成「<span class="nb">${esc(o.suggest.label)}</span>${o.suggest.spec ? `・<span class="nb">${esc(o.suggest.spec)}</span>` : ''}」</span></button>` : ''}
         ${doubt ? '<p class="sheet-sub" style="margin:0 0 8px">不一樣的話，選它是哪一種：</p>' : ''}
         <div class="group">
           ${groups
@@ -7554,7 +7554,7 @@ function iosJoinSheet(code) {
   const browser = /CriOS/.test(navigator.userAgent) ? 'Chrome' : 'Safari'
   sheet(
     `<img class="join-logo" src="logo.svg" alt="聖佳 LOGO"><h2 class="sheet-title" style="text-align:center">加入聖佳智慧庫存</h2>
-     <p class="sheet-sub">${dev} 點連結只會開在 ${browser}，<span class="nb">桌面上的 App 收不到</span>。請到 App 裡加入： <span class="badge new">新</span></p>
+     <p class="sheet-sub">${dev} 點連結只會開在 ${browser}，<span class="nb">桌面上的 App 收不到</span>。請到 App 裡加入：</p>
      <ol class="steps-list">
        <li>按下面的「複製邀請」。</li>
        <li>桌面還沒有「聖佳庫存」的話：按 ${browser} 的<span class="nb">分享鍵（方框加箭頭 <b>⬆︎</b>）</span>，<span class="nb">新版 iOS 在「⋯」裡</span>→<span class="nb">「加入主畫面」</span>→<span class="nb">「新增」</span>。</li>
@@ -8089,7 +8089,7 @@ function linkSheet(name, role, code, appUrl) {
      <div class="row-actions" style="margin-top:10px">${navigator.share ? '<button class="btn" id="lk-share" style="flex:1">分享給他</button>' : ''}<button class="btn ${navigator.share ? 'secondary' : ''}" id="lk-copy" style="flex:1">複製</button></div>
      <ol class="steps-list">
        <li>私訊給「${esc(name)}」（不要貼在群組）。</li>
-       <li><b>iPhone、iPad：</b>點連結只會開 Safari，打不開桌面上的 App。請他長按訊息 →「複製」，<span class="nb">打開桌面上的</span><span class="nb">「聖佳庫存」</span>，按<span class="nb">「貼上邀請並加入」</span>。 <span class="badge new">新</span></li>
+       <li><b>iPhone、iPad：</b>點連結只會開 Safari，打不開桌面上的 App。請他長按訊息 →「複製」，<span class="nb">打開桌面上的</span><span class="nb">「聖佳庫存」</span>，按<span class="nb">「貼上邀請並加入」</span>。</li>
        <li><b>Android、電腦：</b>在 LINE 點連結，按「加入」就好。</li>
        <li>這組只給他一個人用。他離職時，在「共用設定」移除權限就好，其他人不用改。</li>
      </ol>
@@ -8372,7 +8372,7 @@ async function viewReport() {
           </div>
           ${
             r.unfinished || r.replaced
-              ? `<div class="hint-card report-note" role="note"><div><b>總數怎麼算</b> <span class="badge new">新</span></div>${r.unfinished ? `<div><span class="badge low">含 ${r.unfinished} 次還沒按完成</span> 這幾次的數量已經算進上面，但還沒記進品項庫，可能還會改。</div>` : ''}${r.replaced ? `<div>同一格盤了好幾次的，只算一次（按過完成的優先，再看最新的）：${r.replaced} 次沒算進來。</div>` : ''}</div>`
+              ? `<div class="hint-card report-note" role="note"><div><b>總數怎麼算</b></div>${r.unfinished ? `<div><span class="badge low">含 ${r.unfinished} 次還沒按完成</span> 這幾次的數量已經算進上面，但還沒記進品項庫，可能還會改。</div>` : ''}${r.replaced ? `<div>同一格盤了好幾次的，只算一次（按過完成的優先，再看最新的）：${r.replaced} 次沒算進來。</div>` : ''}</div>`
               : ''
           }
           <div class="row-actions" style="margin:14px 0 6px">
@@ -8452,7 +8452,7 @@ async function viewQuality() {
             <div class="row"><span class="grow"><span class="title">分錯種類</span><br><span class="meta">框改成別的一種（例如 2分 看成 3分）</span></span><span class="qty"><b>${q.misclass}</b></span></div>
             <div class="row"><span class="grow"><span class="title">AI 一共框了</span><br><span class="meta">標成「要確認」的 ${q.flagged} 個，其中真的有錯 ${q.caught} 個</span></span><span class="qty"><b>${q.boxes}</b></span></div>
           </div>
-          <p class="section-title">相似品比對有沒有幫忙 <span class="badge new">新</span></p>
+          <p class="section-title">相似品比對有沒有幫忙</p>
           <div class="group">
             ${[
               ['比對的建議對了', q.refine.refined, '你照建議改的'],

@@ -5024,3 +5024,48 @@ html.is-scrolled .nav,
 main.app:has(.home-grid.fresh) .large-title {
   justify-content: center;
 }
+/* 4.11.5 使用者：「上面有被模糊遮住」→ 按鈕、膠囊不要有柔光暈／陰影（在高解析螢幕上像糊掉），改成清楚的細框；上方標題列不再黏住（不會擋到內容） */
+.btn,
+.btn.secondary,
+.btn.plain,
+.btn.danger,
+.icon-btn:not(.small),
+.chip,
+.hero-btn {
+  box-shadow: none;
+}
+.btn.plain,
+.icon-btn:not(.small),
+.chip {
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.btn.secondary {
+  background: var(--tint-soft);
+}
+.btn.plain:active,
+.icon-btn:not(.small):active,
+.chip:active,
+.btn.secondary:active,
+.btn:active,
+.hero-btn:active {
+  box-shadow: none;
+}
+.hero-btn {
+  background: var(--brand);
+}
+.hero-btn:active {
+  background: var(--brand-press);
+}
+.btn {
+  background: var(--brand);
+}
+.btn:active {
+  background: var(--brand-press);
+}
+.nav,
+html.is-scrolled .nav {
+  position: static;
+  background: transparent;
+  box-shadow: none;
+}
