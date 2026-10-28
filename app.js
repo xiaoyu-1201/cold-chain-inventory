@@ -106,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.11.3（10/28・AI 金鑰統一放雲端、同事不用輸入）'
+const VERSION = '4.11.4（10/28・拿掉「新」標示）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2746,8 +2746,8 @@ async function viewSettings() {
                 ? `<button class="row" data-action="move-to-app"><span class="grow"><span class="title" style="color:var(--tint)">複製到桌面 App <span class="badge new">新</span></span><br><span class="meta">桌面的「聖佳庫存」跟瀏覽器資料分開：複製這台的連線，到桌面 App 按<span class="nb">「貼上邀請並加入」</span>（只貼到自己的 App，不要傳給別人）</span></span>${chev}</button>`
                 : ''
             }
-            ${googleId() && !joinPending() ? `<button class="row" data-action="google-bind"><span class="grow"><span class="title" style="color:var(--tint)">綁定我的 Google 帳號 <span class="badge new">新</span></span><br><span class="meta">${ls.get(LS.gEmail) ? `已綁定 ${esc(ls.get(LS.gEmail))}；` : ''}換手機時用 Google 登入就能接回來</span></span>${chev}</button>` : ''}
-            ${myRole() === 'owner' ? `<button class="row" data-action="backup-link"><span class="grow"><span class="title" style="color:var(--tint)">備份我的連結 <span class="badge new">新</span></span><br><span class="meta">這支手機的資料被清掉時，貼回這個連結就能接回來（貼到自己的備忘錄，不要傳給別人）</span></span>${chev}</button>` : ''}
+            ${googleId() && !joinPending() ? `<button class="row" data-action="google-bind"><span class="grow"><span class="title" style="color:var(--tint)">綁定我的 Google 帳號</span><br><span class="meta">${ls.get(LS.gEmail) ? `已綁定 ${esc(ls.get(LS.gEmail))}；` : ''}換手機時用 Google 登入就能接回來</span></span>${chev}</button>` : ''}
+            ${myRole() === 'owner' ? `<button class="row" data-action="backup-link"><span class="grow"><span class="title" style="color:var(--tint)">備份我的連結</span><br><span class="meta">這支手機的資料被清掉時，貼回這個連結就能接回來（貼到自己的備忘錄，不要傳給別人）</span></span>${chev}</button>` : ''}
             <button class="row" data-action="full-pull" ${repairing ? 'disabled' : ''}><span class="grow"><span class="title" style="color:var(--tint)">${repairing ? '正在從雲端重新下載…' : '從雲端重新下載全部'}</span><br><span class="meta">這台跟別台不一樣、少了紀錄或照片時用；這台比較新的不會被蓋掉</span></span>${chev}</button>
             <button class="row" data-action="sync-leave"><span class="grow"><span class="title" style="color:var(--red)">這台退出並清除資料</span><br><span class="meta">交還手機、換手機時用；雲端的資料不會刪</span></span>${chev}</button>
           </div>`
@@ -7756,7 +7756,7 @@ async function joinCheck() {
 /** 新手機（還沒接上大家的資料）：同事填名字＋店裡通行碼；擁有者、收到邀請連結的人在下面的「貼上」 */
 function joinCard() {
   return `<div class="join-card">
-    <h2 class="join-title" data-owner-tap>接上大家的資料 <span class="badge new">新</span></h2>
+    <h2 class="join-title" data-owner-tap>接上大家的資料</h2>
     <p class="join-sub">第一次用這支手機，填一次就好。</p>
     ${ls.get(LS.joinNote) ? `<p class="join-note" role="status">${esc(ls.get(LS.joinNote))}</p>` : ''}
     ${googleId() ? `<button class="btn block secondary" data-action="google-join">用 Google 帳號加入</button><p class="join-or"><span>或用店裡通行碼</span></p>` : ''}
@@ -7848,13 +7848,13 @@ function googleBox(r) {
 function joinStatusCards() {
   if (joinPending()) {
     const r = readJson(LS.joinReq, {})
-    return `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b><span class="nb">已送出申請，</span><span class="nb">等管理員核准</span> <span class="badge new">新</span></b><p>${esc(r.name || '你')}，<span class="nb">核准後這支手機會自動接上，</span><span class="nb">不用再做什麼</span><span class="nb">（打開 App 時會檢查）。</span></p><div class="row-actions"><button class="btn small" data-action="join-check">重新檢查</button><button class="btn small plain" data-action="join-cancel">取消申請</button></div></div></div>`
+    return `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b><span class="nb">已送出申請，</span><span class="nb">等管理員核准</span></b><p>${esc(r.name || '你')}，<span class="nb">核准後這支手機會自動接上，</span><span class="nb">不用再做什麼</span><span class="nb">（打開 App 時會檢查）。</span></p><div class="row-actions"><button class="btn small" data-action="join-check">重新檢查</button><button class="btn small plain" data-action="join-cancel">取消申請</button></div></div></div>`
   }
   const cards = []
   const n = Number(ls.get(LS.pend, '0'))
-  if (canManage() && n > 0) cards.push(`<button class="sum-doubt tip" data-action="share-open"><span class="sum-dot" aria-hidden="true">!</span><span class="grow"><b>${n} 個人申請加入</b> <span class="badge new">新</span><br><span class="meta">按這裡核准或拒絕</span></span>${chev}</button>`)
+  if (canManage() && n > 0) cards.push(`<button class="sum-doubt tip" data-action="share-open"><span class="sum-dot" aria-hidden="true">!</span><span class="grow"><b>${n} 個人申請加入</b><br><span class="meta">按這裡核准或拒絕</span></span>${chev}</button>`)
   if (myRole() === 'owner' && syncReady() && ls.get(LS.backupDone) !== '1')
-    cards.push(`<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('lock', 26)}</span><div class="grow"><b>備份你的連結 <span class="badge new">新</span></b><p>這支手機的資料如果被清掉，<span class="nb">貼回這個連結就能接回來。</span><span class="nb">複製後貼到自己的備忘錄，</span><span class="nb">不要傳給別人。</span></p><div class="row-actions"><button class="btn small" data-action="backup-link">複製我的連結</button><button class="btn small plain" data-action="backup-done">不用了</button></div></div></div>`)
+    cards.push(`<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('lock', 26)}</span><div class="grow"><b>備份你的連結</b><p>這支手機的資料如果被清掉，<span class="nb">貼回這個連結就能接回來。</span><span class="nb">複製後貼到自己的備忘錄，</span><span class="nb">不要傳給別人。</span></p><div class="row-actions"><button class="btn small" data-action="backup-link">複製我的連結</button><button class="btn small plain" data-action="backup-done">不用了</button></div></div></div>`)
   return cards.join('')
 }
 /** 共用設定（像 Google 雲端硬碟的「共用」視窗）：新增使用者＋權限、名單、一般存取權 */
@@ -7960,7 +7960,7 @@ function shareSheet() {
         box.innerHTML = `
           ${
             r.pending.length
-              ? `<p class="section-title">加入申請（${r.pending.length}）<span class="badge new">新</span></p>
+              ? `<p class="section-title">加入申請（${r.pending.length}）</p>
                  <div class="group">${r.pending
                    .map(
                      (p) => `<div class="row person join-req" data-req="${esc(p.id)}" data-name="${esc(p.name)}">
