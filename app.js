@@ -106,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.12.4（10/28・拿掉頂端固定色條、標題列不再互相蓋住）'
+const VERSION = '4.12.5（10/28・桌面 App 內容不再捲到狀態列後面）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1824,6 +1824,7 @@ function go(view, extra = {}) {
   Object.assign(state, { view, focus: null, focusObj: null, addMode: false, viewer: false }, extra)
   render()
   window.scrollTo({ top: 0 })
+  document.getElementById('app')?.scrollTo?.({ top: 0 }) // 手機桌面 App 是 #app 在捲（4.12.5）
 }
 /** 按了要等一下的按鈕：先停用、改成「…中」，做完還原（畫面重畫的話就自然換掉了） */
 function busyBtn(btn, text) {

@@ -5181,3 +5181,36 @@ html.is-scrolled .nav {
   overflow: visible;
   text-overflow: clip;
 }
+/*
+ * 4.12.5 手機桌面 App：頁面不要在狀態列後面捲動。
+ * iOS 26 會把「捲到狀態列後面的內容」自動做模糊淡出（標題看起來糊）。LINE 不糊，是因為內容從狀態列下面才開始。
+ * 做法：整頁不捲，改由 #app 這個容器捲動（從狀態列下面開始、延伸到最底）；只在「加到主畫面」的 App 套用（瀏覽器分頁要保留網址列收合）。
+ */
+@media (display-mode: standalone) and (max-width: 767px) {
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
+  #app {
+    position: fixed;
+    top: var(--safe-t);
+    left: 0;
+    right: 0;
+    bottom: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+  }
+  body.no-scroll #app {
+    overflow: hidden;
+  }
+  .app {
+    min-height: calc(100dvh - var(--safe-t));
+    padding-top: 8px;
+  }
+  .pk-progress {
+    top: 0;
+  }
+}
