@@ -90,7 +90,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.9.0（10/19・比對只提醒、拿掉 Gemini）'
+const VERSION = '4.9.1（10/28・辨識中畫面改版）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2377,18 +2377,66 @@ function viewCapture() {
   <div class="toolbar"><div class="inner"><button class="btn" data-action="analyze" ${s.photos.length ? '' : 'disabled'}>開始辨識${s.photos.length ? `（${s.photos.length} 張）` : ''}</button></div></div>`
 }
 
+/** 等的時候輪流看的小撇步：就是拍照頁「怎麼拍比較準」那幾條（圖示、文字） */
+const WAIT_TIPS = [
+  ['camera', '一次拍一層貨架，<br>正面拍，不要太斜。'],
+  ['sun', '光線夠、不要反光；<br>標籤朝外最好。'],
+  ['layers', '疊在一起、被擋住的，<br>結果出來再用 ＋／－ 修正。'],
+  ['image', '長得很像、只差尺寸的，<br>先存一張「樣品照」。'],
+]
+/** 已經等多久：不到 1 分鐘寫秒，之後寫「1 分 20 秒」 */
+const waitTime = (ms) => {
+  const s = Math.round(ms / 1000)
+  return `已經 ${s >= 60 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${s} 秒`}`
+}
+/** 「AI 正在辨識第 X ／ Y 張」那兩行（辨識完一張只更新這裡，不整頁重畫，輪播和轉圈才不會每張重來） */
+const waitSub = (p) => `AI 正在辨識第 ${p.done + 1 > p.total ? p.total : p.done + 1} ／ ${p.total} 張<br>每張大約 5～15 秒`
+/** 辨識中的等待畫面（4.9.1）：三顆藍點繞圈、請稍候、第幾張、輪播小撇步。#elapsed、#ai-status 是 runAnalysis 每 0.5 秒更新的 */
 function viewAnalyzing() {
   const p = state.progress || { done: 0, total: 0, started: Date.now() }
   return `
   <main class="app">
-    <div class="progress">
-      <div class="spinner" aria-hidden="true"></div>
-      <div><b style="color:var(--text)">AI 辨識中… ${p.done + 1 > p.total ? p.total : p.done + 1} / ${p.total}</b><br>每張大約 5～15 秒（看網路和照片內容）</div>
-      <div class="muted" id="elapsed">已經 0 秒</div>
-      <div class="muted" id="ai-status" style="min-height:1.5em;font-size:15px"></div>
+    <div class="wait">
+      <div class="wait-orb" aria-hidden="true"><i class="ring"></i><i class="ring"></i><i class="disc"></i><div class="mid"><div class="orbit"><span class="w"><i></i></span><span class="w"><i></i></span><span class="w"><i></i></span></div></div></div>
+      <div role="status">
+        <div class="wait-title" tabindex="-1">請稍候<i>.</i><i>.</i><i>.</i></div>
+        <div class="wait-sub" id="wait-sub">${waitSub(p)}</div>
+      </div>
+      <div class="wait-time" id="elapsed">已經 0 秒</div>
+      <div class="wait-card">
+        <div class="lead">等的時候看一下・怎麼拍比較準 <span class="badge new">新</span></div>
+        <div class="wait-tips" aria-hidden="true">${WAIT_TIPS.map(([ic, t]) => `<div class="wait-tip"><span class="ti">${icon(ic, 22)}</span><p>${t}</p></div>`).join('')}</div>
+        <div class="wait-pager" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="wait-status" id="ai-status"></div>
     </div>
   </main>
   <div class="toolbar"><div class="inner"><button class="btn plain" data-action="cancel">取消</button></div></div>`
+}
+let orbitRaf = 0
+/**
+ * 三顆點繞圈的轉速像呼吸：約 7 秒一個起伏（0.55～1.45 倍），使用者選的「A 緩慢呼吸」。
+ * 動畫本身是 CSS，這裡只每一格調 playbackRate（很輕）；畫面離開就停（等 1 秒都沒看到 .orbit 才停，因為換頁當下元素可能還沒畫出來）。
+ * 開了「減少動態效果」：最快只到 0.6 倍，不停掉。
+ */
+function startOrbitRhythm() {
+  if (orbitRaf) return
+  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches
+  let missing = 0
+  const tick = (now) => {
+    const el = document.querySelector('.orbit')
+    if (!el) {
+      missing ||= now
+      if (now - missing > 1000) return void (orbitRaf = 0)
+    } else {
+      missing = 0
+      const r = 1 + 0.45 * Math.sin((2 * Math.PI * now) / 7000)
+      const rate = calm ? Math.min(r, 0.6) : r
+      for (const a of el.getAnimations?.({ subtree: true }) || []) a.playbackRate = rate
+    }
+    orbitRaf = requestAnimationFrame(tick)
+  }
+  orbitRaf = requestAnimationFrame(tick)
 }
 
 function viewReview() {
@@ -8200,9 +8248,11 @@ async function runAnalysis(indices) {
   state.progress = { done: 0, total: photos.length, started: Date.now() }
   keepAwake()
   go('analyzing')
+  startOrbitRhythm()
+  document.querySelector('.wait-title')?.focus({ preventScroll: true }) // 按鈕被換掉後焦點不要掉到 body：螢幕閱讀器才會唸「請稍候」
   const timer = setInterval(() => {
     const el = document.getElementById('elapsed')
-    if (el) el.textContent = `已經 ${Math.round((Date.now() - state.progress.started) / 1000)} 秒`
+    if (el) el.textContent = waitTime(Date.now() - state.progress.started)
   }, 500)
   const refs = await sampleRefs()
   await itemsAll() // 品項庫：給 AI 照抄名稱、填料號
@@ -8239,7 +8289,10 @@ async function runAnalysis(indices) {
       }
       state.progress.done += 1
       await save()
-      if (state.view === 'analyzing') render()
+      const sub = state.view === 'analyzing' && document.getElementById('wait-sub')
+      if (sub) {
+        if (!state.cancel) sub.innerHTML = waitSub(state.progress)
+      } else if (state.view === 'analyzing') render()
     }
   }
   await Promise.all([worker(), worker()])
@@ -8548,9 +8601,15 @@ $app.addEventListener('click', async (e) => {
     case 'analyze':
       state.session.place = document.getElementById('place')?.value.trim() || ''
       return runAnalysis(state.session.photos.map((_, i) => i))
-    case 'cancel':
+    case 'cancel': {
       state.cancel = true
+      // 畫面要看得出有按到（不然使用者會狂按）：按鈕變「取消中…」、說明改成收尾
+      t.disabled = true
+      t.textContent = '取消中…'
+      const sub = document.getElementById('wait-sub')
+      if (sub) sub.innerHTML = '正在收尾：<br>這張辨識完就停'
       return toast('這張辨識完就停')
+    }
     case 'add':
       return addSheet()
     case 'export':

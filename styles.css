@@ -1247,14 +1247,6 @@ button.swatch::after {
 }
 
 /* 載入中 */
-.progress {
-  display: grid;
-  place-items: center;
-  gap: 16px;
-  padding: 48px 16px;
-  text-align: center;
-  color: var(--text-2);
-}
 .spinner {
   width: 36px;
   height: 36px;
@@ -4541,4 +4533,371 @@ html.no-glass {
 .setup-card p.move-note {
   margin: -4px 0 12px;
   color: var(--text);
+}
+
+/* ───── 辨識中的等待畫面（4.9.1，10/28 使用者選定：A 緩慢呼吸）─────
+ * 三顆藍點繞圈（做法與數值參考 GitHub ldrs（GriffinJohnston/ldrs，MIT 授權）的 orbit／chaotic-orbit：點只在水平方向來回、越前面越大越亮，再整個旋轉＝看起來像 3D 繞圈）。
+ * 全部只動位置、大小、透明度（手機最順、最省電）；轉速快慢由 app.js 的 startOrbitRhythm 像呼吸一樣調。 */
+.wait {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* 內容在畫面（扣掉最上面的返回列和最下面的取消鈕）中間：不要全擠在上半部、下面空一大塊 */
+  justify-content: center;
+  min-height: calc(100vh - 150px - var(--safe-t) - var(--safe-b));
+  min-height: calc(100dvh - 150px - var(--safe-t) - var(--safe-b));
+  padding: 8px 0;
+  text-align: center;
+  animation: wait-in 0.25s ease-out;
+}
+@keyframes wait-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+.wait-orb {
+  position: relative;
+  width: 132px;
+  height: 132px;
+}
+.wait-orb .ring,
+.wait-orb .disc {
+  position: absolute;
+  inset: 14px;
+  border-radius: 50%;
+}
+.wait-orb .ring {
+  background: var(--tint);
+  opacity: 0;
+  animation: wait-halo 2.6s ease-out infinite;
+}
+.wait-orb .ring + .ring {
+  animation-delay: 1.3s;
+}
+.wait-orb .disc {
+  background: var(--card);
+}
+@keyframes wait-halo {
+  from {
+    transform: scale(0.7);
+    opacity: 0.3;
+  }
+  to {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+.wait-orb .mid {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.orbit {
+  --sz: 96px;
+  --sp: 1.8s;
+  position: relative;
+  width: var(--sz);
+  height: var(--sz);
+  animation: orbit-rot calc(var(--sp) * 1.667) linear infinite;
+}
+.orbit .w {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.orbit .w i {
+  position: absolute;
+  width: calc(var(--sz) * 0.28);
+  height: calc(var(--sz) * 0.28);
+  border-radius: 50%;
+  background: var(--tint);
+  animation: orbit-orb var(--sp) linear infinite;
+}
+.orbit .w:nth-child(2) i {
+  animation-delay: calc(var(--sp) / -3);
+}
+.orbit .w:nth-child(3) i {
+  animation-delay: calc(var(--sp) / -3 * 2);
+}
+@keyframes orbit-rot {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes orbit-orb {
+  0% {
+    transform: translateX(calc(var(--sz) * 0.2500)) scale(0.7370);
+    opacity: 0.650;
+  }
+  5% {
+    transform: translateX(calc(var(--sz) * 0.2378)) scale(0.6557);
+    opacity: 0.542;
+  }
+  10% {
+    transform: translateX(calc(var(--sz) * 0.2023)) scale(0.5824);
+    opacity: 0.444;
+  }
+  15% {
+    transform: translateX(calc(var(--sz) * 0.1469)) scale(0.5242);
+    opacity: 0.367;
+  }
+  20% {
+    transform: translateX(calc(var(--sz) * 0.0773)) scale(0.4869);
+    opacity: 0.317;
+  }
+  25% {
+    transform: translateX(calc(var(--sz) * 0.0000)) scale(0.4740);
+    opacity: 0.300;
+  }
+  30% {
+    transform: translateX(calc(var(--sz) * -0.0773)) scale(0.4869);
+    opacity: 0.317;
+  }
+  35% {
+    transform: translateX(calc(var(--sz) * -0.1469)) scale(0.5242);
+    opacity: 0.367;
+  }
+  40% {
+    transform: translateX(calc(var(--sz) * -0.2023)) scale(0.5824);
+    opacity: 0.444;
+  }
+  45% {
+    transform: translateX(calc(var(--sz) * -0.2378)) scale(0.6557);
+    opacity: 0.542;
+  }
+  50% {
+    transform: translateX(calc(var(--sz) * -0.2500)) scale(0.7370);
+    opacity: 0.650;
+  }
+  55% {
+    transform: translateX(calc(var(--sz) * -0.2378)) scale(0.8183);
+    opacity: 0.758;
+  }
+  60% {
+    transform: translateX(calc(var(--sz) * -0.2023)) scale(0.8916);
+    opacity: 0.856;
+  }
+  65% {
+    transform: translateX(calc(var(--sz) * -0.1469)) scale(0.9498);
+    opacity: 0.933;
+  }
+  70% {
+    transform: translateX(calc(var(--sz) * -0.0773)) scale(0.9871);
+    opacity: 0.983;
+  }
+  75% {
+    transform: translateX(calc(var(--sz) * -0.0000)) scale(1.0000);
+    opacity: 1.000;
+  }
+  80% {
+    transform: translateX(calc(var(--sz) * 0.0773)) scale(0.9871);
+    opacity: 0.983;
+  }
+  85% {
+    transform: translateX(calc(var(--sz) * 0.1469)) scale(0.9498);
+    opacity: 0.933;
+  }
+  90% {
+    transform: translateX(calc(var(--sz) * 0.2023)) scale(0.8916);
+    opacity: 0.856;
+  }
+  95% {
+    transform: translateX(calc(var(--sz) * 0.2378)) scale(0.8183);
+    opacity: 0.758;
+  }
+  100% {
+    transform: translateX(calc(var(--sz) * 0.2500)) scale(0.7370);
+    opacity: 0.650;
+  }
+}
+.wait-title {
+  margin-top: 16px;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text);
+}
+.wait-title:focus {
+  outline: none;
+}
+.wait-title i {
+  font-style: normal;
+  animation: wait-dot 1.4s ease-in-out infinite;
+}
+.wait-title i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.wait-title i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes wait-dot {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+.wait-sub {
+  margin-top: 8px;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.wait-time {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.wait-card {
+  width: 100%;
+  max-width: 420px;
+  margin-top: 36px;
+  padding: 16px 16px 14px;
+  border-radius: 20px;
+  background: var(--card);
+  text-align: left;
+}
+.wait-card .lead {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tint);
+}
+.wait-tips {
+  position: relative;
+  height: 52px;
+  margin-top: 10px;
+}
+.wait-tip {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  opacity: 0;
+  animation: wait-tip 16s ease-out infinite;
+}
+.wait-tip:nth-child(2) {
+  animation-delay: 4s;
+}
+.wait-tip:nth-child(3) {
+  animation-delay: 8s;
+}
+.wait-tip:nth-child(4) {
+  animation-delay: 12s;
+}
+.wait-tip .ti {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--tint-soft);
+  color: var(--tint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.wait-tip .ti .ico {
+  margin: 0;
+}
+.wait-tip p {
+  margin: 1px 0 0;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text);
+}
+@keyframes wait-tip {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  2%,
+  23% {
+    opacity: 1;
+    transform: none;
+  }
+  26%,
+  100% {
+    opacity: 0;
+  }
+}
+.wait-pager {
+  display: flex;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+.wait-pager i {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--tint-soft);
+  animation: wait-pg 16s ease-out infinite;
+}
+.wait-pager i:nth-child(2) {
+  animation-delay: 4s;
+}
+.wait-pager i:nth-child(3) {
+  animation-delay: 8s;
+}
+.wait-pager i:nth-child(4) {
+  animation-delay: 12s;
+}
+@keyframes wait-pg {
+  0% {
+    width: 6px;
+    background: var(--tint-soft);
+  }
+  2%,
+  23% {
+    width: 20px;
+    background: var(--tint);
+  }
+  25%,
+  100% {
+    width: 6px;
+    background: var(--tint-soft);
+  }
+}
+.wait-status {
+  max-width: 420px;
+  margin-top: 14px;
+  height: 4.5em;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+/* 「減少動態效果」：光暈拿掉、小撇步只淡入淡出（不位移）；轉圈本身照轉（只是慢，見 app.js） */
+@keyframes wait-tip-fade {
+  0% {
+    opacity: 0;
+  }
+  2%,
+  23% {
+    opacity: 1;
+  }
+  26%,
+  100% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wait-orb .ring {
+    display: none;
+  }
+  .wait {
+    animation: none;
+  }
+  .wait-tip {
+    animation-name: wait-tip-fade;
+  }
 }
