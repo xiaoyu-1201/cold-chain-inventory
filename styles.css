@@ -5120,3 +5120,42 @@ body::before {
 .icon-btn:not(.small):active {
   background: color-mix(in srgb, var(--tint) 12%, var(--card));
 }
+/* 4.12.2 同步膠囊：縮小、移到標題右邊、不搶眼（只有雲朵＋時間） */
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.title-row .large-title {
+  min-width: 0;
+}
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 4px;
+  min-height: 32px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.sync-pill.error {
+  color: var(--red);
+}
+.title-row .large-title {
+  flex: 1;
+  white-space: nowrap;
+}
+.sync-pill {
+  max-width: 40%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

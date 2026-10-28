@@ -106,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.12.1（10/28・新加入只先抓最近 5 次的照片）'
+const VERSION = '4.12.2（10/28・同步膠囊移到標題右邊、只更新時間不重畫）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2294,8 +2294,8 @@ async function viewHome() {
   const unfinished = sessions.filter((s) => !s.linkedAt).length
   return `
   <main class="app">
-    <div class="nav">${syncReady() ? `<button class="btn small plain sync-pill ${state.syncState || ''}" data-action="sync-now">${icon('cloud', 18)}<span class="sync-text">${esc(syncLabel())}</span></button>` : '<span></span>'}<button class="icon-btn" data-go="settings" aria-label="設定">${icon('settings', 24)}</button></div>
-    <h1 class="large-title brand"><img class="brand-logo" src="logo.svg" alt="聖佳 LOGO">聖佳智慧庫存</h1>
+    <div class="nav"><span></span><button class="icon-btn" data-go="settings" aria-label="設定">${icon('settings', 24)}</button></div>
+    <div class="title-row"><h1 class="large-title brand"><img class="brand-logo" src="logo.svg" alt="聖佳 LOGO">聖佳智慧庫存</h1>${syncReady() ? `<button class="sync-pill ${state.syncState || ''}" data-action="sync-now" aria-label="立即同步">${icon('cloud', 14)}<span class="sync-text">${esc(syncLabel())}</span></button>` : ''}</div>
     <div class="home-grid ${!sessions.length && (joinPending() || (!hasKey && !syncReady() && canEdit())) ? 'fresh' : ''}"><div class="home-main">
     <div class="home-cards">
     ${moveCard()}
@@ -7251,7 +7251,16 @@ async function applyRemote(rec) {
 /** 同步進度：首頁左上的雲朵、設定頁都看得到（不用整頁重畫） */
 function syncProgress(msg) {
   state.syncMsg = msg
-  document.querySelectorAll('.sync-text').forEach((el) => (el.textContent = msg))
+  updateSyncPill()
+}
+/** 同步狀態變了：只改膠囊的字和狀態（數字），不重畫整個頁面 */
+function updateSyncPill() {
+  document.querySelectorAll('.sync-pill').forEach((el) => {
+    el.classList.remove('syncing', 'error')
+    if (state.syncState) el.classList.add(state.syncState)
+    const t = el.querySelector('.sync-text')
+    if (t) t.textContent = syncLabel()
+  })
 }
 async function syncNow(report = () => {}) {
   if (!syncReady()) throw new Error('還沒開啟多台同步')
@@ -7262,6 +7271,7 @@ async function syncNow(report = () => {}) {
   }
   syncing = (async () => {
     state.syncState = 'syncing'
+    updateSyncPill()
     onProgress('連線中…')
     // 送出申請、還在等核准：先問一次，還沒核准就不上傳也不下載
     if (ls.get(LS.joinReq) && !(await joinCheck())) return { pushed: 0, pulled: 0, changed: false }
@@ -7403,7 +7413,8 @@ async function syncNow(report = () => {}) {
       picksCache = null
       // 點貨正在點的那一頁（pick-edit）不重畫：不要打斷輸入
       if (['home', 'items', 'item', 'report', 'locations', 'review', 'pick', 'pick-result'].includes(state.view)) render()
-    } else if (state.view === 'home') render()
+    }
+    updateSyncPill() // 沒有新資料就不重畫頁面，只更新時間
     // 正在看的那次盤點先抓照片，其他的在背景慢慢抓
     if (state.session?.photos.some((p) => p.pending)) fetchPhotos(state.session, { skipMissing: true }).catch(() => {})
     setTimeout(() => prefetchPhotos().catch(() => {}), 1500)
@@ -7413,7 +7424,7 @@ async function syncNow(report = () => {}) {
       state.syncState = 'error'
       state.syncError = e.message
       picksDirty = true // 這次沒傳成功：下次再檢查一次點貨紀錄
-      if (state.view === 'home') render()
+      updateSyncPill()
       throw e
     })
     .finally(() => (syncing = null))
@@ -8202,11 +8213,13 @@ function moveSheet() {
   )
 }
 const syncLabel = () => {
-  if (state.syncState === 'syncing') return state.syncMsg || '同步中…'
-  if (state.syncState === 'error') return '同步沒成功'
+  // 膠囊很小：同步中只顯示「同步中」和進度數字（完整的進度訊息只放在提示裡）
+  if (state.syncState === 'syncing') return `同步中${state.syncMsg?.match(/[0-9]+/) ? ` ${state.syncMsg.match(/[0-9]+/)[0]}` : ''}`
+  if (state.syncState === 'error') return '同步失敗'
   if (joinPending()) return '等管理員核准'
   const t = Number(ls.get(LS.lastSync, '0'))
-  return t ? `已同步 ${fmtTime(t)}` : '還沒同步'
+  if (!t) return '尚未同步'
+  return new Date(t).toDateString() === new Date().toDateString() ? new Date(t).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) : fmtTime(t)
 }
 
 // ───────────────────────── 總表：很多次盤點合在一起 ─────────────────────────
@@ -9339,7 +9352,7 @@ $app.addEventListener('click', async (e) => {
       return syncNow((m) => toast(m))
         .then((r) => toast(joinPending() ? '還在等管理員核准' : r.pushed || r.pulled ? `同步完成：上傳 ${r.pushed}、下載 ${r.pulled}` : '已是最新'))
         .catch((err) => toast(`同步沒成功：${err.message}`))
-        .finally(() => ['home', 'settings'].includes(state.view) && render())
+        .finally(updateSyncPill)
     case 'finish': {
       // 完成：記進品項庫；有設定 Google 試算表又開著自動同步，就順便寫進去（在背景送，不用等）
       const s = state.session
