@@ -5105,3 +5105,7 @@ body::before {
   z-index: 30;
   pointer-events: none;
 }
+/* 「還沒按完成」不要被拆成兩行（只剩「按完成」掉到下一行） */
+.unfinished {
+  white-space: nowrap;
+}
