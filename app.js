@@ -106,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.12.2（10/28・同步膠囊移到標題右邊、只更新時間不重畫）'
+const VERSION = '4.12.3（10/28・標題列合併、成員管理改版、申請即時出現）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2294,8 +2294,7 @@ async function viewHome() {
   const unfinished = sessions.filter((s) => !s.linkedAt).length
   return `
   <main class="app">
-    <div class="nav"><span></span><button class="icon-btn" data-go="settings" aria-label="設定">${icon('settings', 24)}</button></div>
-    <div class="title-row"><h1 class="large-title brand"><img class="brand-logo" src="logo.svg" alt="聖佳 LOGO">聖佳智慧庫存</h1>${syncReady() ? `<button class="sync-pill ${state.syncState || ''}" data-action="sync-now" aria-label="立即同步">${icon('cloud', 14)}<span class="sync-text">${esc(syncLabel())}</span></button>` : ''}</div>
+    <div class="title-row"><h1 class="large-title brand"><img class="brand-logo" src="logo.svg" alt="聖佳 LOGO">聖佳智慧庫存</h1><div class="title-actions">${syncReady() ? `<button class="sync-pill ${state.syncState || ''}" data-action="sync-now" aria-label="立即同步">${icon('cloud', 14)}<span class="sync-text">${esc(syncLabel())}</span></button>` : ''}<button class="icon-btn" data-go="settings" aria-label="設定">${icon('settings', 24)}</button></div></div>
     <div class="home-grid ${!sessions.length && (joinPending() || (!hasKey && !syncReady() && canEdit())) ? 'fresh' : ''}"><div class="home-main">
     <div class="home-cards">
     ${moveCard()}
@@ -6997,6 +6996,7 @@ async function postSync(body, opt = {}) {
   if ('pend' in data) {
     const was = ls.get(LS.pend)
     ls.set(LS.pend, String(data.pend || 0))
+    if (canManage() && Number(data.pend || 0) > Number(was || 0)) toast('有新的加入申請：點首頁卡片審核')
     if (was !== ls.get(LS.pend) && ['home', 'settings'].includes(state.view)) setTimeout(render, 0)
   }
   // 權限隨時可能被管理員改：每次回覆都更新
@@ -7882,34 +7882,90 @@ function shareSheet() {
         ? `<span class="muted role-text">擁有者</span>${me ? '<button class="btn small plain" data-rename-me>改名字</button>' : ''}`
         : me
           ? `<span class="muted role-text">${ROLE_LABEL[p.role]}</span>`
-          : `<select class="role-select" data-member="${esc(p.id)}" data-name="${esc(p.name)}" data-role="${p.role}" aria-label="${esc(p.name)} 的權限">
-              ${['manager', 'editor', 'viewer'].map((r) => `<option value="${r}" ${r === p.role ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}
-              <option disabled>──────</option>
-              <option value="rename">改名字…</option>
-              <option value="reissue">重新產生連結碼…</option>
-              <option value="remove">移除權限</option>
-            </select>`
-    return `<div class="row person"><span class="avatar" aria-hidden="true">${esc((Array.from(p.name)[0] || ''))}</span><span class="grow"><span class="title">${esc(p.name)}${me ? '（你）' : ''}</span><br><span class="meta">${meta}</span></span>${right}</div>`
+          : `<span class="muted role-text">${ROLE_LABEL[p.role]}</span>${chev}`
+    const body = `<span class="avatar" aria-hidden="true">${esc(Array.from(p.name)[0] || '')}</span><span class="grow"><span class="title">${esc(p.name)}${me ? '（你）' : ''}</span><br><span class="meta">${meta}</span></span>${right}`
+    return p.role !== 'owner' && !me ? `<button class="row person" data-member-open="${esc(p.id)}">${body}</button>` : `<div class="row person">${body}</div>`
   }
   sheet(
     `<h2 class="sheet-title">共用「聖佳智慧庫存」</h2>
-     <div id="sh-join"></div>
-     <p class="section-title">直接邀請</p>
-     <div class="form">
-       <input class="field" id="sh-name" placeholder="新增成員：名稱（例如 阿明、辦公室電腦）" autocomplete="off">
-       <div class="row-actions"><select class="field role-pick" id="sh-role" aria-label="權限"><option value="editor">編輯者（可盤點、修改）</option><option value="viewer">檢視者（只能看）</option><option value="manager">管理員（可管理成員）</option></select><button class="btn" id="sh-invite">邀請</button></div>
-     </div>
+     <div id="sh-pend"></div>
      <p class="section-title">成員</p>
      <div class="group" id="sh-list"><div class="row muted">載入中…</div></div>
-     <p class="section-title">一般存取權</p>
-     <div class="group"><div class="row"><span class="avatar lock" aria-hidden="true">${icon('lock', 18)}</span><span class="grow"><span class="title">限制</span><br><span class="meta">僅名單內的成員，以各自的連結碼才能開啟</span></span></div></div>
+     <p class="section-title">邀請新成員</p>
+     <div class="form">
+       <input class="field" id="sh-name" placeholder="名稱（例如 阿明、辦公室電腦）" autocomplete="off">
+       <div class="row-actions"><select class="field role-pick" id="sh-role" aria-label="權限"><option value="editor">編輯者（可盤點、修改）</option><option value="viewer">檢視者（僅可檢視）</option><option value="manager">管理員（可管理成員）</option></select><button class="btn" id="sh-invite">邀請</button></div>
+     </div>
+     <div id="sh-code"></div>
      <details class="steps"><summary>權限說明</summary><ol>${Object.keys(ROLE_LABEL)
        .map((r) => `<li><b>${ROLE_LABEL[r]}：</b>${ROLE_DESC[r]}</li>`)
-       .join('')}<li>人員離職：選「移除權限」，僅該成員失效，其手機下次連線時會自動清除 App 內資料；其他成員不受影響。</li><li>換手機或連結碼外流：選「重新產生連結碼」，舊連結碼立即失效。</li></ol></details>
+       .join('')}<li>人員離職：點該成員 →「移除權限」，僅該成員失效，其手機下次連線時會自動清除 App 內資料；其他成員不受影響。</li><li>換手機或連結碼外流：點該成員 →「重新產生連結碼」，舊連結碼立即失效。</li></ol></details>
      ${myRole() === 'owner' ? '<button class="btn plain block" id="sh-move" style="margin-top:14px">搬到另一個 Google 帳號（例如公司帳號）</button>' : ''}`,
     (el, close) => {
       const list = el.querySelector('#sh-list')
-      const load = async () => {
+      // 成員視窗：權限（點一下就改）、改名字、重新產生連結碼、移除權限
+      const openMember = (p) => {
+        const roles = ['manager', 'editor', 'viewer'].filter((r) => r !== 'manager' || myRole() === 'owner' || p.role === 'manager')
+        sheet(
+          `<h2 class="sheet-title">${esc(p.name)}</h2><p class="sheet-sub">${p.seen ? `最後上線 ${fmtTime(p.seen)}` : '尚未加入'}</p>
+           <p class="section-title">權限</p>
+           <div class="chips mem-roles" role="group" aria-label="權限">${roles.map((r) => `<button class="chip" data-role="${r}" aria-pressed="${r === p.role}">${ROLE_LABEL[r]}</button>`).join('')}</div>
+           <p class="footnote" id="mem-desc">${ROLE_DESC[p.role]}</p>
+           <div class="group" style="margin-top:14px">
+             <button class="row" data-mem="rename"><span class="grow"><span class="title">改名字</span></span>${chev}</button>
+             <button class="row" data-mem="reissue"><span class="grow"><span class="title">重新產生連結碼</span><br><span class="meta">換手機或連結碼外流時使用，舊連結碼立即失效</span></span>${chev}</button>
+           </div>
+           <button class="btn danger block" data-mem="remove" style="margin-top:14px">移除權限</button>`,
+          (m, closeM) => {
+            m.querySelectorAll('[data-role]').forEach((b) =>
+              b.addEventListener('click', async () => {
+                const r = b.dataset.role
+                if (r === p.role) return
+                try {
+                  await postSync({ action: 'setRole', id: p.id, role: r })
+                } catch (e) {
+                  return toast(e.message)
+                }
+                p.role = r
+                m.querySelectorAll('[data-role]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.role === r)))
+                m.querySelector('#mem-desc').textContent = ROLE_DESC[r]
+                toast(`「${p.name}」改成${ROLE_LABEL[r]}，下次同步生效`)
+                load(true)
+              }),
+            )
+            m.querySelector('[data-mem="rename"]').onclick = () => {
+              closeM()
+              close()
+              nameSheet(p.id, `改「${p.name}」的名字`, '')
+            }
+            m.querySelector('[data-mem="reissue"]').onclick = async () => {
+              if (!confirm(`幫「${p.name}」重新產生連結碼？\n舊連結碼立即失效（舊手機的資料會在下次連線時清除）。`)) return
+              try {
+                const key = newSyncKey()
+                await postSync({ action: 'reissue', id: p.id, newKey: key })
+                closeM()
+                close()
+                linkSheet(p.name, p.role, `${ls.get(LS.sheet)}#k=${key}`, appUrl)
+              } catch (e) {
+                toast(e.message)
+              }
+            }
+            m.querySelector('[data-mem="remove"]').onclick = async () => {
+              if (!confirm(`移除「${p.name}」的權限？\n僅該成員失效，其他成員不受影響。其手機下次連線時，App 內的公司資料會自動清除。`)) return
+              try {
+                await postSync({ action: 'remove', id: p.id })
+              } catch (e) {
+                return toast(e.message)
+              }
+              toast(`已移除「${p.name}」`)
+              closeM()
+              load(true)
+            }
+          },
+        )
+      }
+      let peopleNow = []
+      const load = async (force) => {
         let people
         try {
           people = (await postSync({ action: 'members' })).people
@@ -7917,50 +7973,27 @@ function shareSheet() {
           list.innerHTML = `<div class="row muted">${esc(e.message)}</div>`
           return
         }
+        // 名單沒變就不重畫（自動更新時不要打斷操作）
+        const sig = JSON.stringify(people)
+        if (!force && sig === load.sig) return
+        load.sig = sig
+        peopleNow = people
         list.innerHTML = people.map(personRow).join('')
         list.querySelector('[data-rename-me]')?.addEventListener('click', () => {
           close()
           nameSheet('owner', '你的名字？', '盤點紀錄會顯示盤點人。')
         })
-        list.querySelectorAll('select[data-member]').forEach((sel) =>
-          sel.addEventListener('change', async () => {
-            const { member: id, name, role } = sel.dataset
-            const v = sel.value
-            sel.value = role // 先還原，成功才更新
-            try {
-              if (['manager', 'editor', 'viewer'].includes(v)) {
-                await postSync({ action: 'setRole', id, role: v })
-                toast(`「${name}」改成${ROLE_LABEL[v]}，下次同步就生效`)
-              } else if (v === 'rename') {
-                close()
-                return nameSheet(id, `改「${name}」的名字`, '')
-              } else if (v === 'reissue') {
-                if (!confirm(`幫「${name}」重新產生連結碼？\n舊連結碼立即失效（舊手機的資料會在下次連線時清除）。`)) return
-                const key = newSyncKey()
-                await postSync({ action: 'reissue', id, newKey: key })
-                close()
-                return linkSheet(name, role, `${ls.get(LS.sheet)}#k=${key}`, appUrl)
-              } else if (v === 'remove') {
-                if (!confirm(`移除「${name}」的權限？\n僅該成員失效，其他成員不受影響。其手機下次連線時，App 內的公司資料會自動清除。`)) return
-                await postSync({ action: 'remove', id })
-                toast(`已移除「${name}」`)
-              }
-              load()
-            } catch (e) {
-              toast(e.message)
-            }
-          }),
-        )
+        list.querySelectorAll('[data-member-open]').forEach((b) => b.addEventListener('click', () => openMember(peopleNow.find((x) => x.id === b.dataset.memberOpen))))
       }
       // 加入申請（同事用店裡通行碼申請的）、店裡通行碼：管理的人在這裡核准、拒絕、換通行碼
-      const box = el.querySelector('#sh-join')
+      const pendBox = el.querySelector('#sh-pend')
+      const box = el.querySelector('#sh-code')
       const fmtCode = (c) => `${c.slice(0, 4)}-${c.slice(4)}`
-      const loadJoin = async () => {
+      const loadJoin = async (force) => {
         let r
         try {
           r = await postSync({ action: 'joinInfo' })
         } catch {
-          box.innerHTML = ''
           return
         }
         // 舊版雲端程式碼不認得這個動作：回覆裡沒有 code
@@ -7971,8 +8004,11 @@ function shareSheet() {
         const pendWas = ls.get(LS.pend)
         ls.set(LS.pend, String(r.pending.length))
         if (pendWas !== ls.get(LS.pend) && ['home', 'settings'].includes(state.view)) render()
-        box.innerHTML = `
-          ${
+        // 沒變就不重畫（每 8 秒自動更新一次，不要打斷正在選的權限、正在打的字）
+        const sig = JSON.stringify([r.code, r.pending, r.allow, r.googleClientId, r.ownerEmail])
+        if (!force && sig === loadJoin.sig) return
+        loadJoin.sig = sig
+        pendBox.innerHTML = `${
             r.pending.length
               ? `<p class="section-title">加入申請（${r.pending.length}）</p>
                  <div class="group">${r.pending
@@ -7983,8 +8019,8 @@ function shareSheet() {
                    )
                    .join('')}</div>`
               : ''
-          }
-          <p class="section-title">店裡通行碼</p>
+          }`
+        box.innerHTML = `<p class="section-title">店裡通行碼</p>
           <div class="group">${
             r.code
               ? `<div class="row"><span class="grow"><span class="join-code">${fmtCode(r.code)}</span><br><span class="meta">成員填寫名稱與此通行碼申請，經你核准後生效</span></span></div>
@@ -8000,10 +8036,10 @@ function shareSheet() {
           } catch (e) {
             toast(e.message)
           }
-          loadJoin()
-          load()
+          loadJoin(true)
+          load(true)
         }
-        box.querySelectorAll('[data-req]').forEach((row) => {
+        pendBox.querySelectorAll('[data-req]').forEach((row) => {
           const id = row.dataset.req
           const name = row.dataset.name
           const lockRow = () => row.querySelectorAll('button,select').forEach((b) => (b.disabled = true))
@@ -8049,8 +8085,14 @@ function shareSheet() {
           act(() => postSync({ action: 'joinCodeSet', mode: 'off' }), '已關閉通行碼')
         })
       }
-      loadJoin()
-      load()
+      loadJoin(true)
+      load(true)
+      // 開著的時候每 8 秒自動看一次：有人申請就直接出現，不用關掉再打開
+      const poll = setInterval(() => {
+        if (!el.isConnected) return clearInterval(poll)
+        loadJoin()
+        load()
+      }, 8000)
       el.querySelector('#sh-invite').onclick = async () => {
         const name = el.querySelector('#sh-name').value.trim()
         if (!name) return toast('請先填名字')
@@ -9992,5 +10034,9 @@ keepRestore().then((back) => {
 })
 // 新手機：問雲端有沒有開 Google 登入（有才出現「用 Google 帳號加入」）
 if (freshPhone()) loadGoogleId()
+// 管理的人：App 開著時每 15 秒看一次有沒有新的加入申請（有就跳提示、首頁出現卡片）
+setInterval(() => {
+  if (document.visibilityState === 'visible' && syncReady() && canManage() && !joinPending() && !syncing && ['home', 'settings'].includes(state.view)) postSync({ action: 'hello' }).catch(() => {})
+}, 15000)
 // 打開 App：有開同步就先跟大家對一次
 if (syncReady()) setTimeout(() => syncNow().catch(() => {}), 1200)

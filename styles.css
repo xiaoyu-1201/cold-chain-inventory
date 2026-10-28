@@ -2166,7 +2166,8 @@ a.row {
     bottom: 32px;
   }
   /* 首頁右上的設定：側邊欄已經有了 */
-  body[data-view='home'] .nav [data-go='settings'] {
+  body[data-view='home'] .nav [data-go='settings'],
+  body[data-view='home'] .title-actions [data-go='settings'] {
     display: none;
   }
   /* 跳出的面板：畫面中間的視窗（不是從底部滑上來） */
@@ -5158,4 +5159,20 @@ body::before {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* 4.12.3 標題列右邊：同步膠囊＋設定；成員視窗的權限選項 */
+.title-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+.mem-roles {
+  margin: 2px 0 6px;
+}
+.row.person > .role-text {
+  margin-right: 4px;
+}
+.chip[aria-pressed='true'] {
+  box-shadow: none;
 }
