@@ -4942,12 +4942,6 @@ html.no-glass {
   margin: 4px 2px 0;
   text-align: center;
 }
-.join-more {
-  margin-top: 6px;
-}
-.join-more .footnote {
-  text-align: left;
-}
 /* 管理的人：通行碼、加入申請 */
 .join-code {
   display: inline-block;
@@ -5006,4 +5000,27 @@ html.no-glass {
 }
 .sheet .row .title {
   overflow-wrap: anywhere;
+}
+/* 新手機的入口：只放一張卡、置中，不留空的右欄 */
+.home-grid.fresh {
+  display: block;
+  max-width: 520px;
+  margin: 0 auto;
+}
+.home-grid.fresh .home-side {
+  display: none;
+}
+.join-paste {
+  align-self: center;
+  margin-top: 2px;
+}
+/* 上方標題列、點貨進度列：捲下去不要模糊（以前是毛玻璃，內容從後面透出來會糊成一片）→ 實心底色 */
+html.is-scrolled .nav,
+.pk-progress {
+  background: var(--bg);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+main.app:has(.home-grid.fresh) .large-title {
+  justify-content: center;
 }
