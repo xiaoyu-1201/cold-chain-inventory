@@ -4969,7 +4969,7 @@ html.no-glass {
   flex-basis: 100%;
   align-items: center;
   gap: 8px;
-  padding-left: 52px;
+  padding-left: 48px;
 }
 .join-req-act .role-select {
   flex: 1;
@@ -5000,6 +5000,10 @@ html.no-glass {
   height: 1px;
   background: var(--tint-soft);
 }
-.join-note {
-  text-wrap: balance;
+/* 共用設定視窗裡的輸入框要看得出是框（群組卡是白底）；長信箱在任何位置斷行 */
+.join-code-act .field {
+  background: var(--bg);
+}
+.sheet .row .title {
+  overflow-wrap: anywhere;
 }
