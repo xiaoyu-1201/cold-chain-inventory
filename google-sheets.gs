@@ -19,7 +19,7 @@
  * - 盤點紀錄（含照片）、品項庫、儲位、樣品照存在你自己的 Google 雲端硬碟「拍照盤點同步資料（不要刪）」資料夾。
  * - 權限像 Google 雲端硬碟的「共用」：擁有者（第一台）、管理員（可以邀請／移除人）、編輯者（可以盤點、修改）、檢視者（只能看）。
  * - 每個人一組自己的連結碼（只存雜湊值）；有人離職，管理員在 App 按「移除權限」，只有他失效，其他人不用改；被移除的裝置下次連線會自動清除資料。
- * - 擁有者的手機不見了：Apps Script 左邊「專案設定」→ 最下面「指令碼屬性」→ 刪掉 SYNC_KEY，再從 App 重新開啟同步（其他人的權限會保留）。
+ * - 擁有者的手機不見了：Apps Script 左邊「專案設定」→ 最下面「指令碼屬性」→ 把 SYNC_KEY 的值複製起來（不要刪掉它），貼到 App 新手機的「貼上你備份的連結」欄，就接回來了。
  *
  * 共用 AI 金鑰：擁有者在 App「設定 → AI → 放到雲端」→ 金鑰存在這裡的指令碼屬性 CLAUDE_KEY。
  * 同事拍照時，請求送到這裡，由這裡拿金鑰去問 Claude，同事的手機不會有金鑰；移除權限的人就不能再用。
@@ -27,6 +27,15 @@
  * 編輯者不能改盲盤／複盤規則、不能匯入正航產品表、不能一次刪光盤點紀錄（雲端也擋）。
  * 更新方法：整段重新貼上 → 存檔 →「部署」→「管理部署作業」→ 鉛筆 → 版本選「新版本」→ 部署（網址不會變）。
  *
+ * 4.11：用 Google 登入（OpenID Connect）：擁有者在 App 設定貼上「Google 登入用的 Client ID」（指令碼屬性 GOOGLE_CLIENT_ID，不是密碼）。
+ * - 同事按「用 Google 登入」→ 驗證過的信箱在「預先登記」名單（GOOGLE_ALLOW）就直接加入；不在就排進待核准（核准畫面看得到信箱）。
+ * - 登入資料綁在「這支手機自己產生的連結碼」：Google 的 nonce ＝ SHA-256(連結碼)，偷到登入資料也不能拿去註冊別支手機。
+ * - 擁有者綁定自己的 Google（OWNER_EMAIL）後，換手機用 Google 登入就能接回來（那支手機的連結碼記在 OWNER_HS）。
+ * - 一個人可以有好幾支手機（成員的 hs，最多 5 支）；被移除時全部一起失效。
+ * 4.10：店裡通行碼＋待核准（同事沒有 LINE、用 Android、擁有者請假時也能加入）：
+ * - 擁有者／管理員在 App 設一組通行碼（指令碼屬性 JOIN_CODE）；同事在 App 填名字＋通行碼 → 進「待核准」（JOIN_PENDING，最多 20 人、7 天過期）；
+ *   管理員在 App 按「核准」才會變成共用名單裡的人（預設檢視者）。猜錯 10 次，全部暫停 10 分鐘（JOIN_FAILS）。
+ * - 申請的人自己在手機產生連結碼，雲端只存雜湊值；密碼不用傳給任何人。
  * 4.9：拿掉 Gemini。舊的共用 Gemini 金鑰（指令碼屬性 GEMINI_KEY）和它的用量紀錄、次數上限（AI_USAGE、AI_DAILY_LIMIT），部署新版本後第一次有人連線就自動刪掉。
  *
  * 4.7.6：同步變快——很多筆資料、照片「同時」讀寫（Drive API），不再一筆一筆來；
@@ -36,7 +45,7 @@
  */
 const RAW = '盤點紀錄'
 const HEAD = ['盤點日期', '時間', '位置', '品名', '品牌', '型號', '尺寸／規格', '數量', '照片框數', '來源', '盤點ID', '盤點人']
-const SYNC_ACTIONS = ['push', 'pull', 'photos', 'members', 'invite', 'remove', 'setRole', 'rename', 'reissue']
+const SYNC_ACTIONS = ['push', 'pull', 'photos', 'members', 'invite', 'remove', 'setRole', 'rename', 'reissue', 'joinInfo', 'joinCodeSet', 'joinApprove', 'joinReject', 'googleAllow', 'googleUnallow', 'googleSetup']
 const SYNC_VER = 3 // 同步格式版本：2＝照片分開存；3＝同時讀寫（變快，格式跟 2 一樣）
 const isPhotoKey = function (k) {
   return String(k).indexOf('photo:') === 0
@@ -55,24 +64,73 @@ function doPost(e) {
       delete P[k]
     }
   // 還沒開啟同步：只有使用者在 App 按「開啟同步」（hello）才能設定擁有者；背景同步不能設定，也讀不到資料
-  if (!P.SYNC_KEY && data.action === 'hello' && data.key && String(data.key).length >= 16) {
+  // 設定擁有者（第一台裝置）：一定要 init:true（只有 App 的「開啟同步」會帶）。曾經設過擁有者（SYNC_EVER）之後，要有人在 Apps Script
+  // 親手加指令碼屬性 ALLOW_REINIT＝1 才能重來。以前「沒有 SYNC_KEY 時，任何人的 hello 都會變成擁有者」：網址放進公開的 App 之後太危險，
+  // 而且等核准的手機每 40 秒就會自己打一次 hello。
+  if (P.SYNC_KEY && !P.SYNC_EVER) {
+    props.setProperty('SYNC_EVER', '1')
+    P.SYNC_EVER = '1'
+  }
+  if (!P.SYNC_KEY && data.action === 'hello' && data.init === true && /^[\w-]{16,64}$/.test(String(data.key || '')) && (!P.SYNC_EVER || P.ALLOW_REINIT === '1')) {
     props.setProperty('SYNC_KEY', String(data.key))
+    props.setProperty('SYNC_EVER', '1')
+    props.deleteProperty('ALLOW_REINIT')
     P.SYNC_KEY = String(data.key)
+    P.SYNC_EVER = '1'
+    delete P.ALLOW_REINIT
   }
   const syncOn = !!P.SYNC_KEY
+  // 同事用店裡通行碼申請加入：不用連結碼（他還沒有），所以放在檢查連結碼之前
+  if (data.action === 'joinRequest') return json(syncOn ? joinRequest(data, props, P) : { ok: false, error: '還沒開啟同步：請先由擁有者在第一台裝置開啟' })
+  // 用 Google 登入（不用連結碼）；googleConfig 只回「Client ID」（公開資訊，App 靠它決定要不要顯示「用 Google 登入」）
+  if (data.action === 'googleConfig') return json({ ok: true, clientId: P.GOOGLE_CLIENT_ID || '' })
+  if (data.action === 'joinGoogle') return json(syncOn ? joinGoogle(data, props) : { ok: false, error: '還沒開啟同步：請先由擁有者在第一台裝置開啟' })
   const who = syncOn ? whoIs(P, data.key) : null
   if (syncOn && !who) {
+    // 申請了、還沒被核准：告訴 App「等一下」，不要當成連結碼錯誤；取消申請（joinWithdraw）就把那一筆拿掉
+    const hk = sha(data.key || '')
+    if (
+      pendingList(P.JOIN_PENDING).some(function (x) {
+        return x.h === hk
+      })
+    ) {
+      if (data.action === 'joinWithdraw') {
+        const lock = LockService.getScriptLock()
+        lock.waitLock(20000)
+        try {
+          props.setProperty(
+            'JOIN_PENDING',
+            JSON.stringify(
+              pendingList(props.getProperty('JOIN_PENDING')).filter(function (x) {
+                return x.h !== hk
+              }),
+            ),
+          )
+        } finally {
+          lock.releaseLock()
+        }
+        return json({ ok: true })
+      }
+      return json({ ok: false, pending: true, error: '已送出申請，等管理員核准後就能用' })
+    }
     const revoked = JSON.parse(P.SYNC_REVOKED || '[]').indexOf(sha(data.key || '')) >= 0
     return json({ ok: false, revoked: revoked, error: revoked ? '這台已經被移除權限，不能再同步' : '連結碼不對或已經失效：請找管理員要一個新的連結碼' })
   }
+  if (!syncOn && P.SYNC_EVER) return json({ ok: false, error: '雲端的擁有者連結碼（指令碼屬性 SYNC_KEY）不見了：請擁有者把它補回去；真的要重來，在指令碼屬性加 ALLOW_REINIT＝1，再從 App 按「第一次設定」' })
   if (!syncOn && (data.action === 'hello' || SYNC_ACTIONS.indexOf(data.action) >= 0)) return json({ ok: false, error: '還沒開啟同步：請在第一台裝置按「開啟多人同步」' })
   if (who) touchSeen(props, P, who)
+  if (who && data.action === 'bindGoogle') return json(bindGoogle(data, props, who))
   // 搬家（例如從個人帳號搬到公司帳號）：只有擁有者能做；搬完後，舊的位置會告訴每台 App 新網址，大家自動跟過去
-  if (who && who.role === 'owner' && data.action === 'exportMembers') return json({ ok: true, members: membersOf(P), revokedHashes: JSON.parse(P.SYNC_REVOKED || '[]'), ownerName: P.SYNC_OWNER_NAME || '' })
+  if (who && who.role === 'owner' && data.action === 'exportMembers') return json({ ok: true, members: membersOf(P), revokedHashes: JSON.parse(P.SYNC_REVOKED || '[]'), ownerName: P.SYNC_OWNER_NAME || '', extra: { JOIN_CODE: P.JOIN_CODE || '', GOOGLE_CLIENT_ID: P.GOOGLE_CLIENT_ID || '', GOOGLE_ALLOW: P.GOOGLE_ALLOW || '', OWNER_EMAIL: P.OWNER_EMAIL || '', OWNER_HS: P.OWNER_HS || '' } })
   if (who && who.role === 'owner' && data.action === 'importMembers') {
     props.setProperty('SYNC_MEMBERS', JSON.stringify(data.members || []))
     props.setProperty('SYNC_REVOKED', JSON.stringify(data.revokedHashes || []))
     if (data.ownerName) props.setProperty('SYNC_OWNER_NAME', String(data.ownerName))
+    // 通行碼、Google 登入的設定也一起搬（只收這幾個、而且都是字串）
+    ;['JOIN_CODE', 'GOOGLE_CLIENT_ID', 'GOOGLE_ALLOW', 'OWNER_EMAIL', 'OWNER_HS'].forEach(function (k) {
+      const v = data.extra && data.extra[k]
+      if (typeof v === 'string' && v && v.length < 8000) props.setProperty(k, v)
+    })
     return json({ ok: true })
   }
   if (who && who.role === 'owner' && data.action === 'moveTo') {
@@ -84,6 +142,7 @@ function doPost(e) {
   const me = who ? { role: who.role, name: who.name, id: who.id } : {}
   const canEdit = !who || who.role !== 'viewer'
   const canManage = who && (who.role === 'owner' || who.role === 'manager')
+  const pend = canManage ? pendingList(P.JOIN_PENDING).length : 0
   // 名單（只有名字，給每台 App 顯示「誰盤的」、選盤點人；名字只有擁有者／管理員能改）
   const roster = who
     ? [{ id: 'owner', name: P.SYNC_OWNER_NAME || '擁有者' }].concat(
@@ -98,23 +157,23 @@ function doPost(e) {
   // 4.9 只用 Claude：舊版 App 要放、要用 Gemini 金鑰的都擋掉（不然 Gemini 金鑰會被存成 CLAUDE_KEY）
   const oldApp = '這個 App 是舊版（還在用 Gemini）：請在 App「設定」最下面按「檢查更新」，更新後改用 Claude'
   if (who && data.action === 'aiKey') {
-    if (who.role !== 'owner') return json({ ok: false, aiClaude: aiClaude, me: me, error: '只有擁有者可以設定共用的 AI 金鑰' })
-    if (data.provider !== 'claude') return json({ ok: false, aiClaude: aiClaude, me: me, error: oldApp })
+    if (who.role !== 'owner') return json({ ok: false, aiClaude: aiClaude, pend: pend, me: me, error: '只有擁有者可以設定共用的 AI 金鑰' })
+    if (data.provider !== 'claude') return json({ ok: false, aiClaude: aiClaude, pend: pend, me: me, error: oldApp })
     if (data.aiKey) props.setProperty('CLAUDE_KEY', String(data.aiKey))
     else props.deleteProperty('CLAUDE_KEY')
     return json({ ok: true, aiClaude: !!data.aiKey, me: me })
   }
   if (who && data.action === 'ai') {
-    if (!canEdit) return json({ ok: false, viewer: true, aiClaude: aiClaude, me: me, error: '你是檢視者，只能看' })
-    if (data.provider !== 'claude') return json({ ok: false, status: 403, aiClaude: aiClaude, me: me, error: oldApp })
-    return json(Object.assign(claudeProxy(data, P, props, who), { aiClaude: aiClaude, me: me }))
+    if (!canEdit) return json({ ok: false, viewer: true, aiClaude: aiClaude, pend: pend, me: me, error: '你是檢視者，只能看' })
+    if (data.provider !== 'claude') return json({ ok: false, status: 403, aiClaude: aiClaude, pend: pend, me: me, error: oldApp })
+    return json(Object.assign(claudeProxy(data, P, props, who), { aiClaude: aiClaude, pend: pend, me: me }))
   }
   // ver 2：盤點的照片分開存（photo:盤點ID:照片ID），下載只拿資料，照片用 photos 另外要；App 看到 ver 才改用新格式上傳
   // fast：有沒有用到「同時讀寫」（4.7.6）；沒有的話，App 會教擁有者打開 Drive API
-  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, aiClaude: aiClaude, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster, fast: driveApiEnabled() })
-  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, aiClaude: aiClaude, me: me, roster: roster, fast: driveApiEnabled() }))
-  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, aiClaude: aiClaude, me: me }))
-  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, aiClaude: aiClaude, me: me }) : { ok: false, viewer: true, aiClaude: aiClaude, me: me, error: '你是檢視者，只能看' })
+  if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, aiClaude: aiClaude, pend: pend, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster, fast: driveApiEnabled() })
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, aiClaude: aiClaude, pend: pend, me: me, roster: roster, fast: driveApiEnabled() }))
+  if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, aiClaude: aiClaude, pend: pend, me: me }))
+  if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, aiClaude: aiClaude, pend: pend, me: me }) : { ok: false, viewer: true, aiClaude: aiClaude, pend: pend, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
   if (!canEdit) return json({ ok: false, viewer: true, error: '你是檢視者，只能看' })
   const lock = LockService.getScriptLock()
@@ -258,7 +317,7 @@ function aiCount(props, P, who, prop, limit) {
 
 /** App 的「測試連線」會呼叫這個 */
 function doGet() {
-  return json({ ok: true, app: '拍照盤點', sheet: SpreadsheetApp.getActiveSpreadsheet().getName() })
+  return json({ ok: true, app: '拍照盤點' })
 }
 
 function json(obj) {
@@ -274,16 +333,282 @@ function sha(text) {
     })
     .join('')
 }
+// ───────────── 店裡通行碼＋待核准 ─────────────
+const JOIN_MAX_PENDING = 20 // 等核准的人最多幾個（防止亂灌）
+const JOIN_PENDING_DAYS = 7 // 超過幾天沒人核准就過期
+const JOIN_MAX_FAILS = 10 // 10 分鐘內猜錯幾次就暫停
+const JOIN_FAIL_WINDOW = 10 * 60 * 1000
+const JOIN_LOCK_MS = 10 * 60 * 1000
+const JOIN_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' // 沒有容易看錯的 0／O、1／I／L
+/** 通行碼不分大小寫、不管中間有沒有空格或橫線 */
+function normCode(x) {
+  return String(x == null ? '' : x)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+}
+/** 8 個字的新通行碼：用 getUuid 的亂數，超出整除範圍的丟掉（不偏向前面幾個字母） */
+function newJoinCode() {
+  let out = ''
+  while (out.length < 8) {
+    const hex = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '')
+    for (let i = 0; i + 1 < hex.length && out.length < 8; i += 2) {
+      const n = parseInt(hex.substr(i, 2), 16)
+      if (n < 248) out += JOIN_ALPHABET.charAt(n % JOIN_ALPHABET.length)
+    }
+  }
+  return out
+}
+/** 別人填的名字：去掉開頭的 = + - @（寫進試算表會被當成公式），最長 30 字 */
+function cleanName(x) {
+  return String(x == null ? '' : x)
+    .trim()
+    .replace(/^[=+\-@\s]+/, '')
+    .slice(0, 30)
+}
+/** 還沒過期的待核准名單 */
+function pendingList(raw) {
+  const now = Date.now()
+  return JSON.parse(raw || '[]').filter(function (x) {
+    return now - x.at < JOIN_PENDING_DAYS * 86400000
+  })
+}
+// ───────────── 用 Google 登入 ─────────────
+const GOOGLE_ISS = ['https://accounts.google.com', 'accounts.google.com']
+const MAX_DEVICES = 5 // 一個人最多幾支手機
+/** JWT 的內容（只用來讀 nonce：簽章和有效期限已經由 Google 的 tokeninfo 檢查過） */
+function jwtPayload(idToken) {
+  return JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(String(idToken).split('.')[1])).getDataAsString())
+}
+/** 不用打 Google 就能看出不對的登入（格式、給誰的、過期、nonce 對不對）；沒問題回空字串 */
+function googleLocalCheck(idToken, newKey, clientId) {
+  if (!clientId) return '擁有者還沒開啟 Google 登入'
+  const BAD = 'Google 登入的資料不對，請再登入一次'
+  const tok = String(idToken || '')
+  if (tok.length > 4096 || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(tok)) return BAD
+  let p
+  try {
+    p = jwtPayload(tok)
+  } catch (e) {
+    return BAD
+  }
+  if (p.aud !== clientId) return '這個登入不是給這個 App 的'
+  if (!(Number(p.exp) * 1000 > Date.now())) return 'Google 登入已經過期，請再登入一次'
+  if (!p.nonce || p.nonce !== sha(newKey)) return '登入和這支手機對不起來，請再登入一次'
+  return ''
+}
+/**
+ * 驗證 Google 的 ID token：簽章、有效期限交給 Google 的 tokeninfo；這邊再檢查 aud（是不是給這個 App 的）、iss、信箱有沒有驗證過、
+ * nonce 是不是 SHA-256(這支手機自己產生的連結碼)（偷到登入資料也不能拿去註冊別支手機）。成功回 { email, name }，失敗回 { error }
+ */
+function googleVerify(idToken, newKey, clientId) {
+  if (!clientId) return { error: '擁有者還沒開啟 Google 登入' }
+  const tok = String(idToken || '')
+  if (tok.length > 4096 || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(tok)) return { error: 'Google 登入的資料不對，請再登入一次' }
+  let res
+  try {
+    res = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(tok), { muteHttpExceptions: true })
+  } catch (e) {
+    return { error: '連不到 Google，請等一下再試' }
+  }
+  if (res.getResponseCode() !== 200) return { error: 'Google 說這次登入無效或已經過期，請再登入一次' }
+  let t
+  let nonce
+  try {
+    t = JSON.parse(res.getContentText())
+    nonce = t.nonce || jwtPayload(tok).nonce
+  } catch (e) {
+    return { error: 'Google 登入的資料不對，請再登入一次' }
+  }
+  if (GOOGLE_ISS.indexOf(t.iss) < 0 || t.aud !== clientId) return { error: '這個登入不是給這個 App 的' }
+  if (!(Number(t.exp) * 1000 > Date.now())) return { error: 'Google 登入已經過期，請再登入一次' }
+  if (String(t.email_verified) !== 'true' || !t.email) return { error: '這個 Google 帳號的信箱還沒有驗證' }
+  if (!nonce || nonce !== sha(newKey)) return { error: '登入和這支手機對不起來，請再登入一次' }
+  const email = String(t.email).toLowerCase()
+  // 名字是別人控制的（Google 顯示名稱）：去掉開頭的公式符號，不然盤點人寫進試算表會被當成公式
+  return { email: email, name: cleanName(t.name) || cleanName(email.split('@')[0]) || 'Google 使用者' }
+}
+function validKey(k) {
+  const key = String(k || '')
+  return key.length >= 16 && key.length <= 64 && /^[\w-]+$/.test(key)
+}
+/** 這個人再多一支手機（最多 5 支，舊的先掉） */
+function addDevice(m, h) {
+  if (hasHash(m, h)) return
+  m.hs = [h].concat(m.hs || []).slice(0, MAX_DEVICES - 1)
+}
+/**
+ * 用 Google 登入加入（不用連結碼）：
+ * - 擁有者綁定過的信箱 → 這支手機成為擁有者的手機；已經是成員（綁過或核准過）→ 這支手機也算他的
+ * - 在預先登記名單 → 直接成為成員（權限照登記的）；都不是 → 排進待核准（管理員看得到信箱）
+ */
+function joinGoogle(data, props) {
+  // 這是公開的請求：驗證要打 Google（慢、算每日 UrlFetch 額度），所以放在鎖外面；先在本機擋掉明顯不對的；
+  // 打了 Google 還是失敗的次數太多（有人亂送）就暫停 10 分鐘，不然同步會被卡住、額度會被用光
+  if (!validKey(data.newKey)) return { ok: false, error: '登入的格式不對：請把 App 更新到最新版再試' }
+  const cache = CacheService.getScriptCache()
+  if (Number(cache.get('GFAIL') || 0) >= 30) return { ok: false, locked: true, error: 'Google 登入暫時停用（失敗太多次），請 10 分鐘後再試，或改用店裡通行碼' }
+  const pre = googleLocalCheck(data.idToken, data.newKey, props.getProperty('GOOGLE_CLIENT_ID'))
+  if (pre) return { ok: false, error: pre }
+  const v = googleVerify(data.idToken, data.newKey, props.getProperty('GOOGLE_CLIENT_ID'))
+  if (v.error) {
+    cache.put('GFAIL', String(Number(cache.get('GFAIL') || 0) + 1), 600)
+    return { ok: false, error: v.error }
+  }
+  const lock = LockService.getScriptLock()
+  lock.waitLock(20000)
+  try {
+    const P = props.getProperties()
+    // 搬家了：登入驗過才告訴他新網址
+    if (P.SYNC_MOVED) return { ok: false, moved: P.SYNC_MOVED, error: '資料已經搬到新的位置' }
+    const h = sha(data.newKey)
+    const now = Date.now()
+    if (P.OWNER_EMAIL && String(P.OWNER_EMAIL).toLowerCase() === v.email) {
+      const hs = JSON.parse(P.OWNER_HS || '[]')
+      if (hs.indexOf(h) < 0) props.setProperty('OWNER_HS', JSON.stringify([h].concat(hs).slice(0, MAX_DEVICES)))
+      return { ok: true, joined: true, role: 'owner' }
+    }
+    const list = membersOf(P)
+    const m = list.filter(function (x) {
+      return (x.email || '').toLowerCase() === v.email
+    })[0]
+    if (m) {
+      addDevice(m, h)
+      props.setProperty('SYNC_MEMBERS', JSON.stringify(list))
+      return { ok: true, joined: true, role: m.role }
+    }
+    const allow = JSON.parse(P.GOOGLE_ALLOW || '[]')
+    const a = allow.filter(function (x) {
+      return x.email === v.email
+    })[0]
+    if (a) {
+      list.push({ id: Utilities.getUuid(), name: a.name || v.name, role: a.role, h: h, email: v.email, at: now, seen: 0 })
+      props.setProperty('SYNC_MEMBERS', JSON.stringify(list))
+      props.setProperty(
+        'GOOGLE_ALLOW',
+        JSON.stringify(
+          allow.filter(function (x) {
+            return x.email !== v.email
+          }),
+        ),
+      )
+      return { ok: true, joined: true, role: a.role }
+    }
+    let pend = pendingList(P.JOIN_PENDING)
+    if (
+      pend.some(function (x) {
+        return x.h === h
+      })
+    )
+      return { ok: true, pending: true }
+    // 同一個信箱只留最新一筆（每次登入手機都會產生新的連結碼，不然一個帳號就能把 20 個名額塞滿）
+    pend = pend.filter(function (x) {
+      return (x.email || '') !== v.email
+    })
+    if (pend.length >= JOIN_MAX_PENDING) return { ok: false, error: '等核准的人太多了：請管理員先處理，再登入' }
+    pend.push({ id: Utilities.getUuid(), name: v.name, email: v.email, h: h, at: now })
+    props.setProperty('JOIN_PENDING', JSON.stringify(pend))
+    return { ok: true, pending: true }
+  } finally {
+    lock.releaseLock()
+  }
+}
+/** 已經加入的人綁定自己的 Google（擁有者綁了，之後換手機用 Google 登入就能接回來）：登入的 nonce 要等於這支手機現在的連結碼 */
+function bindGoogle(data, props, who) {
+  const lock = LockService.getScriptLock()
+  lock.waitLock(20000)
+  try {
+    const P = props.getProperties()
+    const v = googleVerify(data.idToken, data.key, P.GOOGLE_CLIENT_ID)
+    if (v.error) return { ok: false, error: v.error }
+    if (who.role === 'owner') {
+      props.setProperty('OWNER_EMAIL', v.email)
+      return { ok: true, email: v.email }
+    }
+    const list = membersOf(P)
+    const taken = list.some(function (x) {
+      return (x.email || '').toLowerCase() === v.email && x.id !== who.id
+    })
+    if ((P.OWNER_EMAIL || '').toLowerCase() === v.email || taken) return { ok: false, error: '這個 Google 帳號已經被別人綁定了' }
+    const m = list.filter(function (x) {
+      return x.id === who.id
+    })[0]
+    if (!m) return { ok: false, error: '找不到你（可能已經被移除）' }
+    m.email = v.email
+    props.setProperty('SYNC_MEMBERS', JSON.stringify(list))
+    return { ok: true, email: v.email }
+  } finally {
+    lock.releaseLock()
+  }
+}
+/** 同事申請加入：通行碼對、而且沒被暫停，才排進待核准；密碼（連結碼）是他自己的手機產生的，這裡只存雜湊值 */
+function joinRequest(data, props, P0) {
+  const LOCKED = { ok: false, locked: true, error: '通行碼猜錯太多次，暫時不能申請：請 10 分鐘後再試，或請管理員直接邀請你' }
+  const OFF = { ok: false, error: '店裡的通行碼還沒開啟：請找擁有者或管理員' }
+  // 這是公開的請求：通行碼沒開、或暫停中，先用 doPost 已經讀好的設定直接擋掉，不要為了它去搶全域鎖（不然有人一直送請求，會拖慢大家的同步）
+  if (!normCode(P0.JOIN_CODE)) return OFF
+  const f0 = JSON.parse(P0.JOIN_FAILS || '{}')
+  if (f0.until && Date.now() < f0.until) return LOCKED
+  const lock = LockService.getScriptLock()
+  lock.waitLock(20000)
+  try {
+    const P = props.getProperties()
+    const code = normCode(P.JOIN_CODE)
+    if (!code) return OFF
+    const now = Date.now()
+    const f = JSON.parse(P.JOIN_FAILS || '{}')
+    if (f.until && now < f.until) return LOCKED
+    if (normCode(data.code) !== code) {
+      const n = (f.t && now - f.t < JOIN_FAIL_WINDOW ? f.n || 0 : 0) + 1
+      props.setProperty('JOIN_FAILS', JSON.stringify(n >= JOIN_MAX_FAILS ? { n: 0, t: now, until: now + JOIN_LOCK_MS } : { n: n, t: now }))
+      return { ok: false, error: '通行碼不對' }
+    }
+    if (P.JOIN_FAILS) props.deleteProperty('JOIN_FAILS')
+    // 搬家了：通行碼對的人才告訴他新網址（網址不用白白給外人）
+    if (P.SYNC_MOVED) return { ok: false, moved: P.SYNC_MOVED, error: '資料已經搬到新的位置' }
+    const name = cleanName(data.name)
+    const key = String(data.newKey || '')
+    if (!name) return { ok: false, error: '請填名字' }
+    if (key.length < 16 || key.length > 64 || !/^[\w-]+$/.test(key)) return { ok: false, error: '申請的格式不對：請把 App 更新到最新版再試' }
+    const h = sha(key)
+    // 已經核准了（例如核准後又按了一次）：不用重新排隊
+    if (
+      membersOf(P).some(function (x) {
+        return hasHash(x, h)
+      })
+    )
+      return { ok: true, joined: true }
+    const pend = pendingList(P.JOIN_PENDING)
+    if (
+      pend.some(function (x) {
+        return x.h === h
+      })
+    )
+      return { ok: true, pending: true }
+    if (pend.length >= JOIN_MAX_PENDING) return { ok: false, error: '等核准的人太多了：請管理員先處理，再申請' }
+    pend.push({ id: Utilities.getUuid(), name: name, h: h, at: now })
+    props.setProperty('JOIN_PENDING', JSON.stringify(pend))
+    return { ok: true, pending: true }
+  } finally {
+    lock.releaseLock()
+  }
+}
+/** 這個人（成員）有沒有這支手機的連結碼雜湊：h＝最早那支、hs＝後來用 Google 登入的手機 */
+function hasHash(m, h) {
+  return m.h === h || (m.hs || []).indexOf(h) >= 0
+}
+function allHashes(m) {
+  return [m.h].concat(m.hs || [])
+}
 function membersOf(P) {
   return JSON.parse(P.SYNC_MEMBERS || '[]')
 }
 /** 這個連結碼是誰：擁有者（第一台）或共用名單裡的人 */
 function whoIs(P, key) {
   if (!key) return null
-  if (key === P.SYNC_KEY) return { id: 'owner', name: P.SYNC_OWNER_NAME || '擁有者', role: 'owner' }
   const h = sha(key)
+  if (key === P.SYNC_KEY || JSON.parse(P.OWNER_HS || '[]').indexOf(h) >= 0) return { id: 'owner', name: P.SYNC_OWNER_NAME || '擁有者', role: 'owner' }
   const m = membersOf(P).filter(function (x) {
-    return x.h === h
+    return hasHash(x, h)
   })[0]
   return m ? { id: m.id, name: m.name, role: m.role } : null
 }
@@ -325,28 +650,91 @@ function manage(data, props, P, who) {
         return x.id === id
       })[0]
     }
+    // 指令碼屬性一個值最多 9 KB：太大就不寫（回 false），由呼叫的地方告訴管理員先移除不用的人
     const save = function () {
-      props.setProperty('SYNC_MEMBERS', JSON.stringify(list))
+      const text = JSON.stringify(list)
+      if (encodeURIComponent(text).replace(/%[0-9A-F]{2}/g, 'x').length > 8500) return false
+      props.setProperty('SYNC_MEMBERS', text)
+      return true
     }
+    const FULL = { ok: false, error: '成員太多，雲端的設定放不下：請先移除不用的人' }
     const okRole = function (r) {
       return r === 'manager' || r === 'editor' || r === 'viewer'
     }
     if (data.action === 'members') {
       const people = [{ id: 'owner', name: P.SYNC_OWNER_NAME || '擁有者', role: 'owner', seen: Number(P.SYNC_OWNER_SEEN || 0) }].concat(
         list.map(function (m) {
-          return { id: m.id, name: m.name, role: m.role, at: m.at, seen: m.seen || 0 }
+          return { id: m.id, name: m.name, role: m.role, at: m.at, seen: m.seen || 0, email: m.email || '' }
         }),
       )
       return { ok: true, people: people }
+    }
+    if (data.action === 'joinInfo') {
+      return {
+        ok: true,
+        code: props.getProperty('JOIN_CODE') || '',
+        pending: pendingList(props.getProperty('JOIN_PENDING')).map(function (x) {
+          return { id: x.id, name: x.name, at: x.at, email: x.email || '' }
+        }),
+        allow: JSON.parse(props.getProperty('GOOGLE_ALLOW') || '[]'),
+        googleClientId: props.getProperty('GOOGLE_CLIENT_ID') || '',
+        ownerEmail: props.getProperty('OWNER_EMAIL') || '',
+      }
+    }
+    if (data.action === 'googleSetup') {
+      // 只有擁有者能設定 Google 登入；Client ID 不是密碼，但設錯大家就登入不了
+      if (who.role !== 'owner') return { ok: false, error: '只有擁有者可以設定 Google 登入' }
+      const cid = String(data.clientId || '').trim()
+      if (!cid) props.deleteProperty('GOOGLE_CLIENT_ID')
+      else if (!/^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(cid)) return { ok: false, error: '這不是 Google 登入用的 Client ID（長得像 123456-abc.apps.googleusercontent.com）' }
+      else props.setProperty('GOOGLE_CLIENT_ID', cid)
+      return { ok: true, googleClientId: cid }
+    }
+    if (data.action === 'googleAllow' || data.action === 'googleUnallow') {
+      const email = String(data.email || '').trim().toLowerCase()
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 100) return { ok: false, error: '信箱格式不對' }
+      const allow = JSON.parse(props.getProperty('GOOGLE_ALLOW') || '[]').filter(function (x) {
+        return x.email !== email
+      })
+      if (data.action === 'googleAllow') {
+        const role = okRole(data.role) ? data.role : 'viewer'
+        if (role === 'manager' && who.role !== 'owner') return { ok: false, error: '只有擁有者可以登記管理員' }
+        if (allow.length >= 50) return { ok: false, error: '預先登記最多 50 個信箱' }
+        allow.push({ email: email, name: cleanName(data.name), role: role, at: Date.now() })
+      }
+      props.setProperty('GOOGLE_ALLOW', JSON.stringify(allow))
+      return { ok: true, allow: allow }
+    }
+    if (data.action === 'joinCodeSet') {
+      if (data.mode === 'off') props.deleteProperty('JOIN_CODE')
+      else props.setProperty('JOIN_CODE', newJoinCode())
+      props.deleteProperty('JOIN_FAILS')
+      return { ok: true, code: props.getProperty('JOIN_CODE') || '' }
+    }
+    if (data.action === 'joinApprove' || data.action === 'joinReject') {
+      const pend = pendingList(props.getProperty('JOIN_PENDING'))
+      const i = pend.map(function (x) { return x.id }).indexOf(data.id)
+      if (i < 0) return { ok: false, error: '這筆申請不見了（可能已經被別人處理，或超過 7 天過期了）' }
+      if (data.action === 'joinApprove') {
+        const role = okRole(data.role) ? data.role : 'viewer'
+        if (role === 'manager' && who.role !== 'owner') return { ok: false, error: '只有擁有者可以核准成管理員' }
+        const p = pend[i]
+        list.push({ id: p.id, name: cleanName(data.name) || p.name, role: role, h: p.h, email: p.email || '', at: Date.now(), seen: 0 })
+        if (!save()) return FULL
+      }
+      pend.splice(i, 1)
+      props.setProperty('JOIN_PENDING', JSON.stringify(pend))
+      return { ok: true }
     }
     if (data.action === 'invite') {
       const name = String(data.name || '').trim().slice(0, 30)
       if (!name) return { ok: false, error: '請填名字' }
       if (!okRole(data.role)) return { ok: false, error: '權限不對' }
+      if (data.role === 'manager' && who.role !== 'owner') return { ok: false, error: '只有擁有者可以邀請管理員' }
       if (!data.newKey || String(data.newKey).length < 16) return { ok: false, error: '連結碼太短' }
       const id = Utilities.getUuid()
       list.push({ id: id, name: name, role: data.role, h: sha(data.newKey), at: Date.now(), seen: 0 })
-      save()
+      if (!save()) return FULL
       return { ok: true, id: id }
     }
     if (data.id === 'owner') {
@@ -361,18 +749,19 @@ function manage(data, props, P, who) {
     if (!m) return { ok: false, error: '找不到這個人（可能已經被移除）' }
     if (data.action === 'setRole') {
       if (!okRole(data.role)) return { ok: false, error: '權限不對' }
+      if ((data.role === 'manager' || m.role === 'manager') && who.role !== 'owner') return { ok: false, error: '只有擁有者可以新增或改管理員' }
       m.role = data.role
     } else if (data.action === 'rename') {
       m.name = String(data.name || '').trim().slice(0, 30) || m.name
     } else if (data.action === 'reissue' || data.action === 'remove') {
       // 舊的連結碼列入黑名單：那台下次連線會自動清除資料
-      const revoked = JSON.parse(props.getProperty('SYNC_REVOKED') || '[]')
-      revoked.push(m.h)
-      props.setProperty('SYNC_REVOKED', JSON.stringify(revoked.slice(-500)))
+      const revoked = JSON.parse(props.getProperty('SYNC_REVOKED') || '[]').concat(allHashes(m))
+      props.setProperty('SYNC_REVOKED', JSON.stringify(revoked.slice(-100)))
       if (data.action === 'remove') list.splice(list.indexOf(m), 1)
       else {
         if (!data.newKey || String(data.newKey).length < 16) return { ok: false, error: '連結碼太短' }
         m.h = sha(data.newKey)
+        m.hs = []
         m.seen = 0
       }
     }

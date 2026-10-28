@@ -9,6 +9,13 @@ import { makeXlsx } from './xlsx.js'
 import { decode, normalizeModel, looseKey, canon, modelKey, linksFor } from './rules.js'
 import { icon } from './icons.js'
 
+/**
+ * 公司雲端（Google 試算表的 Apps Script）的網址：內建之後，新手機不用再貼網址。
+ * 這個網址不是密碼，但任何人都看得到：雲端只有 joinRequest（要通行碼）、joinGoogle（要 Google 驗證）、googleConfig 三個動作不用連結碼，
+ * 而且申請了還要管理員核准；其他動作都要連結碼。連結碼、通行碼絕對不能寫在這裡（這個 repo 是公開的）。
+ * 搬到新的 Google 帳號後，舊位置會告訴已經加入的 App 新網址；新手機要等改這裡再更新。
+ */
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbwODgMsaacR_bB_M82dybPpEFwNgS8P3Q4xdhcrkfqPXoRgQmDarvF3i9Y0R174BYM6/exec'
 const LS = {
   // Claude 金鑰、擁有者有沒有把金鑰放在雲端（Apps Script）共用（'1'＝有）、用哪個模型（pinned＝自己在設定選的）
   claudeKey: 'inventory:claudeKey',
@@ -47,6 +54,15 @@ const LS = {
   serverFast: 'inventory:serverFast',
   // 雲端還是 4.8 以前的程式碼、裡面還放著 Gemini 金鑰（4.9：提醒擁有者更新，新程式碼會自動刪掉那把金鑰）
   serverGemini: 'inventory:serverGemini',
+  // 同事用店裡通行碼申請加入（4.10）：等核准中（名字、時間）；管理員看到幾個人在等；擁有者備份過連結了
+  joinReq: 'inventory:joinReq',
+  pend: 'inventory:pend',
+  backupDone: 'inventory:backupDone',
+  // 申請沒通過的說明（留著直到再申請）、Google 登入（4.11）：Client ID（公開資訊）、登入到一半的資料、綁定的信箱
+  joinNote: 'inventory:joinNote',
+  googleId: 'inventory:googleId',
+  gAuth: 'inventory:gAuth',
+  gEmail: 'inventory:gEmail',
   // 首頁「桌面上的 App 要再接一次」按過「不用了」（4.7.7，只在這台）
   moveHintOff: 'inventory:moveHintOff',
   // 電腦、平板的側邊選單收起來了沒
@@ -65,7 +81,7 @@ const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish
 /** 權限（跟 Google 雲端硬碟的「共用」一樣） */
 const ROLE_LABEL = { owner: '擁有者', manager: '管理員', editor: '編輯者', viewer: '檢視者' }
 const ROLE_DESC = { owner: '全部都可以；不能被移除', manager: '可以盤點、修改，也可以邀請、移除人', editor: '可以盤點、修改', viewer: '只能看（可以下載 Excel）' }
-const myRole = () => (ls.get(LS.syncKey) ? ls.get(LS.memberRole) || 'editor' : 'owner')
+const myRole = () => (ls.get(LS.syncKey) ? (ls.get(LS.joinReq) ? 'viewer' : ls.get(LS.memberRole) || 'editor') : 'owner')
 const canEdit = () => myRole() !== 'viewer'
 const canManage = () => ['owner', 'manager'].includes(myRole())
 /** 盲盤：盤點的人看不到帳面數、差異（擁有者、管理員看得到）。看得到帳面數，盤點就變成「對答案」，抓不到錯 */
@@ -90,7 +106,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.9.1（10/28・辨識中畫面改版）'
+const VERSION = '4.11.0（10/28・同事用通行碼或 Google 登入加入）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -145,6 +161,8 @@ const ls = {
     }
   },
 }
+// 請 iPhone／瀏覽器保留這份資料（空間不夠時不要先清掉）：連線設定、還沒傳上雲端的盤點都放在這裡
+navigator.storage?.persist?.().catch(() => {})
 // 4.9 拿掉 Gemini：這台存過的 Gemini 金鑰、模型、共用狀態、選哪一家，開啟時清掉（不用的金鑰留著有外流風險；使用者 10/19 同意）
 for (const k of ['inventory:apiKey', 'inventory:model', 'inventory:modelPinned', 'inventory:aiShared', 'inventory:aiProvider'])
   try {
@@ -2281,16 +2299,17 @@ async function viewHome() {
     <div class="home-grid"><div class="home-main">
     <div class="home-cards">
     ${moveCard()}
+    ${joinStatusCards()}
     ${
-      !canEdit()
+      joinPending()
+        ? ''
+        : !canEdit()
         ? `<div class="hint-card"><b>你是檢視者（只能看）</b>：可以看大家的盤點紀錄、品項庫，也可以下載 Excel；不能盤點或修改。需要盤點請找管理員改成「編輯者」。</div>`
         : hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">${icon('camera', 30)}</span><span class="grow"><b>新盤點</b><span class="meta">拍一格貨架，AI 幫你數<br>拍到 ${locTag(locations()[0]?.code || 'A-03', 'sm')} 會自動填位置</span></span>${chev}</button>`
         : syncReady()
           ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>還不能拍照盤點：AI 金鑰還沒放到雲端</b><p>到「設定 → AI」貼上金鑰，再按<span class="nb">「放到雲端」</span>，這台和同事就都能用。</p>' : '<b>還不能拍照盤點：擁有者還沒把 AI 金鑰放到雲端</b><p>請擁有者到「設定 → AI」按「放到雲端」，大家就能直接用，不用自己申請。<br>急著用：也可以到「設定」貼上自己的 AI 金鑰。</p>'}<button class="btn small" data-go="settings">去設定</button></div></div>`
-          : freshPhone()
-            ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'} <span class="badge new">新</span></b>${joinHow()}<p>自己是擁有者、第一次用：按<span class="nb">「去設定」</span>，貼上 <span class="nb">Claude 的 AI 金鑰</span>。</p><div class="row-actions"><button class="btn small" data-action="paste-invite">貼上邀請並加入</button><button class="btn small secondary" data-go="settings">去設定</button></div></div></div>`
-            : `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow"><b>先設定 AI，才能拍照盤點</b><p>到「設定」貼上 AI 金鑰<span class="nb">（只存在這台）</span>；或請擁有者把金鑰放到雲端共用。<br>收到同事的邀請：在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>，不用 Key。</p><div class="row-actions"><button class="btn small" data-go="settings">去設定</button><button class="btn small secondary" data-action="paste-invite">貼上邀請並加入</button></div></div></div>`
+          : joinCard()
     }
     </div>
     ${sessions.length || items.length ? homeStats(sessions, items) : ''}
@@ -2598,7 +2617,9 @@ const diagSection = () =>
     <p class="footnote">辨識一直失敗時按這個，把結果截圖傳給擁有者（管理這個 App 的人）。</p>`
     : ''
 /** 還沒設定任何同步、也沒有金鑰的新手機（大多是剛收到邀請的同事） */
-const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.claudeKey)
+const freshPhone = () => !syncReady()
+/** 以前只用「寫進試算表」、沒開多人同步的人：有自己貼過網址（不是內建的），設定頁要留著試算表那一區 */
+const legacySheet = () => !syncReady() && !!ls.get(LS.sheet) && ls.get(LS.sheet) !== DEFAULT_SHEET_URL
 /**
  * 4.7.7：在瀏覽器裡用、資料跟桌面 App 分開的（iPhone 的 Safari／Chrome、LINE 裡打開的）。
  * 使用者回報：在 Safari 早就連好，打開桌面 App 卻是全新的，大家一定都會這樣 → 「複製到桌面 App」
@@ -2607,11 +2628,7 @@ const freshPhone = () => !syncReady() && !ls.get(LS.sheet) && !ls.get(LS.claudeK
 const browserSeparate = () => !standalone() && (isIOS() || inLineApp())
 /** 這台的連線做成邀請連結（試算表＋自己的連結碼；擁有者的就是擁有者的）：貼到桌面 App 就接上同一個身分 */
 const moveLink = () => joinLinkOf(linkCode(), `${location.origin}${location.pathname}`)
-/** 新手機怎麼接上：邀請、或從 Safari 搬過來（在桌面 App 裡才講 Safari 那條） */
-const joinHow = () =>
-  standalone()
-    ? `<p>先複製，<span class="nb">再按「貼上邀請並加入」</span>（iPhone 會跳出<span class="nb">小小的「貼上」</span>，<span class="nb">再按一下它</span>）：</p><ol class="steps-list"><li>同事傳了邀請：在 LINE <span class="nb">長按邀請訊息</span>→<span class="nb">「複製」</span>。</li><li>在 Safari（或 Chrome）用過：回到瀏覽器裡的聖佳庫存，按<span class="nb">「複製到桌面 App」</span>（那邊要先開好同步）。</li></ol>`
-    : `<p>在 LINE <span class="nb">長按邀請訊息</span>→<span class="nb">「複製」</span>，<span class="nb">再按「貼上邀請並加入」</span>（iPhone 會跳出<span class="nb">小小的「貼上」</span>，<span class="nb">再按一下它</span>）。</p>`
+
 /** 首頁：在瀏覽器裡用的，提醒桌面 App 要再接一次（複製成功或按「不用了」就收起來；設定頁一直有「複製到桌面 App」） */
 function moveCard() {
   if (!syncReady() || !browserSeparate() || ls.get(LS.moveHintOff) === '1') return ''
@@ -2634,11 +2651,7 @@ async function viewSettings() {
     ${
       // 還沒設定任何同步的新手機：大多是被邀請的同事 →「貼上邀請並加入」放最前面（以前要往下捲很久）
       freshPhone()
-        ? `<div class="hint-card stack join-first"><div><b>${standalone() ? '接上大家的資料' : '同事傳了邀請給你？'}</b> <span class="badge new">新</span></div>${joinHow()}
-        <button class="btn" data-action="paste-invite">貼上邀請並加入</button>
-        <p class="footnote">讀不到的話：把邀請貼在下面，再按「加入」。</p>
-        <div class="row-actions"><input class="field" id="link-code" placeholder="貼上收到的邀請" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small secondary" data-action="sync-link">加入</button></div>
-        <p class="footnote">自己就是擁有者（管理這個 App 的人）：<span class="nb">不用填這裡</span>，往下設定 <span class="nb">AI 金鑰</span>、<span class="nb">Google 試算表</span>。</p></div>`
+        ? joinCard()
         : serverSlow() && myRole() === 'owner'
           ? `<div class="hint-card stack fast-hint"><div><b>同步可以快很多</b> <span class="badge new">新</span><br>把 Google 那邊的程式碼更新成新版，<span class="nb">同步上傳、下載</span>會快很多，<span class="nb">也會套用</span>共用 AI 的每日次數上限、點貨紀錄的保護。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
           : syncReady() && myRole() === 'owner' && ls.get(LS.serverGemini) === '1'
@@ -2688,7 +2701,7 @@ async function viewSettings() {
     ${myRole() === 'owner' ? diagSection() : ''}
     </div><div class="settings-col">
     ${
-      myRole() === 'owner'
+      myRole() === 'owner' && (!freshPhone() || legacySheet())
         ? `<p class="section-title">Google 試算表</p>
     <div class="stack">
       <input class="field" id="sheet-url" placeholder="貼上網頁應用程式網址（https://script.google.com/macros/s/…/exec）" value="${esc(ls.get(LS.sheet))}" autocomplete="off" spellcheck="false">
@@ -2709,9 +2722,11 @@ async function viewSettings() {
     </details>`
         : ''
     }
-    <p class="section-title">共用（跟 Google 雲端硬碟一樣）</p>
+    ${freshPhone() && !legacySheet() ? '' : '<p class="section-title">共用（跟 Google 雲端硬碟一樣）</p>'}
     ${
-      syncReady()
+      freshPhone() && !legacySheet()
+        ? ''
+        : syncReady()
         ? `${
             serverOld()
               ? `<div class="hint-card stack" style="margin-bottom:12px"><div><b>Google 那邊的程式碼要更新</b>（新版同步只拿資料、照片打開才抓，快很多）。請<b>擁有者</b>用電腦做一次，約 3 分鐘：${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
@@ -2731,23 +2746,12 @@ async function viewSettings() {
                 ? `<button class="row" data-action="move-to-app"><span class="grow"><span class="title" style="color:var(--tint)">複製到桌面 App <span class="badge new">新</span></span><br><span class="meta">桌面的「聖佳庫存」跟瀏覽器資料分開：複製這台的連線，到桌面 App 按<span class="nb">「貼上邀請並加入」</span>（只貼到自己的 App，不要傳給別人）</span></span>${chev}</button>`
                 : ''
             }
+            ${googleId() && !joinPending() ? `<button class="row" data-action="google-bind"><span class="grow"><span class="title" style="color:var(--tint)">綁定我的 Google 帳號 <span class="badge new">新</span></span><br><span class="meta">${ls.get(LS.gEmail) ? `已綁定 ${esc(ls.get(LS.gEmail))}；` : ''}換手機時用 Google 登入就能接回來</span></span>${chev}</button>` : ''}
+            ${myRole() === 'owner' ? `<button class="row" data-action="backup-link"><span class="grow"><span class="title" style="color:var(--tint)">備份我的連結 <span class="badge new">新</span></span><br><span class="meta">這支手機的資料被清掉時，貼回這個連結就能接回來（貼到自己的備忘錄，不要傳給別人）</span></span>${chev}</button>` : ''}
             <button class="row" data-action="full-pull" ${repairing ? 'disabled' : ''}><span class="grow"><span class="title" style="color:var(--tint)">${repairing ? '正在從雲端重新下載…' : '從雲端重新下載全部'}</span><br><span class="meta">這台跟別台不一樣、少了紀錄或照片時用；這台比較新的不會被蓋掉</span></span>${chev}</button>
             <button class="row" data-action="sync-leave"><span class="grow"><span class="title" style="color:var(--red)">這台退出並清除資料</span><br><span class="meta">交還手機、換手機時用；雲端的資料不會刪</span></span>${chev}</button>
           </div>`
-        : ls.get(LS.sheet)
-          ? '<button class="btn block" data-action="sync-start">開啟多人同步（我是擁有者）</button><p class="footnote">開啟後到「共用設定」邀請同事：每個人一組自己的連結碼，可以設「只能看」或「可以改」。</p>'
-          : `<div class="group"><div class="row muted"><span class="grow">擁有者：先完成上面的 Google 試算表連結，再回來開啟同步。<br>被邀請的人：${freshPhone() ? '用最上面的「貼上邀請並加入」' : '用下面的「我收到邀請了」'}。</span></div></div>`
-    }
-    ${
-      syncReady() || freshPhone()
-        ? ''
-        : `<details class="steps"><summary>我收到邀請了（被邀請的人用） <span class="badge new">新</span></summary>
-      <div class="stack join-first" style="margin-top:8px">
-        <p class="footnote">在 LINE 長按邀請訊息 →「複製」，<span class="nb">再按「貼上邀請並加入」</span>。</p>
-        <button class="btn small" data-action="paste-invite">貼上邀請並加入</button>
-        <div class="row-actions"><input class="field" id="link-code" placeholder="或貼在這裡" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small secondary" data-action="sync-link">加入</button></div>
-      </div>
-    </details>`
+        : ''
     }
     <p class="section-title">盤點規則</p>
     <div class="group">
@@ -6961,6 +6965,13 @@ async function postSync(body, opt = {}) {
     toast('資料搬到新的位置了，已自動跟過去')
     return postSync({ ...body, followed: true }, opt)
   }
+  // 送出申請後被拒絕或過期：雲端對這把連結碼回「不對」（不是被移除，不能清資料）→ 回到新手機，可以再申請
+  if (!data.ok && !data.pending && !data.revoked && ls.get(LS.joinReq) && /連結碼不對/.test(data.error || '')) {
+    clearJoin()
+    ls.set(LS.joinNote, '你上次的申請沒有通過（或超過 7 天過期了）。可以再申請一次，或請管理員直接邀請你。')
+    setTimeout(render, 0)
+    throw new SyncError('申請沒有通過（或已經過期）：可以再申請一次', { ...data, rejected: true })
+  }
   // 被移除權限：這台的公司資料自動清掉
   if (data.revoked === true && !data.ok) {
     await wipeLocal('這台已經被移除權限，App 裡的資料已清除')
@@ -6977,6 +6988,12 @@ async function postSync(body, opt = {}) {
     // 只有舊版雲端會回 ai；ai＝true 代表那邊還放著 Gemini 金鑰
     ls.set(LS.serverGemini, data.ai ? '1' : '')
     if (was !== `${ls.get(LS.aiSharedClaude)}|${ls.get(LS.serverGemini)}`) setTimeout(render, 0)
+  }
+  // 幾個人在等核准（管理的人才有；新版雲端每個回覆都帶 pend）
+  if ('pend' in data) {
+    const was = ls.get(LS.pend)
+    ls.set(LS.pend, String(data.pend || 0))
+    if (was !== ls.get(LS.pend) && ['home', 'settings'].includes(state.view)) setTimeout(render, 0)
   }
   // 權限隨時可能被管理員改：每次回覆都更新
   if (data.me?.role) {
@@ -7007,7 +7024,7 @@ async function postSync(body, opt = {}) {
 /** 清除這台的資料（退出同步、被移除權限時） */
 async function wipeLocal(msg) {
   clearTimeout(syncTimer)
-  for (const k of [LS.moveHintOff, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId, LS.aiSharedClaude, LS.claudeKey, LS.claudeModel, LS.claudePinned, LS.serverGemini]) ls.set(k, '')
+  for (const k of [LS.moveHintOff, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId, LS.aiSharedClaude, LS.claudeKey, LS.claudeModel, LS.claudePinned, LS.serverGemini, LS.joinReq, LS.pend, LS.backupDone, LS.joinNote, LS.gAuth, LS.gEmail]) ls.set(k, '')
   // 直接清本機（不留刪除紀錄，才不會把雲端的資料也刪掉）
   await idb.sessions.clear()
   await idb.items.clear()
@@ -7208,6 +7225,8 @@ async function syncNow(report = () => {}) {
   syncing = (async () => {
     state.syncState = 'syncing'
     onProgress('連線中…')
+    // 送出申請、還在等核准：先問一次，還沒核准就不上傳也不下載
+    if (ls.get(LS.joinReq) && !(await joinCheck())) return { pushed: 0, pulled: 0, changed: false }
     // 1. 上傳：還沒同步過的（檢視者只下載）
     const jobs = []
     const viewer = !canEdit()
@@ -7562,6 +7581,183 @@ const newSyncKey = () => {
   crypto.getRandomValues(a)
   return [...a].map((b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24)
 }
+// ───────────── 同事用「店裡通行碼」申請加入（4.10）─────────────
+/** 送出申請、還在等管理員核准（這台已經有自己的連結碼，只是雲端還沒認：每次同步都先問一次核准了沒） */
+const joinPending = () => syncReady() && !!ls.get(LS.joinReq)
+/** 申請沒通過、或取消：連結碼丟掉，回到「新手機」 */
+function clearJoin() {
+  ls.set(LS.syncKey, '')
+  ls.set(LS.joinReq, '')
+  ls.set(LS.memberRole, '')
+  if (ls.get(LS.sheet) === DEFAULT_SHEET_URL) ls.set(LS.sheet, '') // 內建的網址不用留著（留著會被當成自己設定過試算表）
+}
+/**
+ * 同事填名字＋店裡通行碼（或用 Google 登入）申請：連結碼由這支手機自己產生（雲端只存雜湊值，密碼不用傳給任何人）；
+ * 雲端把他排進「待核准」，管理員按核准才算數（預設只能看）。body＝要送的請求（joinRequest／joinGoogle）
+ */
+async function requestJoin(body, key, btn) {
+  if (joining) return
+  joining = true
+  const done = busyBtn(btn, '送出中…')
+  const before = ls.get(LS.sheet)
+  ls.set(LS.sheet, before || DEFAULT_SHEET_URL)
+  // 連結碼先存起來、先當成「等核准」：請求送出後斷線、或頁面剛好重新整理，雲端那邊已經有這筆，手機不能把連結碼弄丟（之後會自己問核准了沒）
+  ls.set(LS.syncKey, key)
+  ls.set(LS.joinReq, JSON.stringify({ name: body.name || '', at: Date.now() }))
+  try {
+    const r = await postSync({ ...body, newKey: key })
+    ls.set(LS.pulled, '0')
+    ls.set(LS.joinNote, '')
+    if (r.joined) {
+      ls.set(LS.joinReq, '')
+      toast('已經是成員了，資料下載中…')
+      syncNow().catch(() => {})
+    } else toast('已送出申請，等管理員核准')
+    render()
+  } catch (e) {
+    if (e.data?.network) {
+      toast('網路不穩，不確定有沒有送出：打開 App 時會自動確認')
+      render()
+    } else {
+      clearJoin()
+      ls.set(LS.sheet, before)
+      toast(e.message)
+    }
+  } finally {
+    joining = false
+    done()
+  }
+}
+/** 問雲端核准了沒：核准了（hello 成功）就清掉「等待中」、之後從頭下載；還沒就回 false；被拒絕、過期 postSync 會處理 */
+async function joinCheck() {
+  try {
+    await postSync({ action: 'hello' })
+  } catch (e) {
+    if (e.data?.pending) {
+      state.syncState = 'pending'
+      syncProgress('等管理員核准')
+      return false
+    }
+    throw e
+  }
+  ls.set(LS.joinReq, '')
+  ls.set(LS.pulled, '0')
+  toast('管理員已核准，資料下載中…')
+  setTimeout(render, 0)
+  return true
+}
+/** 新手機（還沒接上大家的資料）：同事填名字＋店裡通行碼；擁有者、收到邀請連結的人在下面的「貼上」 */
+function joinCard() {
+  return `<div class="join-card">
+    <h2 class="join-title">接上大家的資料 <span class="badge new">新</span></h2>
+    <p class="join-sub">第一次用這支手機，填一次就好。</p>
+    ${ls.get(LS.joinNote) ? `<p class="join-note" role="status">${esc(ls.get(LS.joinNote))}</p>` : ''}
+    ${googleId() ? `<button class="btn block secondary" data-action="google-join">用 Google 帳號加入</button><p class="join-or"><span>或用店裡通行碼</span></p>` : ''}
+    <label class="join-label" for="jq-name">你的名字</label>
+    <input class="field" id="jq-name" placeholder="例如 阿明" maxlength="30" autocomplete="name" enterkeyhint="next">
+    <label class="join-label" for="jq-code">店裡通行碼</label>
+    <input class="field join-code-in" id="jq-code" placeholder="8 個字，問老闆或管理員" maxlength="12" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+    <button class="btn block" data-action="join-request">申請加入</button>
+    <p class="footnote">送出後要等老闆或管理員核准；核准前只能看。<span class="nb">核准後這支手機會自動接上，</span><span class="nb">不用再做什麼。</span></p>
+    <details class="steps join-more"><summary>我是擁有者，或收到邀請連結</summary>
+      <div class="stack" style="margin-top:8px">
+        <p class="footnote"><b>擁有者換手機：</b>貼上你備份的連結（設定 →「備份我的連結」複製的）。沒有備份的話，到 Google 試算表 →「擴充功能」→「Apps Script」→ 左邊齒輪「專案設定」→ 最下面「指令碼屬性」，把 <b>SYNC_KEY</b> 的<b>值</b>複製起來貼在下面（<b>不要刪掉它</b>）。收到邀請連結的人也貼在這裡：</p>
+        <div class="row-actions"><input class="field" id="link-code" placeholder="貼上連結或 SYNC_KEY" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small secondary" data-action="sync-link">加入</button></div>
+        <button class="btn small" data-action="paste-invite">直接貼上並加入</button>
+        <p class="footnote"><b>全新的試算表第一次設定：</b>擁有者按下面這顆。已經設定過的，請不要按（會失敗）。</p>
+        <button class="btn small plain" data-action="sync-start">第一次設定（我是擁有者）</button>
+      </div>
+    </details>
+  </div>`
+}
+// ───────────── Google 登入（4.11）─────────────
+// 手動走 OpenID Connect 的 redirect（response_type=id_token）：不載入 Google 的外部 script（CSP 不用放寬）。
+// nonce＝SHA-256(這支手機自己產生的連結碼)：雲端驗到的登入，只能用在產生它的那支手機。
+const googleId = () => ls.get(LS.googleId)
+const sha256hex = async (t) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))].map((b) => b.toString(16).padStart(2, '0')).join('')
+/** 問雲端有沒有開 Google 登入（Client ID 是公開資訊）；新手機的「用 Google 帳號加入」靠它決定要不要出現 */
+async function loadGoogleId() {
+  try {
+    const res = await fetch(ls.get(LS.sheet) || DEFAULT_SHEET_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'googleConfig' }) })
+    const d = await res.json()
+    if (!d.ok || (d.clientId || '') === googleId()) return
+    ls.set(LS.googleId, d.clientId || '')
+    if (state.view === 'home' || state.view === 'settings') render()
+  } catch {
+    /* 沒網路：下次再問 */
+  }
+}
+/** 跳去 Google 登入；登入完會回到這個網址（#id_token=…），由 finishGoogle 接手。mode：join（新手機加入）、bind（綁定自己的帳號） */
+async function startGoogle(mode) {
+  const cid = googleId()
+  if (!cid) return toast('擁有者還沒開啟 Google 登入')
+  if (!crypto?.subtle) return toast('這個瀏覽器不能用 Google 登入')
+  if (inLineApp()) return toast(`Google 不讓在 LINE 裡登入：請用 ${isIOS() ? 'Safari' : 'Chrome'} 打開，或改用店裡通行碼`)
+  if (mode === 'bind' && myRole() === 'owner' && !confirm('綁定後，登入這個 Google 帳號的人在新手機上都會變成「擁有者」（可以管金鑰、搬家）。\n\n請用只有你自己知道密碼的 Google 帳號，不要用店裡共用的。要繼續嗎？')) return
+  const key = mode === 'bind' ? ls.get(LS.syncKey) : newSyncKey()
+  const st = newSyncKey()
+  ls.set(LS.gAuth, JSON.stringify({ mode, key, st, at: Date.now() }))
+  const q = new URLSearchParams({ client_id: cid, redirect_uri: location.origin + location.pathname.replace(/index\.html$/, ''), response_type: 'id_token', scope: 'openid email profile', nonce: await sha256hex(key), state: st, prompt: 'select_account' })
+  location.href = `https://accounts.google.com/o/oauth2/v2/auth?${q}`
+}
+/** 從 Google 登入回來（網址有 #id_token=…）：馬上把網址清乾淨，再依 mode 加入或綁定 */
+async function finishGoogle() {
+  const h = new URLSearchParams(location.hash.slice(1))
+  if (!h.has('id_token') && !h.has('error')) return
+  history.replaceState(null, '', location.pathname)
+  let a = null
+  try {
+    a = JSON.parse(ls.get(LS.gAuth) || 'null')
+  } catch {
+    a = null
+  }
+  ls.set(LS.gAuth, '')
+  if (!a || a.st !== h.get('state') || Date.now() - a.at > 15 * 60000) return toast('Google 登入沒有接回來：請再按一次；還是不行就改用店裡通行碼')
+  if (h.has('error')) return toast('Google 登入取消了')
+  const idToken = h.get('id_token')
+  if (a.mode === 'bind') {
+    try {
+      const r = await postSync({ action: 'bindGoogle', idToken })
+      if (!r.email) throw new Error('雲端程式碼是舊版，還不會綁定 Google：請擁有者更新 Apps Script')
+      ls.set(LS.gEmail, r.email)
+      toast(`已綁定 ${r.email}：換手機時用 Google 登入就能接回來`)
+    } catch (e) {
+      toast(e.message)
+    }
+    return render()
+  }
+  if (ls.get(LS.syncKey)) return toast('這台已經接上了，不用再登入')
+  go('home')
+  return requestJoin({ action: 'joinGoogle', idToken }, a.key, null)
+}
+/** 共用設定裡的「Google 登入」：擁有者設 Client ID、登記信箱（登記的人登入就直接加入，不用等核准） */
+function googleBox(r) {
+  if (!('allow' in r)) return '' // 雲端程式碼還沒有 Google 登入（4.10 以前）
+  const owner = myRole() === 'owner'
+  const g = r.googleClientId
+  const allow = r.allow || []
+  return `<p class="section-title">Google 登入</p>
+    <div class="group">
+      <div class="row"><span class="grow"><span class="title">${g ? '已開啟' : '還沒開啟'}</span><br><span class="meta">${g ? `同事可以用 Google 帳號申請；先登記的信箱登入後直接加入${r.ownerEmail ? `。擁有者綁定：${esc(r.ownerEmail)}` : ''}` : owner ? '要先在 Google Cloud 建一組 Client ID，貼在下面' : '請擁有者開啟'}</span></span></div>
+      ${owner ? `<div class="row-actions join-code-act"><input class="field" id="g-cid" placeholder="xxx.apps.googleusercontent.com" value="${esc(g)}" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small" data-g-save>儲存</button></div>` : ''}
+      ${allow.map((a) => `<div class="row"><span class="grow"><span class="title">${esc(a.email)}</span><br><span class="meta">${ROLE_LABEL[a.role]}・登入後直接加入</span></span><button class="btn small plain" data-g-del="${esc(a.email)}">移除</button></div>`).join('')}
+      ${g ? `<div class="row-actions join-code-act"><input class="field" id="g-mail" type="email" inputmode="email" placeholder="同事的 Gmail（先登記）" autocomplete="off" autocapitalize="none" spellcheck="false" style="flex:1;min-width:0"></div>
+      <div class="row-actions join-code-act"><select class="role-select" id="g-role" aria-label="登記的權限" style="flex:1;min-width:0"><option value="viewer">${ROLE_LABEL.viewer}</option><option value="editor">${ROLE_LABEL.editor}</option>${owner ? `<option value="manager">${ROLE_LABEL.manager}</option>` : ''}</select><button class="btn small" data-g-add>登記</button></div>` : ''}
+    </div>`
+}
+/** 首頁上面的幾張卡：等核准中（申請的人）、有人申請加入（管理的人）、擁有者還沒備份連結 */
+function joinStatusCards() {
+  if (joinPending()) {
+    const r = readJson(LS.joinReq, {})
+    return `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('cloud', 26)}</span><div class="grow"><b><span class="nb">已送出申請，</span><span class="nb">等管理員核准</span> <span class="badge new">新</span></b><p>${esc(r.name || '你')}，<span class="nb">核准後這支手機會自動接上，</span><span class="nb">不用再做什麼</span>（打開 App 時會檢查）。</p><div class="row-actions"><button class="btn small" data-action="join-check">重新檢查</button><button class="btn small plain" data-action="join-cancel">取消申請</button></div></div></div>`
+  }
+  const cards = []
+  const n = Number(ls.get(LS.pend, '0'))
+  if (canManage() && n > 0) cards.push(`<button class="sum-doubt tip" data-action="share-open"><span class="sum-dot" aria-hidden="true">!</span><span class="grow"><b>${n} 個人申請加入</b> <span class="badge new">新</span><br><span class="meta">按這裡核准或拒絕</span></span>${chev}</button>`)
+  if (myRole() === 'owner' && syncReady() && ls.get(LS.backupDone) !== '1')
+    cards.push(`<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('lock', 26)}</span><div class="grow"><b>備份你的連結 <span class="badge new">新</span></b><p>這支手機的資料如果被清掉，<span class="nb">貼回這個連結就能接回來。</span><span class="nb">複製後貼到自己的備忘錄，</span><span class="nb">不要傳給別人。</span></p><div class="row-actions"><button class="btn small" data-action="backup-link">複製我的連結</button><button class="btn small plain" data-action="backup-done">不用了</button></div></div></div>`)
+  return cards.join('')
+}
 /** 共用設定（像 Google 雲端硬碟的「共用」視窗）：新增使用者＋權限、名單、一般存取權 */
 function shareSheet() {
   const appUrl = `${location.origin}${location.pathname}`
@@ -7584,6 +7780,8 @@ function shareSheet() {
   }
   sheet(
     `<h2 class="sheet-title">共用「聖佳智慧庫存」</h2>
+     <div id="sh-join"></div>
+     <p class="section-title">直接邀請</p>
      <div class="form">
        <input class="field" id="sh-name" placeholder="新增使用者：名字（例如 阿明、辦公室電腦）" autocomplete="off">
        <div class="row-actions"><select class="field role-pick" id="sh-role" aria-label="權限"><option value="editor">編輯者（可以盤點、修改）</option><option value="viewer">檢視者（只能看）</option><option value="manager">管理員（也可以加人）</option></select><button class="btn" id="sh-invite">邀請</button></div>
@@ -7641,6 +7839,102 @@ function shareSheet() {
           }),
         )
       }
+      // 加入申請（同事用店裡通行碼申請的）、店裡通行碼：管理的人在這裡核准、拒絕、換通行碼
+      const box = el.querySelector('#sh-join')
+      const fmtCode = (c) => `${c.slice(0, 4)}-${c.slice(4)}`
+      const loadJoin = async () => {
+        let r
+        try {
+          r = await postSync({ action: 'joinInfo' })
+        } catch {
+          box.innerHTML = ''
+          return
+        }
+        // 舊版雲端程式碼不認得這個動作：回覆裡沒有 code
+        if (!('code' in r)) {
+          box.innerHTML = `<div class="hint-card" style="margin-bottom:12px"><b>雲端程式碼是舊版，還不會用通行碼</b>：請擁有者到「設定 → Google 試算表」複製程式碼、貼上、部署新版本。</div>`
+          return
+        }
+        ls.set(LS.pend, String(r.pending.length))
+        box.innerHTML = `
+          ${
+            r.pending.length
+              ? `<p class="section-title">加入申請（${r.pending.length}）<span class="badge new">新</span></p>
+                 <div class="group">${r.pending
+                   .map(
+                     (p) => `<div class="row person join-req" data-req="${esc(p.id)}" data-name="${esc(p.name)}">
+                       <span class="avatar" aria-hidden="true">${esc(p.name.slice(0, 1))}</span><span class="grow"><span class="title">${esc(p.name)}</span><br><span class="meta">${fmtTime(p.at)} 申請${p.email ? `・${esc(p.email)}` : ''}</span></span>
+                       <span class="join-req-act"><select class="role-select" aria-label="${esc(p.name)} 核准後的權限"><option value="viewer" selected>${ROLE_LABEL.viewer}</option><option value="editor">${ROLE_LABEL.editor}</option>${myRole() === 'owner' ? `<option value="manager">${ROLE_LABEL.manager}</option>` : ''}</select><button class="btn small" data-approve>核准</button><button class="btn small plain" data-reject>拒絕</button></span></div>`,
+                   )
+                   .join('')}</div>`
+              : ''
+          }
+          <p class="section-title">店裡通行碼</p>
+          <div class="group">${
+            r.code
+              ? `<div class="row"><span class="grow"><span class="join-code">${fmtCode(r.code)}</span><br><span class="meta">同事填名字和這組碼申請，你核准才算數</span></span></div>
+                 <div class="row-actions join-code-act"><button class="btn small" data-code-copy>複製</button><button class="btn small secondary" data-code-new>換新的</button><button class="btn small plain" data-code-off>關閉</button></div>`
+              : `<div class="row"><span class="grow"><span class="title">還沒開啟</span><br><span class="meta">開啟後，同事不用你傳任何東西就能申請加入</span></span><button class="btn small" data-code-new>開啟</button></div>`
+          }</div>
+          ${r.code ? '<p class="footnote">貼在後場，不要讓客人看到。猜錯 10 次會暫停 10 分鐘。換新的之後，舊的馬上失效（已經加入的人不受影響）。</p>' : ''}
+          ${googleBox(r)}`
+        const act = async (fn, okMsg) => {
+          try {
+            await fn()
+            if (okMsg) toast(okMsg)
+          } catch (e) {
+            toast(e.message)
+          }
+          loadJoin()
+          load()
+        }
+        box.querySelectorAll('[data-req]').forEach((row) => {
+          const id = row.dataset.req
+          const name = row.dataset.name
+          const lockRow = () => row.querySelectorAll('button,select').forEach((b) => (b.disabled = true))
+          row.querySelector('[data-approve]').onclick = () => {
+            const role = row.querySelector('select').value
+            lockRow()
+            act(() => postSync({ action: 'joinApprove', id, role }), `「${name}」已加入，權限：${ROLE_LABEL[role]}`)
+          }
+          row.querySelector('[data-reject]').onclick = () => {
+            if (!confirm(`拒絕「${name}」的申請？`)) return
+            lockRow()
+            act(() => postSync({ action: 'joinReject', id }), `已拒絕「${name}」`)
+          }
+        })
+        box.querySelector('[data-g-save]')?.addEventListener('click', () => {
+          const cid = box.querySelector('#g-cid').value.trim()
+          act(async () => {
+            const g = await postSync({ action: 'googleSetup', clientId: cid })
+            if (!('googleClientId' in g)) throw new Error('雲端程式碼是舊版，還不會用 Google 登入：請先更新 Apps Script')
+            ls.set(LS.googleId, cid)
+          }, cid ? 'Google 登入已開啟' : 'Google 登入已關閉')
+        })
+        box.querySelector('[data-g-add]')?.addEventListener('click', () => {
+          const email = box.querySelector('#g-mail').value.trim()
+          if (!email) return toast('請填同事的信箱')
+          act(() => postSync({ action: 'googleAllow', email, role: box.querySelector('#g-role').value }), `已登記 ${email}`)
+        })
+        box.querySelectorAll('[data-g-del]').forEach((b) => b.addEventListener('click', () => act(() => postSync({ action: 'googleUnallow', email: b.dataset.gDel }), '已移除登記')))
+        box.querySelector('[data-code-copy]')?.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(r.code)
+            toast('已複製通行碼')
+          } catch {
+            toast('請照上面的字抄給同事')
+          }
+        })
+        box.querySelector('[data-code-new]')?.addEventListener('click', () => {
+          if (r.code && !confirm('換新的通行碼？舊的馬上失效（已經加入的人不受影響）。')) return
+          act(() => postSync({ action: 'joinCodeSet', mode: 'new' }), '已換新的通行碼')
+        })
+        box.querySelector('[data-code-off]')?.addEventListener('click', () => {
+          if (!confirm('關閉通行碼？同事就不能再自己申請加入，要你直接邀請。')) return
+          act(() => postSync({ action: 'joinCodeSet', mode: 'off' }), '已關閉通行碼')
+        })
+      }
+      loadJoin()
       load()
       el.querySelector('#sh-invite').onclick = async () => {
         const name = el.querySelector('#sh-name').value.trim()
@@ -7691,7 +7985,7 @@ function linkSheet(name, role, code, appUrl) {
     `<h2 class="sheet-title">邀請「${esc(name)}」</h2>
      <p class="sheet-sub">${ROLE_LABEL[role]}：${ROLE_DESC[role]}</p>
      <textarea class="field invite-text" readonly rows="8" aria-label="邀請訊息">${esc(text)}</textarea>
-     <div class="row-actions" style="margin-top:10px">${navigator.share ? '<button class="btn" id="lk-share" style="flex:1">傳給他（LINE）</button>' : ''}<button class="btn ${navigator.share ? 'secondary' : ''}" id="lk-copy" style="flex:1">複製</button></div>
+     <div class="row-actions" style="margin-top:10px">${navigator.share ? '<button class="btn" id="lk-share" style="flex:1">分享給他</button>' : ''}<button class="btn ${navigator.share ? 'secondary' : ''}" id="lk-copy" style="flex:1">複製</button></div>
      <ol class="steps-list">
        <li>私訊給「${esc(name)}」（不要貼在群組）。</li>
        <li><b>iPhone、iPad：</b>點連結只會開 Safari，打不開桌面上的 App。請他長按訊息 →「複製」，<span class="nb">打開桌面上的</span><span class="nb">「聖佳庫存」</span>，按<span class="nb">「貼上邀請並加入」</span>。 <span class="badge new">新</span></li>
@@ -7771,11 +8065,11 @@ function moveSheet() {
           await syncNow()
           status('2／4 在新位置開啟同步…')
           ls.set(LS.sheet, newUrl)
-          await postSync({ action: 'hello' })
+          await postSync({ action: 'hello', init: true })
           ls.set(LS.sheet, oldUrl)
           const ex = await postSync({ action: 'exportMembers' })
           ls.set(LS.sheet, newUrl)
-          await postSync({ action: 'importMembers', members: ex.members, revokedHashes: ex.revokedHashes, ownerName: ex.ownerName })
+          await postSync({ action: 'importMembers', members: ex.members, revokedHashes: ex.revokedHashes, ownerName: ex.ownerName, extra: ex.extra })
           status('3／4 把全部資料傳到新位置（照片多會比較久）…')
           for (const store of Object.values(SYNC_STORES)) for (const v of await store.all()) await store.putRaw({ ...v, _syncT: undefined })
           ls.set(LS.settingsSyncT, '')
@@ -7806,6 +8100,7 @@ function moveSheet() {
 const syncLabel = () => {
   if (state.syncState === 'syncing') return state.syncMsg || '同步中…'
   if (state.syncState === 'error') return '同步沒成功'
+  if (joinPending()) return '等管理員核准'
   const t = Number(ls.get(LS.lastSync, '0'))
   return t ? `已同步 ${fmtTime(t)}` : '還沒同步'
 }
@@ -8823,12 +9118,16 @@ $app.addEventListener('click', async (e) => {
       return forceUpdate()
     // ── 多台裝置同步 ──
     case 'sync-start': {
+      const sheetBefore = ls.get(LS.sheet)
+      if (!sheetBefore) ls.set(LS.sheet, DEFAULT_SHEET_URL)
       ls.set(LS.syncKey, newSyncKey())
       try {
-        await postSync({ action: 'hello' })
+        await postSync({ action: 'hello', init: true })
       } catch (err) {
         ls.set(LS.syncKey, '')
-        return toast(err.message)
+        ls.set(LS.sheet, sheetBefore)
+        // 雲端已經有擁有者了：擁有者換手機要貼備份的連結（或 SYNC_KEY 的值）；同事請用通行碼
+        return toast(/連結碼不對/.test(err.message) ? '雲端已經有擁有者了：擁有者請貼上備份的連結；同事請用上面的通行碼申請' : err.message)
       }
       toast('已開啟同步，第一次上傳中…（照片多會比較久）')
       render()
@@ -8841,6 +9140,61 @@ $app.addEventListener('click', async (e) => {
     }
     case 'paste-invite':
       return pasteInvite()
+    case 'google-join':
+      return startGoogle('join')
+    case 'google-bind':
+      return startGoogle('bind')
+    case 'join-request': {
+      const name = document.getElementById('jq-name')?.value.trim()
+      const code = document.getElementById('jq-code')?.value.trim()
+      if (!name) return toast('請填你的名字')
+      if (!code) return toast('請填店裡的通行碼（問老闆或管理員）')
+      return requestJoin({ action: 'joinRequest', code, name }, newSyncKey(), t)
+    }
+    case 'join-check': {
+      const done = busyBtn(t, '檢查中…')
+      try {
+        if (await joinCheck()) syncNow().catch(() => {})
+        else toast('還在等管理員核准')
+      } catch (e) {
+        toast(e.message)
+      } finally {
+        done()
+        render()
+      }
+      return
+    }
+    case 'join-cancel':
+      if (!confirm('取消申請？之後要再申請一次。')) return
+      postSync({ action: 'joinWithdraw' }).catch(() => {}) // 通知雲端拿掉這筆（失敗也無妨，7 天會自己過期）；要在清掉連結碼之前送出
+      clearJoin()
+      return render()
+    case 'backup-link': {
+      if (!syncReady()) return toast('這台還沒接上雲端')
+      const link = linkCode()
+      const done = () => {
+        ls.set(LS.backupDone, '1')
+        toast('已複製：貼到自己的備忘錄存好，不要傳給別人')
+        render()
+      }
+      const manual = () =>
+        sheet(
+          `<h2 class="sheet-title">備份我的連結</h2><p class="sheet-sub">自動複製不了：長按下面的文字 →「全選」→「拷貝」，貼到自己的備忘錄。<b>這段只給你自己用，請不要傳給別人。</b></p><textarea class="field invite-text" readonly rows="4" aria-label="我的連結">${esc(link)}</textarea><button class="btn block" id="bk-ok" style="margin-top:12px">好</button>`,
+          (el, close) => {
+            el.querySelector('textarea').addEventListener('focus', (ev) => ev.target.setSelectionRange(0, 9999))
+            el.querySelector('#bk-ok').onclick = () => {
+              ls.set(LS.backupDone, '1')
+              close()
+              render()
+            }
+          },
+        )
+      if (!navigator.clipboard?.writeText) return manual()
+      return navigator.clipboard.writeText(link).then(done, manual)
+    }
+    case 'backup-done':
+      ls.set(LS.backupDone, '1')
+      return render()
     case 'move-to-app': {
       if (!syncReady()) return toast('這台還沒開啟多台同步，沒有連線可以複製')
       const link = moveLink()
@@ -8871,16 +9225,17 @@ $app.addEventListener('click', async (e) => {
       return render()
     case 'sync-link': {
       const raw = document.getElementById('link-code').value.trim()
-      const code = parseLinkCode(raw)
+      // 擁有者從 Apps Script 複製的 SYNC_KEY（只有密碼）：網址用內建的
+      const code = parseLinkCode(raw) || (/^[\w-]{16,64}$/.test(raw) ? { url: ls.get(LS.sheet) || DEFAULT_SHEET_URL, key: raw } : null)
       // 擁有者常把自己的試算表網址貼到這格（沒有 #k=…）：直接告訴他該按哪裡
       if (!code && /^https:\/\/script\.google\.com\/macros\/s\/[^#\s]+\/exec$/.test(raw)) {
         if (!ls.get(LS.sheet)) {
           ls.set(LS.sheet, raw)
           render()
         }
-        return toast('這是試算表網址（擁有者用），不是邀請：請按上面「開啟多人同步（我是擁有者）」。邀請是同事收到的，裡面會有 #join=…')
+        return toast('這是試算表網址，不是邀請：擁有者請貼備份的連結或 SYNC_KEY；同事請用通行碼申請')
       }
-      if (!raw) return toast('請先把收到的邀請貼在欄位裡')
+      if (!raw) return toast('請先把連結（或 SYNC_KEY）貼在欄位裡')
       if (!code) return toast(/#join=|#k=/.test(raw) ? '邀請不完整（可能只複製到一部分）：請在 LINE 長按邀請訊息 →「複製」，整則貼上' : '這不是邀請：請在 LINE 長按邀請訊息 →「複製」，整則貼上')
       // 跟「貼上邀請並加入」一樣：先看是不是已經加入、再加入，成功跳「加入好了」
       return joinSheet(code, { direct: true })
@@ -8914,7 +9269,7 @@ $app.addEventListener('click', async (e) => {
       if (syncing) return toast(`已經在同步了，請等一下（${state.syncMsg || '照片多會比較久'}）`)
       toast('同步中…')
       return syncNow((m) => toast(m))
-        .then((r) => toast(r.pushed || r.pulled ? `同步完成：上傳 ${r.pushed}、下載 ${r.pulled}` : '已經是最新的'))
+        .then((r) => toast(joinPending() ? '還在等管理員核准' : r.pushed || r.pulled ? `同步完成：上傳 ${r.pushed}、下載 ${r.pulled}` : '已經是最新的'))
         .catch((err) => toast(`同步沒成功：${err.message}`))
         .finally(() => ['home', 'settings'].includes(state.view) && render())
     case 'finish': {
@@ -9463,6 +9818,7 @@ const safeToReload = () =>
   ['home', 'items', 'lookup', 'settings', 'report', 'catalog', 'locations', 'quality', 'pick', 'pick-result'].includes(state.view) &&
   !photosAtRisk() &&
   !state.busy &&
+  !joining &&
   !state.pickBusyId &&
   !document.querySelector('.crop-wrap') &&
   !document.querySelector('.viewer.pv') && // 正在放大看照片
@@ -9538,5 +9894,9 @@ render()
   const code = location.hash.startsWith('#join=') ? parseLinkCode(location.hash) : null
   if (code) setTimeout(() => joinSheet(code), 300)
 }
+// 從 Google 登入回來（#id_token=…）
+finishGoogle()
+// 新手機：問雲端有沒有開 Google 登入（有才出現「用 Google 帳號加入」）
+if (freshPhone()) loadGoogleId()
 // 打開 App：有開同步就先跟大家對一次
 if (syncReady()) setTimeout(() => syncNow().catch(() => {}), 1200)
