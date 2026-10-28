@@ -5069,3 +5069,27 @@ html.is-scrolled .nav {
   background: transparent;
   box-shadow: none;
 }
+/* 4.11.6 底部懸浮列照 LINE：貼近螢幕底（壓進 Home 橫條那一帶）、矮一點，不浪費空間；列表最後留的空白也跟著少 */
+@media (max-width: 767px) {
+  :root {
+    --dock-b: max(8px, calc(var(--safe-b) - 16px));
+    --dock-h: 58px;
+  }
+  .tabbar {
+    bottom: var(--dock-b);
+    height: var(--dock-h);
+  }
+  .tabbar .tab-lens {
+    height: 50px;
+    margin-top: -25px;
+  }
+  .tab-new {
+    top: calc(50% - 21px);
+  }
+  .app {
+    padding-bottom: calc(var(--dock-b) + var(--dock-h) + 20px);
+  }
+  .toast {
+    bottom: calc(var(--dock-b) + var(--dock-h) + 14px);
+  }
+}
