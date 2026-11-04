@@ -22,6 +22,8 @@ const LS = {
   aiSharedClaude: 'inventory:aiSharedClaude',
   claudeModel: 'inventory:claudeModel',
   claudePinned: 'inventory:claudePinned',
+  // 辨識內容（4.13）：count＝只數數量（預設，快）、full＝完整（品名、品牌、規格、相似品比對）
+  aiMode: 'inventory:aiMode',
   catalog: 'inventory:catalog',
   sheet: 'inventory:sheetUrl',
   autoSync: 'inventory:autoSync',
@@ -106,7 +108,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.12.6（10/28・桌面 App 內容再往下 20px）'
+const VERSION = '4.13.0（11/04・只數數量模式：更快、拍照後先辨識）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -557,6 +559,8 @@ function friendly(status, msg = '') {
 function hasAi() {
   return !!ls.get(K().key) || aiViaSheet()
 }
+/** 只數數量（4.13，預設）：AI 只回框、大類、信心；不送樣品照和品項庫、不跑相似品比對 → 快 2～3 倍 */
+const countMode = () => ls.get(LS.aiMode, 'count') !== 'full'
 /** 擁有者有把 Claude 金鑰放在雲端共用（不管這台能不能用） */
 function aiSharedOn() {
   return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(K().shared) === '1'
@@ -843,10 +847,78 @@ const JSON_HINT = `
 {"objects":[{"label":"品名","brand":"品牌","model":"型號","spec":"尺寸／規格","box_2d":[ymin,xmin,ymax,xmax],"confidence":0.9,"odd":false,"odd_reason":"","item_no":""}],"note":"需要人工確認的地方","location":""}`
 
 /**
+ * 只數數量的回答格式（4.13）：先列有哪幾種，每個框只寫「座標＋第幾種＋信心」。
+ * 要寫的字是完整格式的三成左右（AI 一個字一個字寫，字少就快）。
+ */
+const COUNT_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    kinds: { type: 'ARRAY', items: { type: 'STRING' }, description: '照片裡有哪幾種商品（中文名稱，例如「三通」「乾燥過濾器」）' },
+    boxes: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'INTEGER' } }, description: '每一個商品一筆：[ymin, xmin, ymax, xmax, 第幾種（kinds 的索引，從 0 開始）, 信心 0～100]' },
+    note: { type: 'STRING', description: '看不清楚、可能數錯的地方；沒有就空字串' },
+    location: { type: 'STRING', description: '照片裡看得到儲位標籤（例如 A-01）就填代號；沒有就空字串' },
+  },
+  required: ['kinds', 'boxes', 'note'],
+}
+function countPrompt() {
+  return `你是冷凍空調材料行的盤點助手。任務：準確數出照片裡每一個商品，數量一定要對。
+規則：
+1. 每一個商品各給一個框；同一種有幾個就給幾個框，不要合併成一個。被擋住一半以上的也要算，信心給低一點。
+2. 同一個東西只給一個框，不要重複框。疊在一起、排在後面的，看得到一部分就要算。
+3. 貨架、標價牌、手、紙箱外的雜物、儲位標籤不算商品。
+4. kinds 列出照片裡有哪幾種商品；外觀明顯不同（大小、形狀、顏色、包裝）的分成不同種。名稱優先用下面「店內品項清單」的寫法（不用寫括號裡的說明）。
+5. boxes 每個商品一筆：[ymin, xmin, ymax, xmax, 第幾種, 信心]；座標是相對整張照片的 0～1000，第幾種是 kinds 的索引（從 0 開始），信心 0～100。
+6. 照片裡看得到儲位標籤（白底黑字的代號，例如 A-01、B-12）時，location 填標籤上的代號。
+7. 看不清楚、可能數錯的地方寫在 note；沒有就空字串。
+店內品項清單：
+${catalogLines().join('\n')}`
+}
+const COUNT_JSON_HINT = `
+只回 JSON，不要其他文字，格式：
+{"kinds":["品名"],"boxes":[[ymin,xmin,ymax,xmax,0,90]],"note":"","location":""}`
+
+/** 只數數量：送一次辨識，轉成跟完整模式一樣的框（品牌、型號、規格留白） */
+async function generateCount(model, image, simple, signal) {
+  const body = {
+    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: image } }, { text: countPrompt() + (simple ? COUNT_JSON_HINT : '') }] }],
+    generationConfig: simple ? { temperature: 0, responseMimeType: 'application/json' } : { temperature: 0, responseMimeType: 'application/json', responseSchema: COUNT_SCHEMA },
+  }
+  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, TIMEOUT.detect)
+  const cand = data?.candidates?.[0]
+  const text = cand?.content?.parts?.map((p) => p.text || '').join('') || ''
+  if (!text) throw new ApiError(cand?.finishReason === 'SAFETY' ? 'AI 無法分析這張照片，請改用其他照片。' : 'AI 未回傳結果，請再試一次。', 0, `empty response ${cand?.finishReason || ''}`)
+  let parsed
+  try {
+    parsed = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) // 簡化模式偶爾會在前後多包一層格式記號：只取大括號那段
+  } catch {
+    throw new ApiError('AI 回傳格式錯誤，請再試一次。', 0, `bad json: ${text.slice(0, 120)}`)
+  }
+  const kinds = (parsed.kinds || []).map((k) => cleanLabel(k))
+  const objects = (parsed.boxes || [])
+    .filter((b) => Array.isArray(b) && b.length >= 5 && kinds[Math.round(Number(b[4]))])
+    .map((b) => {
+      const c = Number(b[5])
+      return {
+        label: kinds[Math.round(Number(b[4]))],
+        brand: '',
+        model: '',
+        spec: '',
+        box: b.slice(0, 4).map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
+        // 信心照說明是 0～100；有時會回 0～1，兩種都認
+        confidence: Number.isFinite(c) ? Math.min(1, Math.max(0, c > 1 ? c / 100 : c)) : 0.5,
+      }
+    })
+  const { kept, merged } = dedupe(objects)
+  const note = [String(parsed.note || ''), merged ? `重複框選的項目已合併 ${merged} 個。` : ''].filter(Boolean).join(' ')
+  return { objects: kept, note, model, location: String(parsed.location || '').trim().slice(0, 20) }
+}
+
+/**
  * 用某個模型送一次辨識。
  * simple＝簡化請求（不帶 responseSchema，改在文字裡說格式）：忙線重試到最後一次才用。
  */
 async function generate(model, image, simple = false, refs = [], signal = undefined) {
+  if (countMode()) return generateCount(model, image, simple, signal)
   // 有樣品照：先放樣品（每張前面寫正確名稱），最後才放要盤點的照片，緊接著說明
   const sampleParts = refs.length
     ? [
@@ -2678,7 +2750,7 @@ async function viewSettings() {
       return `<div class="stack">${keyForm}${aiShareRows(key)}</div>`
     })()}
     <p class="section-title">辨識模型</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">自動選用最新的 Sonnet；<span class="nb">忙線時改用 Haiku。</span>相似品難以區分時，<span class="nb">可改用 Opus（費用較高）</span></span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
+    <div class="group"><div class="row"><span class="grow"><span class="title">辨識內容：${countMode() ? '只數數量' : '完整辨識'}</span><br><span class="meta">${countMode() ? '速度快；品名只分大類，不寫品牌、型號、規格，也不做相似品比對' : '寫出品名、品牌、型號、規格，並做相似品比對；速度較慢'}</span></span>${canEdit() ? `<button class="btn small secondary" data-action="ai-mode">${countMode() ? '改成完整' : '改成只數數量'}</button>` : ''}</div><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">自動選用最新的 Sonnet；<span class="nb">忙線時改用 Haiku。</span>相似品難以區分時，<span class="nb">可改用 Opus（費用較高）</span></span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
       <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">比對 AI 原始結果與確認後的結果、檢視相似品比對成效；也可用標準答案測試 AI</span></span>${chev}</button></div>
     <div id="models"></div>
     <p class="section-title">店內品項清單</p>
@@ -2697,7 +2769,7 @@ async function viewSettings() {
         : ''
     }
     <div class="row-actions edit-only" style="margin-top:10px"><label class="btn small secondary">${icon('camera', 20)}拍一張樣品<input type="file" accept="image/*" capture="environment" id="sample-cam" class="sr-only"></label></div>
-    <p class="footnote">外觀相近、僅尺寸不同的商品（例如不同分數的三通），每種存一張樣品照，並標明名稱與尺寸。辨識時會一併送給 AI 比對（最多 30 張，新的優先）。<br>快速存法：在盤點結果點選該框，再點一次 →「儲存，並存成樣品照」。</p>
+    <p class="footnote">外觀相近、僅尺寸不同的商品（例如不同分數的三通），每種存一張樣品照，並標明名稱與尺寸。辨識時會一併送給 AI 比對（最多 30 張，新的優先；只數數量模式不會送）。<br>快速存法：在盤點結果點選該框，再點一次 →「儲存，並存成樣品照」。</p>
     ${myRole() === 'owner' ? diagSection() : ''}
     </div><div class="settings-col">
     ${
@@ -8709,7 +8781,7 @@ async function runAnalysis(indices) {
     const el = document.getElementById('elapsed')
     if (el) el.textContent = waitTime(Date.now() - state.progress.started)
   }, 500)
-  const refs = await sampleRefs()
+  const refs = countMode() ? [] : await sampleRefs() // 只數數量不送樣品照
   await itemsAll() // 品項庫：給 AI 照抄名稱、填料號
   const status = (msg) => {
     const el = document.getElementById('ai-status')
@@ -8729,7 +8801,16 @@ async function runAnalysis(indices) {
         status(msg)
       }
       try {
-        const r = await analyze(photo, log, refs)
+        // 拍照後已經先辨識的：直接用（失敗的話照平常再送一次）
+        const pre = preRuns.get(photo)
+        preRuns.delete(photo)
+        let r = null
+        if (pre) {
+          const got = await pre
+          photo.trace = got.trace
+          r = got.r || null
+        }
+        if (!r) r = await analyze(photo, log, refs)
         Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '', aiGone: [], model: r.model })
         markAi(photo) // 記下 AI 原本的答案（算準確率用）
         s.model = r.model
@@ -8759,7 +8840,8 @@ async function runAnalysis(indices) {
     toast(`看到儲位標籤，位置自動填「${placeLabel(s.place)}」`)
   }
   // 結果先給你看；相似品在背景再比一次，好了自動更新
-  if (!state.cancel) backgroundRefine(s, photos, refs)
+  // 只數數量不跑相似品比對（也不會有第二個 AI 改答案）
+  if (!state.cancel && !countMode()) backgroundRefine(s, photos, refs)
 }
 
 /**
@@ -8834,11 +8916,49 @@ function releaseWakeLock() {
   wakeLock = null
 }
 
+/**
+ * 只數數量：拍完一張就先在背景辨識（你拍下一張時它就在跑），按「開始辨識」時直接拿結果。
+ * 一次最多 2 張同時跑；刪掉的照片結果就不用。完整模式不先跑（要附樣品照，等全部拍完再送）。
+ */
+const preRuns = new WeakMap()
+const preQueue = []
+let preActive = 0
+function preAnalyze(photo) {
+  if (!countMode() || !hasAi() || preRuns.has(photo)) return
+  const trace = []
+  const t0 = Date.now()
+  const log = (msg) => trace.push(`${Math.round((Date.now() - t0) / 100) / 10} 秒｜${msg}（拍照後先辨識）`)
+  preRuns.set(
+    photo,
+    new Promise((resolve) =>
+      preQueue.push(async () => {
+        try {
+          resolve({ r: await analyze(photo, log, []), trace })
+        } catch (e) {
+          resolve({ e, trace })
+        }
+      }),
+    ),
+  )
+  pumpPre()
+}
+function pumpPre() {
+  while (preActive < 2 && preQueue.length) {
+    const job = preQueue.shift()
+    preActive++
+    job().finally(() => {
+      preActive--
+      pumpPre()
+    })
+  }
+}
 async function addFiles(files) {
   const s = state.session
   for (const f of files) {
     try {
-      s.photos.push(await prepareImage(f))
+      const p = await prepareImage(f)
+      s.photos.push(p)
+      preAnalyze(p)
     } catch {
       toast('有一張照片讀不進來，換一張試試')
     }
@@ -9215,6 +9335,10 @@ $app.addEventListener('click', async (e) => {
     }
     case 'lookup-no-ai':
       return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰拍標籤；打型號查詢可以用' : syncReady() ? '尚未開通 AI：請通知擁有者；打型號查詢不用 AI' : '先接上大家的資料才能拍標籤；打型號查詢不用')
+    case 'ai-mode':
+      ls.set(LS.aiMode, countMode() ? 'full' : 'count')
+      toast(countMode() ? '已改成只數數量：速度快，品名只分大類' : '已改成完整辨識：會寫品名、規格，並做相似品比對')
+      return render()
     case 'pick-model':
       if (!hasAi()) return toast(canEdit() ? '先在上面貼上 AI 金鑰' : '檢視者不能用公司共用的金鑰')
       try {
