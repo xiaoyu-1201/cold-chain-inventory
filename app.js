@@ -108,7 +108,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.13.0（11/04・只數數量模式：更快、拍照後先辨識）'
+const VERSION = '4.13.1（11/04・只數數量：保護分尺寸的庫存、刪掉的照片不送）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -894,23 +894,27 @@ async function generateCount(model, image, simple, signal) {
     throw new ApiError('AI 回傳格式錯誤，請再試一次。', 0, `bad json: ${text.slice(0, 120)}`)
   }
   const kinds = (parsed.kinds || []).map((k) => cleanLabel(k))
-  const objects = (parsed.boxes || [])
-    .filter((b) => Array.isArray(b) && b.length >= 5 && kinds[Math.round(Number(b[4]))])
+  const all = (parsed.boxes || []).filter((b) => Array.isArray(b) && b.length >= 4)
+  // 少了「第幾種」：只有一種時就是那一種；索引不對的框算不出是哪一種，寫進備註（不能默默少算）
+  const kindOf = (b) => kinds[b.length >= 5 ? Math.round(Number(b[4])) : kinds.length === 1 ? 0 : -1]
+  const bad = all.filter((b) => !kindOf(b)).length + ((parsed.boxes || []).length - all.length)
+  const objects = all
+    .filter((b) => kindOf(b))
     .map((b) => {
       const c = Number(b[5])
       return {
-        label: kinds[Math.round(Number(b[4]))],
+        label: kindOf(b),
         brand: '',
         model: '',
         spec: '',
         box: b.slice(0, 4).map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
-        // 信心照說明是 0～100；有時會回 0～1，兩種都認
-        confidence: Number.isFinite(c) ? Math.min(1, Math.max(0, c > 1 ? c / 100 : c)) : 0.5,
+        // 信心是 0～100；只有簡化模式（沒有格式限制）才可能回 0～1
+        confidence: Number.isFinite(c) ? Math.min(1, Math.max(0, simple && c <= 1 ? c : c / 100)) : 0.5,
       }
     })
   const { kept, merged } = dedupe(objects)
-  const note = [String(parsed.note || ''), merged ? `重複框選的項目已合併 ${merged} 個。` : ''].filter(Boolean).join(' ')
-  return { objects: kept, note, model, location: String(parsed.location || '').trim().slice(0, 20) }
+  const note = [String(parsed.note || ''), merged ? `重複框選的項目已合併 ${merged} 個。` : '', bad ? `有 ${bad} 個框格式不對、沒算進去，請看照片補上。` : ''].filter(Boolean).join(' ')
+  return { objects: kept, note, model, mode: 'count', location: String(parsed.location || '').trim().slice(0, 20) }
 }
 
 /**
@@ -963,7 +967,7 @@ async function generate(model, image, simple = false, refs = [], signal = undefi
   const { kept, merged } = dedupe(objects)
   const note = [String(parsed.note || ''), merged ? `重複框選的項目已合併 ${merged} 個。` : ''].filter(Boolean).join(' ')
   // 儲位代號限 20 字：AI 偶爾把整段標籤文字塞進來，會撐爆畫面
-  return { objects: kept, note, model, location: String(parsed.location || '').trim().slice(0, 20) }
+  return { objects: kept, note, model, mode: 'full', location: String(parsed.location || '').trim().slice(0, 20) }
 }
 
 /** 兩個框重疊 7 成以上、而且是同一種：AI 把同一個東西框了兩次 → 留比較有把握的那個（數量才不會多算） */
@@ -1023,7 +1027,9 @@ async function attemptChain(models, image, refs, onStatus, signal) {
       { simple: false, wait: 0 },
       { simple: true, wait: 1500 },
     ]
+    let schemaBad = false
     for (const [pi, step] of plan.entries()) {
+      if (schemaBad && !step.simple) continue
       let t0 = Date.now()
       if (step.wait) {
         const ms = lastErr?.retryAfter ? Math.min(lastErr.retryAfter * 1000, 15000) : step.wait
@@ -1054,6 +1060,11 @@ async function attemptChain(models, image, refs, onStatus, signal) {
             await sleep(3000)
           } else onStatus(`${model} 太慢，換比較快的模型`)
           break
+        }
+        // 回答格式（schema）被拒絕：改用簡化模式（文字說明格式）再送一次
+        if (e.status === 400 && !step.simple && /schema|output_config|format/i.test(`${e.detail || ''} ${e.message}`)) {
+          schemaBad = true
+          continue
         }
         // 400：同一個請求再送也是 400（例如餘額不足、照片太大），不要白送三次，直接停
         if (!retryable(e)) throw e
@@ -1831,6 +1842,19 @@ async function linkSession(s) {
   s.eval = evalSession(s) // AI 準不準（AI 原本的答案 vs 你確認後的）
   await db.put(s)
   return { created, linked: sums.size }
+}
+/** 只數數量的盤點：哪些沒寫規格的種類，在這一格原本有分尺寸記（記進去會取代掉） */
+async function countConflicts(s) {
+  if (s.aiMode !== 'count') return []
+  const items = await itemsAll()
+  const pk = placeKeyOf(s)
+  const out = []
+  for (const g of groupsOf(s)) {
+    if (g.brand || g.model || g.spec) continue
+    const detailed = items.filter((it) => norm(it.label) === norm(g.label) && (it.spec || it.model || it.brand) && it.stock?.[pk] && !it.stock[pk].removed)
+    if (detailed.length) out.push(`・${g.label}：${detailed.map((it) => [it.spec || it.model || it.brand, it.stock[pk].count].join(' ')).join('、')}`)
+  }
+  return out
 }
 /** 刪掉一次盤點：它記在品項庫的數量也拿掉 */
 async function unlinkSession(id) {
@@ -8655,7 +8679,9 @@ async function runGolden() {
   const samples = (await idb.samples.all().catch(() => [])).filter((x) => !ids.has(x.sid)).slice(0, MAX_SAMPLES)
   const refs = await Promise.all(samples.map(async (x) => ({ label: x.label, brand: x.brand, model: x.model, spec: x.spec, data: await blobToBase64(x.blob) })))
   const items = await itemsAll()
-  const idOf = (f) => findItem(items, f)?.id || `k:${looseKey(f)}`
+  const cm = countMode()
+  // 只數數量：AI 不寫規格，兩邊都只用大類名稱比（不然每一種都會算成錯）
+  const idOf = (f) => (cm ? `n:${norm(f.label)}` : findItem(items, f)?.id || `k:${looseKey(f)}`)
   const nameOf = new Map()
   state.golden = { done: 0, total: photos.length }
   keepAwake()
@@ -8667,9 +8693,9 @@ async function runGolden() {
     for (const s of sessions) {
       const truth = new Map()
       for (const g of groupsOf(s).filter((x) => !x.manual)) {
-        const id = s.itemOf?.[g.key] || idOf(g)
+        const id = (!cm && s.itemOf?.[g.key]) || idOf(g)
         truth.set(id, (truth.get(id) || 0) + (Number(g.count) || 0))
-        if (!nameOf.has(id)) nameOf.set(id, `${g.label}${g.spec ? `・${g.spec}` : ''}`)
+        if (!nameOf.has(id)) nameOf.set(id, cm ? g.label : `${g.label}${g.spec ? `・${g.spec}` : ''}`)
       }
       const guess = new Map()
       for (const p of s.photos.filter((x) => x.status === 'done')) {
@@ -8696,7 +8722,7 @@ async function runGolden() {
   const exact = types.filter((t) => t.ai === t.final).length
   const result = {
     at: Date.now(),
-    model,
+    model: model + (cm ? '（只數數量）' : ''),
     photos: photos.length,
     types: types.length,
     rate: types.length ? exact / types.length : null,
@@ -8806,14 +8832,19 @@ async function runAnalysis(indices) {
         preRuns.delete(photo)
         let r = null
         if (pre) {
+          status('拍照後已在辨識，等結果中…')
           const got = await pre
           photo.trace = got.trace
-          r = got.r || null
+          // 模式換過（例如中途改成完整）：結果不用，照現在的模式重送
+          r = got.r && got.r.mode === (countMode() ? 'count' : 'full') ? got.r : null
+          // 已經試過、而且不是網路斷線（例如逾時、金鑰、格式）：直接顯示錯誤，讓人按「再試一次」，不要再整條重跑
+          if (got.e && got.e.status !== 0) throw got.e
         }
         if (!r) r = await analyze(photo, log, refs)
         Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '', aiGone: [], model: r.model })
         markAi(photo) // 記下 AI 原本的答案（算準確率用）
-        s.model = r.model
+        s.model = r.model + (r.mode === 'count' ? '（只數數量）' : '')
+        if (r.mode === 'count') s.aiMode = 'count'
         // 拍到儲位標籤：沒填位置就自動填（有建立過的儲位用那個寫法）
         if (r.location && !s.place) {
           s.place = findLocation(r.location)?.code || r.location.slice(0, 20).toUpperCase()
@@ -8932,6 +8963,8 @@ function preAnalyze(photo) {
     photo,
     new Promise((resolve) =>
       preQueue.push(async () => {
+        // 還沒輪到就被刪掉、或這次盤點已經放棄：不送（不花錢）
+        if (!state.session?.photos.includes(photo)) return resolve({ skipped: true, trace })
         try {
           resolve({ r: await analyze(photo, log, []), trace })
         } catch (e) {
@@ -9114,7 +9147,7 @@ $app.addEventListener('click', async (e) => {
     const p = s?.photos[i]
     if (!p) return
     // 跟全站一樣用 photoViewer：可以兩指放大、左右換張；下面多一顆「刪掉這張」
-    const list = s.photos.map((x, k) => ({ src: urlOf(x), cap: `第 ${k + 1} 張照片・按「開始辨識」才會送給 AI`, k }))
+    const list = s.photos.map((x, k) => ({ src: urlOf(x), cap: `第 ${k + 1} 張照片・${countMode() ? '拍完就會先送給 AI 辨識' : '按「開始辨識」才會送給 AI'}`, k }))
     return photoViewer(list, i, {
       action: {
         label: '刪掉這張',
@@ -9171,6 +9204,7 @@ $app.addEventListener('click', async (e) => {
   switch (d.action) {
     case 'new':
       // 盤點人＝這台選好的人（不用每次選；擁有者／管理員可以在設定改）
+      state.cancel = false // 上一次按過取消：不要影響這次拍照後先辨識的重試
       state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], counts: {}, manual: [], by: currentCounter()?.name || '', byId: currentCounter()?.id || '' }
       return go('capture')
     case 'analyze':
@@ -9528,6 +9562,9 @@ $app.addEventListener('click', async (e) => {
       // 還有「要確認」沒看過：先提醒（按取消＝回去一個一個確認；按確定＝還是完成，沒確認的不算進「AI 準不準」）
       const open = s ? doubtsOf(s).length : 0
       if (open && !confirm(`還有 ${open} 個「要確認」沒看過。\n\n按「取消」回去一個一個確認；\n按「確定」還是完成（沒確認的不會算進「AI 準不準」）。`)) return quickSheet(doubtsOf(s), 0, { doubt: true })
+      // 只數數量沒分尺寸：這一格原本分尺寸記的（例如三通 3分、2分），記進去會變成一筆「三通」→ 先問
+      const cf = s ? await countConflicts(s) : []
+      if (cf.length && !confirm(`這次是「只數數量」，品名沒分尺寸。\n品項庫這一格原本分尺寸記的：\n${cf.join('\n')}\n\n按「確定」：記成沒分尺寸的一筆，原本分尺寸的數量會從這一格拿掉。\n按「取消」：先回去點框補上尺寸（或到設定改成完整辨識再盤）。`)) return
       if (s) {
         // 記進品項庫要 1～2 秒：按鈕先變「記進品項庫中…」，不然像沒反應
         busyBtn(t, '記進品項庫中…')
