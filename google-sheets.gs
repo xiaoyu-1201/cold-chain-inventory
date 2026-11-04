@@ -163,6 +163,28 @@ function doPost(e) {
     else props.deleteProperty('CLAUDE_KEY')
     return json({ ok: true, aiClaude: !!data.aiKey, me: me })
   }
+  // 背景補名稱（4.14）：App 送來已經做好的請求，這裡問 Claude，結果存成同步資料（names:盤點:照片）。
+  // 手機送出後就算把 App 關掉，這裡也會跑完；手機下次同步就拿到結果。
+  // 通知（4.14）：記下這支手機的通知訂閱（每人最多 3 支）；擁有者設定發通知的服務網址
+  if (who && data.action === 'pushSub') return json(Object.assign(pushSub(data, props, who), { me: me }))
+  if (who && who.role === 'owner' && data.action === 'pushSetup') {
+    const url = String(data.url || '').trim()
+    if (!url) props.deleteProperty('PUSH_URL')
+    else if (url.indexOf('https://') !== 0 || url.length > 300 || url.indexOf(' ') >= 0) return json({ ok: false, me: me, error: '網址不對：要是 https:// 開頭' })
+    else props.setProperty('PUSH_URL', url)
+    return json({ ok: true, me: me, pushOn: !!url })
+  }
+  if (who && data.action === 'nameRun') {
+    if (!canEdit) return json({ ok: false, viewer: true, aiClaude: aiClaude, pend: pend, me: me, error: '你是檢視者，只能看' })
+    const k = 'names:' + String(data.sid || '') + ':' + String(data.pid || '')
+    if (!/^names:[A-Za-z0-9_-]{1,64}:[A-Za-z0-9_-]{1,64}$/.test(k)) return json({ ok: false, status: 400, aiClaude: aiClaude, pend: pend, me: me, error: '補名稱的資料格式不對' })
+    const r = claudeProxy({ path: 'v1/messages', body: data.body }, P, props, who)
+    const boxes = Array.isArray(data.boxes) ? data.boxes.slice(0, 300).map(String) : []
+    syncPush({ records: [{ k: k, t: Date.now(), d: { at: Number(data.at) || 0, boxes: boxes, status: r.status || 0, body: r.ok ? String(r.body || '') : '', error: r.ok ? '' : String(r.error || '') } }], dev: 'cloud-names' }, props, P, false)
+    // 同一次盤點的照片都補完了：發通知給送出的那個人（手機在鎖定畫面也看得到）
+    if (data.batch && data.batch.id && batchDone(String(data.batch.id).slice(0, 80), Number(data.batch.total) || 1)) notifyPush(props, who, String(data.batch.title || '名稱整理完成').slice(0, 80), String(data.batch.body || '').slice(0, 200))
+    return json(Object.assign({}, r, { aiClaude: aiClaude, pend: pend, me: me }))
+  }
   if (who && data.action === 'ai') {
     if (!canEdit) return json({ ok: false, viewer: true, aiClaude: aiClaude, pend: pend, me: me, error: '你是檢視者，只能看' })
     if (data.provider !== 'claude') return json({ ok: false, status: 403, aiClaude: aiClaude, pend: pend, me: me, error: oldApp })
@@ -315,6 +337,63 @@ function aiCount(props, P, who, prop, limit) {
   }
 }
 
+/** 記下一支手機的通知訂閱（endpoint＋加密用的公鑰）；同一個人最多 3 支，新的優先 */
+function pushSub(data, props, who) {
+  const sub = data.sub || {}
+  const keys = sub.keys || {}
+  if (typeof sub.endpoint !== 'string' || sub.endpoint.indexOf('https://') !== 0 || sub.endpoint.length > 800 || !keys.p256dh || !keys.auth) return { ok: false, error: '通知的資料不對' }
+  const lock = LockService.getScriptLock()
+  lock.waitLock(10000)
+  try {
+    const all = JSON.parse(props.getProperty('PUSH_SUBS') || '{}')
+    const id = String(who.id)
+    const mine = (all[id] || []).filter(function (x) {
+      return x.endpoint !== sub.endpoint
+    })
+    mine.unshift({ endpoint: sub.endpoint, keys: { p256dh: String(keys.p256dh).slice(0, 200), auth: String(keys.auth).slice(0, 60) } })
+    all[id] = mine.slice(0, 3)
+    const text = JSON.stringify(all)
+    if (text.length > 8500) return { ok: false, error: '通知訂閱太多，雲端放不下：請擁有者清掉指令碼屬性 PUSH_SUBS 再開一次' }
+    props.setProperty('PUSH_SUBS', text)
+    return { ok: true, pushOn: !!props.getProperty('PUSH_URL') }
+  } finally {
+    lock.releaseLock()
+  }
+}
+/** 同一批（一次盤點）補名稱：第 total 張完成時回 true（只通知一次） */
+function batchDone(id, total) {
+  const lock = LockService.getScriptLock()
+  lock.waitLock(10000)
+  try {
+    const c = CacheService.getScriptCache()
+    const n = Number(c.get('NB:' + id) || 0) + 1
+    c.put('NB:' + id, String(n), 6 * 3600)
+    return n === total
+  } finally {
+    lock.releaseLock()
+  }
+}
+/** 請通知服務（擁有者在 Cloudflare 開的）發通知給這個人的手機；手機取消訂閱的就從名單拿掉 */
+function notifyPush(props, who, title, body) {
+  const url = props.getProperty('PUSH_URL')
+  if (!url) return
+  const all = JSON.parse(props.getProperty('PUSH_SUBS') || '{}')
+  const id = String(who.id)
+  const subs = all[id] || []
+  if (!subs.length) return
+  try {
+    const res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: JSON.stringify({ subs: subs, title: title, body: body }), muteHttpExceptions: true })
+    const gone = (JSON.parse(res.getContentText() || '{}').gone || []).map(String)
+    if (gone.length) {
+      all[id] = subs.filter(function (x) {
+        return gone.indexOf(x.endpoint) < 0
+      })
+      props.setProperty('PUSH_SUBS', JSON.stringify(all))
+    }
+  } catch (e) {
+    /* 通知沒送到不影響補名稱 */
+  }
+}
 /** App 的「測試連線」會呼叫這個 */
 function doGet() {
   return json({ ok: true, app: '拍照盤點' })

@@ -24,6 +24,9 @@ const LS = {
   claudePinned: 'inventory:claudePinned',
   // 辨識內容（4.13）：count＝只數數量（預設，快）、full＝完整（品名、品牌、規格、相似品比對）
   aiMode: 'inventory:aiMode',
+  // 通知（4.14）：這台開了通知、雲端設好了通知服務
+  pushOn: 'inventory:pushOn',
+  pushSvc: 'inventory:pushSvc',
   catalog: 'inventory:catalog',
   sheet: 'inventory:sheetUrl',
   autoSync: 'inventory:autoSync',
@@ -108,7 +111,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.13.1（11/04・只數數量：保護分尺寸的庫存、刪掉的照片不送）'
+const VERSION = '4.14.0（11/04・快速數量＋雲端補名稱、通知、設定頁整理）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -560,7 +563,10 @@ function hasAi() {
   return !!ls.get(K().key) || aiViaSheet()
 }
 /** 只數數量（4.13，預設）：AI 只回框、大類、信心；不送樣品照和品項庫、不跑相似品比對 → 快 2～3 倍 */
-const countMode = () => ls.get(LS.aiMode, 'count') !== 'full'
+const aiMode = () => ({ fast: 'fast', count: 'count', full: 'full' })[ls.get(LS.aiMode, 'fast')] || 'fast'
+const countMode = () => aiMode() !== 'full'
+/** 快速數量＋背景補名稱（4.14 預設）：數量先出來，名稱交給雲端在背景補（App 關掉也會跑完） */
+const namesMode = () => aiMode() === 'fast'
 /** 擁有者有把 Claude 金鑰放在雲端共用（不管這台能不能用） */
 function aiSharedOn() {
   return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(K().shared) === '1'
@@ -2396,6 +2402,7 @@ async function viewHome() {
     <div class="home-cards">
     ${moveCard()}
     ${joinStatusCards()}
+    ${namingCount(sessions) ? `<div class="hint-card" role="status"><b>AI 正在補名稱</b>（${namingCount(sessions)} 張照片）：可以先做別的事，好了會通知你；數量不會變。</div>` : ''}
     ${
       joinPending()
         ? ''
@@ -2645,6 +2652,7 @@ function viewReview() {
           </div>`
         : ''
     }
+    ${s.photos.some((p) => p.naming && !p.namedAt) ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在補名稱…</b>可以先離開，好了會通知你；<span class="nb">數量不會變。</span></div>` : ''}
     ${state.refining && state.refining.session === s.id ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在再檢查相似品…</b><span class="nb">（${state.refining.done}/${state.refining.total} 張）</span>可先查看結果；<span class="nb">此檢查不會更改答案，</span><span class="nb">認為不同者</span><span class="nb">會標示為「要確認」。</span></div>` : ''}
     ${notes}
     ${s.photos
@@ -2737,27 +2745,18 @@ function moveCard() {
   return `<div class="setup-card move-card"><span class="setup-ico" aria-hidden="true">${icon('copy', 26)}</span><div class="grow"><b>桌面的 App 要再接一次</b><p>桌面的 App 跟瀏覽器的資料是分開的：</p><ol class="steps-list"><li>按「複製到桌面 App」。</li><li>打開桌面的「聖佳庫存」<span class="nb">（還沒有：分享</span>→<span class="nb">加入主畫面）</span>。</li><li>按<span class="nb">「貼上邀請並加入」</span>。</li></ol><p class="move-note">只貼到自己的 App，<span class="nb">不要傳給別人</span>；點到一半的點貨單先按完成。</p>${keyNote}<div class="row-actions"><button class="btn small" data-action="move-to-app">複製到桌面 App</button><button class="btn small plain" data-action="move-hint-off">不用了</button></div></div></div>`
 }
 async function viewSettings() {
+  // 4.14：常用的放「設定」，不常用的（金鑰、清單、樣品照、試算表、備份、清除）收進「進階設定」
+  const adv = state.view === 'settings-adv'
   const key = ls.get(K().key)
   const model = ls.get(K().model)
-  const samples = await idb.samples.all().catch(() => [])
-  return `
+  if (adv) {
+    const samples = await idb.samples.all().catch(() => [])
+    return `
   <main class="app">
-    <div class="nav">${backBtn('home', '盤點')}</div>
-    <h1 class="large-title">設定</h1>
-    ${
-      // 還沒設定任何同步的新手機：大多是被邀請的同事 →「貼上邀請並加入」放最前面（以前要往下捲很久）
-      freshPhone()
-        ? joinCard()
-        : serverSlow() && myRole() === 'owner'
-          ? `<div class="hint-card stack fast-hint"><div><b>同步可以快很多</b><br>把 Google 那邊的程式碼更新成新版，<span class="nb">同步上傳、下載</span>會快很多，<span class="nb">也會套用</span>共用 AI 的每日次數上限、點貨紀錄的保護。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
-          : syncReady() && myRole() === 'owner' && ls.get(LS.serverGemini) === '1'
-            ? `<div class="hint-card stack fast-hint"><div><b>雲端還放著舊的 Gemini 金鑰</b><br>App 已經不用 Gemini 了，<span class="nb">不用的金鑰</span><span class="nb">留著有外流風險</span>。把 Google 那邊的程式碼更新成新版，<span class="nb">會自動刪掉它</span>。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
-          : syncReady() && myRole() === 'owner' && serverFastOff()
-            ? `<div class="hint-card stack fast-hint"><div><b>快速同步還沒打開</b><br>Google 那邊沒有開「Drive API」，同步還是一筆一筆來（資料不會錯，只是比較慢）。請用電腦做一次，<span class="nb">約 2 分鐘：</span><ol class="steps-list" style="margin:8px 0 0"><li>打開當初那個 Google 試算表 →<span class="nb">「擴充功能」</span>→<span class="nb">「Apps Script」</span>。</li><li>左邊<span class="nb">「服務」</span>旁的 <b>＋</b> → 選<span class="nb">「Drive API」</span>→<span class="nb">「新增」</span>。</li><li>右上「部署」→<span class="nb">「<b>管理部署作業</b>」</span>→ 鉛筆 → 版本選<span class="nb">「<b>新版本</b>」</span>→ 部署。</li></ol></div></div>`
-            : ''
-    }
+    <div class="nav">${backBtn('settings', '設定')}</div>
+    <h1 class="large-title">進階設定</h1>
     <div class="settings-cols"><div class="settings-col">
-    <p class="section-title">AI</p>
+    <p class="section-title">AI 金鑰與模型</p>
     ${
       // 4.9 只用 Claude（拿掉 Gemini）；檢視者不能用 AI，不用看說明
       canEdit()
@@ -2773,10 +2772,9 @@ async function viewSettings() {
       if (myRole() !== 'owner' || !syncReady()) return syncReady() ? (aiSharedOn() ? `<div class="stack">${aiShareRows(key)}</div>` : '<div class="group"><div class="row"><span class="grow"><span class="title">AI 由擁有者統一管理</span><br><span class="meta">擁有者開通後即可拍照辨識，無需輸入金鑰。</span></span></div></div>') : ''
       return `<div class="stack">${keyForm}${aiShareRows(key)}</div>`
     })()}
-    <p class="section-title">辨識模型</p>
-    <div class="group"><div class="row"><span class="grow"><span class="title">辨識內容：${countMode() ? '只數數量' : '完整辨識'}</span><br><span class="meta">${countMode() ? '速度快；品名只分大類，不寫品牌、型號、規格，也不做相似品比對' : '寫出品名、品牌、型號、規格，並做相似品比對；速度較慢'}</span></span>${canEdit() ? `<button class="btn small secondary" data-action="ai-mode">${countMode() ? '改成完整' : '改成只數數量'}</button>` : ''}</div><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">自動選用最新的 Sonnet；<span class="nb">忙線時改用 Haiku。</span>相似品難以區分時，<span class="nb">可改用 Opus（費用較高）</span></span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div>
-      <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">比對 AI 原始結果與確認後的結果、檢視相似品比對成效；也可用標準答案測試 AI</span></span>${chev}</button></div>
+    <div class="group" style="margin-top:12px"><div class="row"><span class="grow"><span class="title">${esc(model ? modelLabel(model) : '自動挑選')}</span><br><span class="meta">自動選用最新的 Sonnet；<span class="nb">忙線時改用 Haiku。</span>相似品難以區分時，<span class="nb">可改用 Opus（費用較高）</span></span></span>${hasAi() ? '<button class="btn small secondary" data-action="pick-model">重新挑選</button>' : ''}</div></div>
     <div id="models"></div>
+    ${diagSection()}
     <p class="section-title">店內品項清單</p>
     <textarea class="field" id="catalog" spellcheck="false" ${canEdit() ? '' : 'readonly aria-readonly="true"'}>${esc(catalogLines().join('\n'))}</textarea>
     <p class="footnote">每行一種品項，括號內填規格或別名。AI 會依此命名，修正時也可從清單選用。${canEdit() ? '' : '（檢視者僅可檢視）'}</p>
@@ -2794,7 +2792,6 @@ async function viewSettings() {
     }
     <div class="row-actions edit-only" style="margin-top:10px"><label class="btn small secondary">${icon('camera', 20)}拍一張樣品<input type="file" accept="image/*" capture="environment" id="sample-cam" class="sr-only"></label></div>
     <p class="footnote">外觀相近、僅尺寸不同的商品（例如不同分數的三通），每種存一張樣品照，並標明名稱與尺寸。辨識時會一併送給 AI 比對（最多 30 張，新的優先；只數數量模式不會送）。<br>快速存法：在盤點結果點選該框，再點一次 →「儲存，並存成樣品照」。</p>
-    ${myRole() === 'owner' ? diagSection() : ''}
     </div><div class="settings-col">
     ${
       myRole() === 'owner' && (!freshPhone() || legacySheet())
@@ -2818,25 +2815,13 @@ async function viewSettings() {
     </details>`
         : ''
     }
-    ${freshPhone() && !legacySheet() ? '' : '<p class="section-title">共用（跟 Google 雲端硬碟一樣）</p>'}
     ${
-      freshPhone() && !legacySheet()
-        ? ''
-        : syncReady()
-        ? `${
+      syncReady()
+        ? `<p class="section-title">備份與這台裝置</p>${
             serverOld()
               ? `<div class="hint-card stack" style="margin-bottom:12px"><div><b>Google 那邊的程式碼要更新</b>（新版同步只拿資料、照片打開才抓，快很多）。請<b>擁有者</b>用電腦做一次，約 3 分鐘：${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
               : ''
           }<div class="group">
-            <div class="row"><span class="avatar" aria-hidden="true">${esc((ls.get(LS.memberName) || '我').slice(0, 1))}</span><span class="grow"><span class="title">${esc(ls.get(LS.memberName) || '我')}（這台）</span><br><span class="meta">${ROLE_LABEL[myRole()]}・<span class="sync-text">${state.syncState === 'error' && state.syncError ? esc(state.syncError) : esc(syncLabel())}</span></span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
-            <div class="row"><span class="grow"><span class="title">這台的盤點人</span><br><span class="meta">新盤點會自動記成這個人，不用每次選${canManage() ? '' : '；由擁有者或管理員設定'}</span></span>${
-              canManage() ? `<button class="btn small secondary" data-action="counter-device">${esc(currentCounter()?.name || '選擇')}</button>` : `<b>${esc(currentCounter()?.name || '—')}</b>`
-            }</div>
-            ${
-              canManage()
-                ? `<button class="row" data-action="share-open"><span class="grow"><span class="title" style="color:var(--tint)">共用設定</span><br><span class="meta">邀請同事、改權限（只能看／可以改）、移除離職的人</span></span>${chev}</button>`
-                : `<div class="row muted"><span class="grow">${ROLE_DESC[myRole()]}。要加人或改權限，請洽擁有者或管理員。</span></div>`
-            }
             ${
               browserSeparate()
                 ? `<button class="row" data-action="move-to-app"><span class="grow"><span class="title" style="color:var(--tint)">複製到桌面 App</span><br><span class="meta">桌面的「聖佳庫存」跟瀏覽器資料分開：複製這台的連線，到桌面 App 按<span class="nb">「貼上邀請並加入」</span>（只貼到自己的 App，不要傳給別人）</span></span>${chev}</button>`
@@ -2849,12 +2834,7 @@ async function viewSettings() {
           </div>`
         : ''
     }
-    <p class="section-title">盤點規則</p>
-    <div class="group">
-      <label class="row"><span class="grow"><span class="title">盲盤</span><br><span class="meta">盤點人員看不到帳面數與差異（僅擁有者、管理員可見）。看得到帳面數會變成「對答案」，無法發現錯誤。</span></span><input type="checkbox" id="rule-blind" ${ls.get(LS.blind, '1') === '1' ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
-      <label class="row"><span class="grow"><span class="title">有差異先複盤</span><br><span class="meta">實盤與帳面不符時，請由另一人複盤；兩次一致才確認差異，並選擇原因，再由擁有者或管理員決定是否調整帳面。</span></span><input type="checkbox" id="rule-recount" ${recountOn() ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
-    </div>
-    <p class="footnote">${canManage() ? '改了會同步給大家。' : '由擁有者或管理員設定。'}</p>
+    ${pushRows()}
     ${canManage() ? pickCrossSettings() : ''}
     ${canManage() ? `<details class="steps"><summary>資料安全嗎？（公司資產）</summary>
       <ol>
@@ -2869,11 +2849,57 @@ async function viewSettings() {
     <p class="section-title">資料</p>
     ${canManage() ? '<div class="row-actions"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>' : ''}
     <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
-    ${myRole() === 'owner' ? '' : diagSection()}
     </div></div>
     <p class="footnote" style="margin-top:18px;text-align:center">聖佳智慧庫存 版本 ${VERSION}</p>
     <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
     <p class="footnote" style="text-align:center">新版會自動更新；也可手動檢查。盤點紀錄、樣品照與 API 金鑰不會被刪除。</p>
+  </main>`
+  }
+  return `
+  <main class="app">
+    <div class="nav">${backBtn('home', '盤點')}</div>
+    <h1 class="large-title">設定</h1>
+    ${
+      // 還沒設定任何同步的新手機：大多是被邀請的同事 →「貼上邀請並加入」放最前面（以前要往下捲很久）
+      freshPhone()
+        ? joinCard()
+        : serverSlow() && myRole() === 'owner'
+          ? `<div class="hint-card stack fast-hint"><div><b>同步可以快很多</b><br>把 Google 那邊的程式碼更新成新版，<span class="nb">同步上傳、下載</span>會快很多，<span class="nb">也會套用</span>共用 AI 的每日次數上限、點貨紀錄的保護。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
+          : syncReady() && myRole() === 'owner' && ls.get(LS.serverGemini) === '1'
+            ? `<div class="hint-card stack fast-hint"><div><b>雲端還放著舊的 Gemini 金鑰</b><br>App 已經不用 Gemini 了，<span class="nb">不用的金鑰</span><span class="nb">留著有外流風險</span>。把 Google 那邊的程式碼更新成新版，<span class="nb">會自動刪掉它</span>。請用電腦做一次，<span class="nb">約 3 分鐘：</span>${DEPLOY_STEPS}</div><button class="btn small" data-action="sheet-copy">複製試算表程式碼</button></div>`
+          : syncReady() && myRole() === 'owner' && serverFastOff()
+            ? `<div class="hint-card stack fast-hint"><div><b>快速同步還沒打開</b><br>Google 那邊沒有開「Drive API」，同步還是一筆一筆來（資料不會錯，只是比較慢）。請用電腦做一次，<span class="nb">約 2 分鐘：</span><ol class="steps-list" style="margin:8px 0 0"><li>打開當初那個 Google 試算表 →<span class="nb">「擴充功能」</span>→<span class="nb">「Apps Script」</span>。</li><li>左邊<span class="nb">「服務」</span>旁的 <b>＋</b> → 選<span class="nb">「Drive API」</span>→<span class="nb">「新增」</span>。</li><li>右上「部署」→<span class="nb">「<b>管理部署作業</b>」</span>→ 鉛筆 → 版本選<span class="nb">「<b>新版本</b>」</span>→ 部署。</li></ol></div></div>`
+            : ''
+    }
+    <div class="settings-cols"><div class="settings-col">
+    ${
+      syncReady()
+        ? `<p class="section-title">我與同步</p><div class="group">
+            <div class="row"><span class="avatar" aria-hidden="true">${esc((ls.get(LS.memberName) || '我').slice(0, 1))}</span><span class="grow"><span class="title">${esc(ls.get(LS.memberName) || '我')}（這台）</span><br><span class="meta">${ROLE_LABEL[myRole()]}・<span class="sync-text">${state.syncState === 'error' && state.syncError ? esc(state.syncError) : esc(syncLabel())}</span></span></span><button class="btn small" data-action="sync-now">立即同步</button></div>
+            <div class="row"><span class="grow"><span class="title">這台的盤點人</span><br><span class="meta">新盤點會自動記成這個人，不用每次選${canManage() ? '' : '；由擁有者或管理員設定'}</span></span>${
+              canManage() ? `<button class="btn small secondary" data-action="counter-device">${esc(currentCounter()?.name || '選擇')}</button>` : `<b>${esc(currentCounter()?.name || '—')}</b>`
+            }</div>
+            ${
+              canManage()
+                ? `<button class="row" data-action="share-open"><span class="grow"><span class="title" style="color:var(--tint)">共用設定</span><br><span class="meta">邀請同事、改權限（只能看／可以改）、移除離職的人</span></span>${chev}</button>`
+                : `<div class="row muted"><span class="grow">${ROLE_DESC[myRole()]}。要加人或改權限，請洽擁有者或管理員。</span></div>`
+            }
+          </div>`
+        : ''
+    }
+    <p class="section-title">AI 辨識</p>
+    <div class="group"><div class="row mode-row"><span class="grow"><span class="title">辨識內容</span><br><span class="meta">${MODE_DESC[aiMode()]}</span>${canEdit() ? `<span class="chips mode-chips" role="group" aria-label="辨識內容">${Object.keys(MODE_LABEL).map((k) => `<button class="chip" data-action="ai-mode" data-mode="${k}" aria-pressed="${aiMode() === k}">${MODE_LABEL[k]}</button>`).join('')}</span>` : ''}</span></div>
+      <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">比對 AI 原始結果與確認後的結果、檢視相似品比對成效；也可用標準答案測試 AI</span></span>${chev}</button></div>
+    </div><div class="settings-col">
+    <p class="section-title">盤點規則</p>
+    <div class="group">
+      <label class="row"><span class="grow"><span class="title">盲盤</span><br><span class="meta">盤點人員看不到帳面數與差異（僅擁有者、管理員可見）。看得到帳面數會變成「對答案」，無法發現錯誤。</span></span><input type="checkbox" id="rule-blind" ${ls.get(LS.blind, '1') === '1' ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
+      <label class="row"><span class="grow"><span class="title">有差異先複盤</span><br><span class="meta">實盤與帳面不符時，請由另一人複盤；兩次一致才確認差異，並選擇原因，再由擁有者或管理員決定是否調整帳面。</span></span><input type="checkbox" id="rule-recount" ${recountOn() ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
+    </div>
+    <p class="footnote">${canManage() ? '改了會同步給大家。' : '由擁有者或管理員設定。'}</p>
+    <div class="group adv-link"><button class="row" data-go="settings-adv"><span class="grow"><span class="title">進階設定</span><br><span class="meta">AI 金鑰、品項清單、樣品照、Google 試算表、備份、清除資料</span></span>${chev}</button></div>
+    </div></div>
+    <p class="footnote" style="margin-top:18px;text-align:center">版本 ${VERSION}</p>
   </main>`
 }
 
@@ -7275,6 +7301,11 @@ async function applyRemote(rec) {
   const i = rec.k.indexOf(':')
   const kind = rec.k.slice(0, i)
   const id = rec.k.slice(i + 1)
+  // 雲端補好的名稱（names:盤點:照片）：放回那次盤點
+  if (kind === 'names') {
+    const [sid, pid] = id.split(':')
+    return !rec.del && rec.d ? applyNamesData(sid, pid, rec.d) : false
+  }
   const store = SYNC_STORES[kind]
   if (!store) return false // photo:… 之類的不在這裡處理（照片是打開那次盤點才抓）
   const cur = await store.get(id)
@@ -8871,8 +8902,9 @@ async function runAnalysis(indices) {
     toast(`看到儲位標籤，位置自動填「${placeLabel(s.place)}」`)
   }
   // 結果先給你看；相似品在背景再比一次，好了自動更新
-  // 只數數量不跑相似品比對（也不會有第二個 AI 改答案）
+  // 只數數量不跑相似品比對（也不會有第二個 AI 改答案）；快速模式改成背景補名稱（不改數量）
   if (!state.cancel && !countMode()) backgroundRefine(s, photos, refs)
+  if (!state.cancel && namesMode()) queueNames(s, photos.filter((p) => p.status === 'done'))
 }
 
 /**
@@ -8945,6 +8977,237 @@ async function keepAwake() {
 function releaseWakeLock() {
   wakeLock?.release?.().catch(() => {})
   wakeLock = null
+}
+
+// ───────────── 背景補名稱（4.14）─────────────
+const MODE_LABEL = { fast: '快速＋補名稱', count: '只數數量', full: '完整' }
+const MODE_DESC = {
+  fast: '數量先出來；品名、規格由雲端在背景補上（App 關掉也會跑完），不會改數量',
+  count: '只數數量，品名只分大類；最快、最省',
+  full: '一次寫出品名、品牌、型號、規格，並做相似品比對；最慢',
+}
+const NAME_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    names: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          id: { type: 'INTEGER', description: '物件編號' },
+          label: { type: 'STRING' },
+          brand: { type: 'STRING' },
+          model: { type: 'STRING' },
+          spec: { type: 'STRING', description: '尺寸／規格，例如 3分、4分×3分、等徑・粗' },
+          confidence: { type: 'NUMBER', description: '0～1，有多確定' },
+        },
+        required: ['id', 'label', 'brand', 'model', 'spec', 'confidence'],
+      },
+    },
+  },
+  required: ['names'],
+}
+/** 補名稱的請求（Gemini 格式；送出前會轉成 Claude 的）：整張照片＋編號紅框＋每個框的特寫＋樣品照＋品項庫 */
+async function nameRequest(photo, refs) {
+  const objs = photo.objects
+  const { crops, overview } = await refineImages(photo, objs)
+  const useCrops = objs.length <= 30 // 框太多：只給整張（請求才不會太大）
+  const list = promptItems()
+  const text = `你是冷凍空調材料行的盤點助手。照片裡的商品已經數好了（紅框和編號），數量不用改。請替每一個物件寫出品名、品牌、型號、規格：
+1. label 優先用「店內品項清單」或「品項庫」的寫法；清單沒有就用最具體的中文名稱。
+2. 標籤看得到就分開填 brand、model、spec；看不出來就空字串，不要猜。
+3. 外觀很像、只差尺寸的（例如三通、彎頭、接頭），比較管子粗細、接口是不是一樣粗（等徑／異徑），spec 寫出差別；看得出分數就寫分數。
+4. 每一個編號都要回一筆（id 是編號）；confidence 寫 0～1。
+${refs.length ? '5. 跟某張樣品一樣的，label、brand、model、spec 照那張樣品填，一字不差。\n' : ''}店內品項清單：
+${catalogLines().join('\n')}${list.length ? `\n品項庫（品名｜品牌｜型號｜尺寸／規格）：\n${list.map((it) => [it.label, it.brand || '—', it.model || '—', it.spec || '—'].join('｜')).join('\n')}` : ''}`
+  const parts = [
+    ...(refs.length ? [{ text: '【店內樣品】每張只拍一個商品，名稱是正確的：' }, ...refs.flatMap((r, i) => [{ text: `樣品 ${i + 1}：${[r.label, r.brand, r.model, r.spec].map((v) => v || '—').join('｜')}` }, { inline_data: { mime_type: 'image/jpeg', data: r.data } }])] : []),
+    { text: '【整張照片】縮小過；紅框和編號是要命名的商品：' },
+    { inline_data: { mime_type: 'image/jpeg', data: overview } },
+    ...(useCrops ? [{ text: '【特寫小圖】從原照片切下來；同一種的小圖用同一個比例切（小圖越大，東西越大）：' }, ...crops.flatMap((c, k) => [{ text: `物件 ${k + 1}（數量那一次分成：${objs[k].label}）` }, { inline_data: { mime_type: 'image/jpeg', data: c.data } }])] : []),
+    { text },
+  ]
+  return { contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: NAME_SCHEMA } }
+}
+const boxKey = (o) => o.box.join(',')
+/**
+ * 把補好的名稱放回框上（數量絕對不變：不新增、不刪框）：
+ * - 你改過的框不碰；你確認過、或 AI 說是「另一類」的（例如三通→彎頭）：只標「要確認」＋建議，你按「改成…」才改
+ * - 同一類補細節（三通 → 三通・3分）：直接寫上；那一種你手動改過數量的，也只給建議（不然改名後數量會對不上）
+ * 用框的座標對回去（補名稱期間你刪了、補了框也不會對錯）。
+ */
+function applyNames(s, photo, boxes, names) {
+  const byBox = new Map()
+  for (const n of names) {
+    const b = boxes[Number(n.id) - 1]
+    if (b) byBox.set(b, n)
+  }
+  const overridden = new Set(groupsOf(s).filter((g) => !g.manual && s.counts?.[g.key] !== undefined && s.counts[g.key] !== g.boxes).map((g) => g.key))
+  let named = 0
+  let suggested = 0
+  for (const o of photo.objects) {
+    const n = byBox.get(boxKey(o))
+    if (!n || o.edited) continue
+    const raw = { label: cleanLabel(n.label) || o.label, brand: String(n.brand || '').trim(), model: normalizeModel(n.model), spec: String(n.spec || '').trim() }
+    const it = itemsCache && findItem(itemsCache, raw)
+    const nx = it ? { label: it.label, brand: it.brand || '', model: it.model || '', spec: it.spec || '' } : raw
+    if (looseKey(nx) === looseKey(o)) continue
+    const sameKind = norm(nx.label).includes(norm(o.label)) || norm(o.label).includes(norm(nx.label))
+    if (sameKind && !o.checked && !overridden.has(keyOf(o))) {
+      const wasAi = o.ai === keyOf(o)
+      Object.assign(o, nx)
+      if (wasAi) o.ai = keyOf(o) // 也是 AI 的答案：「AI 準不準」才不會把補名稱算成 AI 錯
+      o.named = true
+      named++
+    } else {
+      o.suggest = { ...nx, why: '背景補名稱：可能是另一種' }
+      o.aiFlag = true
+      suggested++
+    }
+  }
+  photo.namedAt = Date.now()
+  delete photo.naming
+  return { named, suggested }
+}
+/** 補名稱的結果（雲端存的、或直接拿到的）：放回那次盤點、存檔、已經記進品項庫的就再記一次、跳橫幅 */
+async function applyNamesData(sid, pid, d) {
+  const open = state.session?.id === sid
+  const s = open ? state.session : await db.get(sid).catch(() => null)
+  const photo = s?.photos.find((p) => p.id === pid)
+  if (!photo || (photo.namedAt && photo.namedAt >= (d.at || 0))) return false
+  if (Number(d.status) !== 200) {
+    // 失敗：記下來，之後會自動再試（最多 3 次）
+    photo.naming = { ...(photo.naming || {}), at: d.at || photo.naming?.at || 0, err: d.error || `錯誤 ${d.status}` }
+    await db.put(s)
+    return false
+  }
+  let names
+  try {
+    const text = fromClaude('v1/messages', JSON.parse(d.body || '{}')).candidates[0].content.parts[0].text
+    names = JSON.parse(text).names
+  } catch {
+    names = null
+  }
+  if (!Array.isArray(names)) {
+    photo.naming = { ...(photo.naming || {}), err: '補名稱的結果格式不對' }
+    await db.put(s)
+    return false
+  }
+  await itemsAll()
+  const r = applyNames(s, photo, d.boxes || photo.naming?.boxes || [], names)
+  await db.put(s)
+  if (s.linkedAt && !s.photos.some((p) => p.naming)) await linkSession(s).catch(() => {})
+  if (!s.photos.some((p) => p.naming)) {
+    const where = s.place ? placeLabel(s.place) : fmtTime(s.createdAt)
+    banner(`${where} 名稱整理完成${r.suggested ? `・${r.suggested} 個要確認` : ''}`, () => {
+      state.session = s
+      go('review', { photoIndex: 0 })
+    })
+  }
+  if (open && state.view === 'review') render()
+  else if (state.view === 'home') render()
+  return true
+}
+/** 送出一張照片的補名稱：有雲端共用金鑰就交給雲端（App 關掉也會跑完）；用自己的金鑰只能在 App 開著時跑 */
+async function sendNames(s, photo, refs, batch) {
+  if (photo.status !== 'done' || !photo.objects.length || !photo.blob) return
+  const model = await refineModel()
+  const req = await nameRequest(photo, refs)
+  const at = Date.now()
+  photo.naming = { at, boxes: photo.objects.map(boxKey), tries: (photo.naming?.tries || 0) + 1 }
+  await db.put(s)
+  if ((state.session === s && state.view === 'review') || state.view === 'home') render() // 顯示「AI 正在補名稱」
+  if (viaSheetNow()) {
+    const body = toClaude(`models/${model}:generateContent`, { body: JSON.stringify(req) }).body
+    const r = await postSync({ action: 'nameRun', sid: s.id, pid: photo.id, at, boxes: photo.naming.boxes, body: JSON.stringify(body), batch })
+    if (typeof r.status !== 'number') throw new ApiError('雲端程式碼版本過舊，還不會補名稱：請擁有者更新 Apps Script', 403, 'sheet: no nameRun')
+    return applyNamesData(s.id, photo.id, { at, boxes: photo.naming?.boxes, status: r.status, body: r.body, error: r.error })
+  }
+  const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req) }, 120000)
+  return applyNamesData(s.id, photo.id, { at, boxes: photo.naming.boxes, status: 200, body: JSON.stringify({ content: [{ type: 'text', text: data.candidates[0].content.parts[0].text }], stop_reason: 'end_turn' }) })
+}
+/** 一次盤點的照片一張一張送（背景，不用等）；送不出去的記下來，之後 resumeNames 會再試 */
+let namesBusy = Promise.resolve()
+function queueNames(s, photos) {
+  namesBusy = namesBusy.then(async () => {
+    const refs = await sampleRefs()
+    const todo = photos.filter((p) => s.photos.includes(p) && !p.namedAt)
+    if (!todo.length) return
+    const where = s.place ? placeLabel(s.place) : fmtTime(s.createdAt)
+    const batch = { id: `${s.id}-${Date.now()}`, total: todo.length, title: `${where} 名稱整理完成`, body: '品名、規格補好了，點開確認（數量沒有變）' }
+    // 同時送出：一張一張等的話，手機一被關掉，後面的就送不出去；同時送，雲端每一張都會跑完
+    await Promise.all(
+      todo.map((p) =>
+        sendNames(s, p, refs, batch).catch(async (e) => {
+          p.naming = { ...(p.naming || {}), err: e.message || String(e) }
+          await db.put(s).catch(() => {})
+        }),
+      ),
+    )
+    if (state.view === 'home') render()
+  })
+  return namesBusy
+}
+/** 打開 App、回到 App 時：送出去超過 3 分鐘還沒結果（App 被關掉、網路斷了）的，再送一次（每張最多 3 次） */
+async function resumeNames() {
+  if (!namesMode() || !syncReady()) return
+  for (const s of await db.all()) {
+    const stale = s.photos.filter((p) => p.naming && !p.namedAt && (p.naming.tries || 0) < 3 && Date.now() - (p.naming.at || 0) > 180000)
+    if (stale.length) queueNames(state.session?.id === s.id ? state.session : s, stale)
+  }
+}
+/** 還在補名稱的照片有幾張（首頁顯示） */
+const namingCount = (sessions) => sessions.reduce((n, s) => n + s.photos.filter((p) => p.naming && !p.namedAt && !(p.naming.err && (p.naming.tries || 0) >= 3)).length, 0)
+
+// ───────────── 通知（4.14）：雲端補好名稱時，鎖定畫面也跳通知 ─────────────
+// 公鑰（公開資訊）；私鑰只在擁有者自己的 Cloudflare 通知服務裡
+const VAPID_PUBLIC = 'BOef3k7krm2Y0XFxRhaxZNMNkEOvpRfJoyWAElGwgxcaYrx1TDN7bMg84xHGndERVHL-N1umvitFWaIyBiyi8oM'
+const b64uBytes = (t) => Uint8Array.from(atob(t.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))
+const pushCan = () => 'PushManager' in window && 'serviceWorker' in navigator && 'Notification' in window
+function pushRows() {
+  if (!syncReady()) return ''
+  const on = pushCan() && Notification.permission === 'granted' && ls.get(LS.pushOn) === '1'
+  const meta = !pushCan() ? (isIOS() && !standalone() ? '要先把 App 加到主畫面（iOS 16.4 以上）才能收通知' : '這個瀏覽器不支援通知') : on ? '已開啟：關掉 App、鎖定畫面也看得到' : '關掉 App 也能收到「名稱整理完成」'
+  return `<p class="section-title">通知</p><div class="group">
+    <div class="row"><span class="grow"><span class="title">名稱補好時通知我</span><br><span class="meta">${meta}</span></span>${pushCan() ? `<button class="btn small ${on ? 'secondary' : ''}" data-action="push-enable">${on ? '重新開啟' : '開啟'}</button>` : ''}</div>
+    ${
+      myRole() === 'owner'
+        ? `<div class="row"><span class="grow"><span class="title">通知服務</span><br><span class="meta">${ls.get(LS.pushSvc) === '1' ? '已設定' : '還沒設定：照說明文件建好 Cloudflare 通知服務，把網址貼在下面'}</span></span></div>
+           <div class="row-actions join-code-act"><input class="field" id="push-url" placeholder="https://….workers.dev/…" autocomplete="off" spellcheck="false" style="flex:1;min-width:0"><button class="btn small" data-action="push-url-save">儲存</button></div>`
+        : ''
+    }
+  </div>`
+}
+/** 開啟通知：問 iPhone 允不允許 → 跟瀏覽器訂閱 → 訂閱交給雲端（補好名稱時雲端請通知服務發給這支手機） */
+async function enablePush() {
+  const perm = await Notification.requestPermission()
+  if (perm !== 'granted') return toast('沒有允許通知：到 iPhone「設定 → 通知 → 聖佳庫存」打開')
+  const reg = await navigator.serviceWorker.ready
+  const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(VAPID_PUBLIC) }))
+  const r = await postSync({ action: 'pushSub', sub: sub.toJSON() })
+  if (!('pushOn' in r)) throw new Error('雲端程式碼版本過舊，還不會通知：請擁有者更新 Apps Script')
+  ls.set(LS.pushOn, '1')
+  ls.set(LS.pushSvc, r.pushOn ? '1' : '')
+  toast(r.pushOn ? '已開啟通知' : '已開啟通知；擁有者設定好通知服務後才會收到')
+}
+
+/** App 裡的橫幅（像 iPhone 的通知）：從上面滑下來，點一下打開；4 秒後自己收起來 */
+function banner(msg, onTap) {
+  document.querySelector('.app-banner')?.remove()
+  const b = document.createElement('button')
+  b.className = 'app-banner'
+  b.setAttribute('role', 'status')
+  b.innerHTML = `<span class="app-banner-ico" aria-hidden="true">${icon('check', 18)}</span><span class="grow">${esc(msg)}</span>${onTap ? '<span class="app-banner-go">查看</span>' : ''}`
+  const hide = () => {
+    b.classList.add('out')
+    setTimeout(() => b.remove(), 300)
+  }
+  b.onclick = () => {
+    hide()
+    onTap?.()
+  }
+  document.body.appendChild(b)
+  setTimeout(hide, 4500)
 }
 
 /**
@@ -9369,9 +9632,27 @@ $app.addEventListener('click', async (e) => {
     }
     case 'lookup-no-ai':
       return toast(!canEdit() && aiSharedOn() ? '檢視者不能用公司共用的金鑰拍標籤；打型號查詢可以用' : syncReady() ? '尚未開通 AI：請通知擁有者；打型號查詢不用 AI' : '先接上大家的資料才能拍標籤；打型號查詢不用')
+    case 'push-enable':
+      try {
+        await enablePush()
+      } catch (e) {
+        toast(e.message || '開啟通知失敗')
+      }
+      return render()
+    case 'push-url-save': {
+      const url = document.getElementById('push-url')?.value.trim() || ''
+      try {
+        const r = await postSync({ action: 'pushSetup', url })
+        ls.set(LS.pushSvc, r.pushOn ? '1' : '')
+        toast(r.pushOn ? '已設定通知服務' : '已清除通知服務')
+      } catch (e) {
+        toast(e.message)
+      }
+      return render()
+    }
     case 'ai-mode':
-      ls.set(LS.aiMode, countMode() ? 'full' : 'count')
-      toast(countMode() ? '已改成只數數量：速度快，品名只分大類' : '已改成完整辨識：會寫品名、規格，並做相似品比對')
+      ls.set(LS.aiMode, d.mode)
+      toast(`辨識內容：${MODE_LABEL[aiMode()]}`)
       return render()
     case 'pick-model':
       if (!hasAi()) return toast(canEdit() ? '先在上面貼上 AI 金鑰' : '檢視者不能用公司共用的金鑰')
@@ -10100,7 +10381,7 @@ function bindInputs() {
 const photosAtRisk = () => state.view === 'capture' && !!state.session?.photos.length
 const safeToReload = () =>
   // 只在清單類的頁面重新整理（盤點結果、品項頁、拍照頁等你換頁再說）
-  ['home', 'items', 'lookup', 'settings', 'report', 'catalog', 'locations', 'quality', 'pick', 'pick-result'].includes(state.view) &&
+  ['home', 'items', 'lookup', 'settings', 'settings-adv', 'report', 'catalog', 'locations', 'quality', 'pick', 'pick-result'].includes(state.view) &&
   !photosAtRisk() &&
   !state.busy &&
   !joining &&
@@ -10186,6 +10467,9 @@ render()
 }
 // 從 Google 登入回來（#id_token=…）
 finishGoogle()
+// 背景補名稱：上次沒補完的接著補（雲端已經補好的，同步時會自己拿回來）
+setTimeout(() => resumeNames().catch(() => {}), 5000)
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && setTimeout(() => resumeNames().catch(() => {}), 4000))
 // 連結被手機清掉了：從備份接回來（然後同步）；沒被清掉就順便更新備份
 keepRestore().then((back) => {
   if (back) {

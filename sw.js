@@ -1,6 +1,6 @@
 // 讓 App 本身離線也能打開（AI 辨識還是要網路）
 // 更新：每次都先問 GitHub 有沒有新版（跳過手機的 10 分鐘暫存）；新版裝好後，App 在安全的頁面（不是拍照拍到一半）自動重新整理
-const CACHE = 'inventory-v73'
+const CACHE = 'inventory-v74'
 const SHELL = ['./', 'index.html', 'app.js', 'rules.js', 'icons.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'logo.svg', 'xlsx.js', 'google-sheets.gs']
 
 self.addEventListener('install', (e) => {
@@ -69,5 +69,26 @@ self.addEventListener('fetch', (e) => {
         })
         .catch(() => cache.match(e.request, { ignoreSearch: true })),
     ),
+  )
+})
+
+// 4.14 通知：雲端補好名稱時，鎖定畫面跳通知；點一下打開 App
+self.addEventListener('push', (e) => {
+  let d = {}
+  try {
+    d = e.data ? e.data.json() : {}
+  } catch {
+    d = {}
+  }
+  e.waitUntil(self.registration.showNotification(d.title || '聖佳智慧庫存', { body: d.body || '名稱整理完成，點開查看', icon: 'icon-192.png', badge: 'icon-192.png', data: { url: d.url || './' } }))
+})
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close()
+  e.waitUntil(
+    (async () => {
+      const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      if (wins[0]) return wins[0].focus()
+      return self.clients.openWindow(new URL(e.notification.data?.url || './', self.registration.scope).href)
+    })(),
   )
 })

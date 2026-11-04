@@ -5215,3 +5215,66 @@ html.is-scrolled .nav {
     top: 0;
   }
 }
+/* 4.14 App 內橫幅（像 iPhone 的通知）：從上面滑下來；實心底，不用毛玻璃 */
+.app-banner {
+  position: fixed;
+  top: calc(var(--safe-t) + 8px);
+  left: 50%;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(92vw, 480px);
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  box-shadow: 0 0 0 1px var(--line), 0 8px 24px -12px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, 0);
+  animation: banner-in 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  cursor: pointer;
+}
+.app-banner.out {
+  transform: translate(-50%, -140%);
+  transition: transform 0.25s ease-in;
+}
+@keyframes banner-in {
+  from {
+    transform: translate(-50%, -140%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-banner {
+    animation: none;
+  }
+  .app-banner.out {
+    transition: none;
+  }
+}
+.app-banner-ico {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--tint);
+  color: #fff;
+}
+.app-banner-go {
+  flex: none;
+  color: var(--tint);
+  font-weight: 600;
+}
+.mode-chips {
+  display: flex;
+  margin-top: 10px;
+}
+/* 4.14 設定頁：「進階設定」入口 */
+.adv-link {
+  margin-top: 22px;
+}
