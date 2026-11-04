@@ -180,9 +180,17 @@ function doPost(e) {
     if (!/^names:[A-Za-z0-9_-]{1,64}:[A-Za-z0-9_-]{1,64}$/.test(k)) return json({ ok: false, status: 400, aiClaude: aiClaude, pend: pend, me: me, error: '補名稱的資料格式不對' })
     const r = claudeProxy({ path: 'v1/messages', body: data.body }, P, props, who)
     const boxes = Array.isArray(data.boxes) ? data.boxes.slice(0, 300).map(String) : []
-    syncPush({ records: [{ k: k, t: Date.now(), d: { at: Number(data.at) || 0, boxes: boxes, status: r.status || 0, body: r.ok ? String(r.body || '') : '', error: r.ok ? '' : String(r.error || '') } }], dev: 'cloud-names' }, props, P, false)
-    // 同一次盤點的照片都補完了：發通知給送出的那個人（手機在鎖定畫面也看得到）
-    if (data.batch && data.batch.id && batchDone(String(data.batch.id).slice(0, 80), Number(data.batch.total) || 1)) notifyPush(props, who, String(data.batch.title || '名稱整理完成').slice(0, 80), String(data.batch.body || '').slice(0, 200))
+    // Claude 已經跑完（已經收錢）：存不進同步資料（鎖等太久）也要把結果回給手機
+    try {
+      syncPush({ records: [{ k: k, t: Date.now(), d: { at: Number(data.at) || 0, boxes: boxes, status: r.status || 0, body: r.ok ? String(r.body || '') : '', error: r.ok ? '' : String(r.error || '') } }], dev: 'cloud-names' }, props, P, false)
+    } catch (e) {
+      /* 手機有拿到回覆就好；沒拿到的話之後會再送一次 */
+    }
+    // 同一次盤點的照片都跑完了：發通知給送出的那個人（有失敗的寫出幾張）
+    if (data.batch && data.batch.id) {
+      const b = batchDone(String(data.batch.id).slice(0, 80), Number(data.batch.total) || 1, r.ok && r.status === 200)
+      if (b.done) notifyPush(props, who, String(data.batch.title || '名稱整理完成').slice(0, 80) + (b.fails ? '（' + b.fails + ' 張沒補上）' : ''), String(data.batch.body || '').slice(0, 200))
+    }
     return json(Object.assign({}, r, { aiClaude: aiClaude, pend: pend, me: me }))
   }
   if (who && data.action === 'ai') {
@@ -361,14 +369,16 @@ function pushSub(data, props, who) {
   }
 }
 /** 同一批（一次盤點）補名稱：第 total 張完成時回 true（只通知一次） */
-function batchDone(id, total) {
+function batchDone(id, total, ok) {
   const lock = LockService.getScriptLock()
   lock.waitLock(10000)
   try {
     const c = CacheService.getScriptCache()
     const n = Number(c.get('NB:' + id) || 0) + 1
+    const fails = Number(c.get('NBF:' + id) || 0) + (ok ? 0 : 1)
     c.put('NB:' + id, String(n), 6 * 3600)
-    return n === total
+    c.put('NBF:' + id, String(fails), 6 * 3600)
+    return { done: n === total, fails: fails }
   } finally {
     lock.releaseLock()
   }
@@ -385,10 +395,18 @@ function notifyPush(props, who, title, body) {
     const res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: JSON.stringify({ subs: subs, title: title, body: body }), muteHttpExceptions: true })
     const gone = (JSON.parse(res.getContentText() || '{}').gone || []).map(String)
     if (gone.length) {
-      all[id] = subs.filter(function (x) {
-        return gone.indexOf(x.endpoint) < 0
-      })
-      props.setProperty('PUSH_SUBS', JSON.stringify(all))
+      // 鎖住後重新讀一次再寫（不要蓋掉同一時間別人新開的通知）
+      const lock = LockService.getScriptLock()
+      lock.waitLock(10000)
+      try {
+        const now = JSON.parse(props.getProperty('PUSH_SUBS') || '{}')
+        now[id] = (now[id] || []).filter(function (x) {
+          return gone.indexOf(x.endpoint) < 0
+        })
+        props.setProperty('PUSH_SUBS', JSON.stringify(now))
+      } finally {
+        lock.releaseLock()
+      }
     }
   } catch (e) {
     /* 通知沒送到不影響補名稱 */

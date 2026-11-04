@@ -111,7 +111,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.14.0（11/04・快速數量＋雲端補名稱、通知、設定頁整理）'
+const VERSION = '4.14.1（11/05・補名稱保護數量、通知修正）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -547,7 +547,7 @@ class ApiError extends Error {
   }
 }
 function friendly(status, msg = '') {
-  if (status === 401) return myRole() === 'owner' ? 'API 金鑰無效或已停用：請至「設定 → AI」重新輸入。' : 'AI 金鑰異常：請通知擁有者處理。'
+  if (status === 401) return myRole() === 'owner' ? 'API 金鑰無效或已停用：請至「設定 → 進階設定」重新輸入。' : 'AI 金鑰異常：請通知擁有者處理。'
   if (status === 400 && /credit|balance|billing/i.test(msg)) return 'Claude 帳戶餘額不足：請至 console.anthropic.com 的 Billing 儲值。'
   if (status === 400) return `AI 無法處理這次請求（${msg.slice(0, 80)}）`
   if (status === 403) return '此金鑰無權限：請確認是在 console.anthropic.com 建立的金鑰。'
@@ -716,7 +716,7 @@ async function callViaSheet(path, opts, timeoutMs) {
     outer?.removeEventListener('abort', onAbort)
   }
   // 舊版雲端程式碼不認得 ai：回覆裡沒有狀態碼
-  if (typeof r.status !== 'number') throw new ApiError('雲端程式碼版本過舊：請擁有者更新（設定 → Google 試算表）。', 403, 'sheet: no status (old Apps Script)')
+  if (typeof r.status !== 'number') throw new ApiError('雲端程式碼版本過舊：請擁有者更新（設定 → 進階設定 → Google 試算表）。', 403, 'sheet: no status (old Apps Script)')
   let data = {}
   try {
     data = JSON.parse(r.body || '{}')
@@ -734,7 +734,7 @@ function sheetAiError(e) {
   const msg = e?.message || '無法連線到 Google，請確認網路。'
   if (!d || d.network) return new ApiError(msg, 0, `sheet ${msg}`.slice(0, 200))
   // 雲端還不認得 Claude（舊版程式碼）：會回「不支援的 AI 請求」
-  if (/不支援的 AI 請求/.test(d.error || '')) return new ApiError('雲端程式碼版本過舊：請擁有者更新（設定 → Google 試算表）。', 403, 'sheet: old Apps Script (no claude)')
+  if (/不支援的 AI 請求/.test(d.error || '')) return new ApiError('雲端程式碼版本過舊：請擁有者更新（設定 → 進階設定 → Google 試算表）。', 403, 'sheet: old Apps Script (no claude)')
   if (d.html) return Object.assign(new ApiError(msg, 503, `sheet html ${d.httpStatus || ''}`.trim()), { sheetDown: true })
   // 404＝共用金鑰不支援這個模型：換下一個模型試；其他都是雲端明確說不行：重試也一樣，不要浪費
   const status = d.status === 404 && !d.quota && !d.viewer && !d.revoked ? 404 : 403
@@ -2360,7 +2360,7 @@ addEventListener('resize', () => {
   if (b) b.setAttribute('aria-label', !was ? '展開選單' : '收合選單')
 })
 /** 子頁面屬於哪一個主頁（側邊欄標哪一個） */
-const TAB_OF = { capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', catalog: 'items', lookup: 'lookup', settings: 'settings', pick: 'pick', 'pick-edit': 'pick', 'pick-result': 'pick' }
+const TAB_OF = { 'settings-adv': 'settings', capture: 'home', analyzing: 'home', review: 'home', report: 'home', quality: 'home', item: 'items', locations: 'items', catalog: 'items', lookup: 'lookup', settings: 'settings', pick: 'pick', 'pick-edit': 'pick', 'pick-result': 'pick' }
 
 /**
  * 首頁的大數字方塊（4.6）：今天盤了幾件、要確認幾個、該叫貨幾種、要複盤幾項；點了直接去處理。
@@ -2411,7 +2411,7 @@ async function viewHome() {
         : hasKey
         ? `<button class="hero-btn" data-action="new"><span class="hero-icon" aria-hidden="true">${icon('camera', 30)}</span><span class="grow"><b>新盤點</b><span class="meta">拍攝貨架，AI 自動計數<br>拍到 ${locTag(locations()[0]?.code || 'A-03', 'sm')} 自動帶入位置</span></span>${chev}</button>`
         : syncReady()
-          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>尚無法拍照盤點：AI 金鑰未設定</b><p>請至「設定 → AI」輸入金鑰，再按<span class="nb">「放到雲端」</span>，所有成員即可使用。</p>' : '<b>尚無法拍照盤點：擁有者尚未設定 AI 金鑰</b><p>請擁有者至「設定 → AI」按「放到雲端」。設定後即可使用，無需自行輸入金鑰。</p>'}${myRole() === 'owner' ? '<button class="btn small" data-go="settings">去設定</button>' : ''}</div></div>`
+          ? `<div class="setup-card"><span class="setup-ico" aria-hidden="true">${icon('camera', 26)}</span><div class="grow">${myRole() === 'owner' ? '<b>尚無法拍照盤點：AI 金鑰未設定</b><p>請至「設定 → 進階設定」輸入金鑰，再按<span class="nb">「放到雲端」</span>，所有成員即可使用。</p>' : '<b>尚無法拍照盤點：擁有者尚未設定 AI 金鑰</b><p>請擁有者至「設定 → 進階設定」按「放到雲端」。設定後即可使用，無需自行輸入金鑰。</p>'}${myRole() === 'owner' ? '<button class="btn small" data-go="settings-adv">去設定</button>' : ''}</div></div>`
           : joinCard()
     }
     </div>
@@ -2652,7 +2652,7 @@ function viewReview() {
           </div>`
         : ''
     }
-    ${s.photos.some((p) => p.naming && !p.namedAt) ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在補名稱…</b>可以先離開，好了會通知你；<span class="nb">數量不會變。</span></div>` : ''}
+    ${s.photos.some(namingPending) ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在補名稱…</b>可以先離開，好了會通知你；<span class="nb">數量不會變。</span></div>` : ''}
     ${state.refining && state.refining.session === s.id ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在再檢查相似品…</b><span class="nb">（${state.refining.done}/${state.refining.total} 張）</span>可先查看結果；<span class="nb">此檢查不會更改答案，</span><span class="nb">認為不同者</span><span class="nb">會標示為「要確認」。</span></div>` : ''}
     ${notes}
     ${s.photos
@@ -7120,7 +7120,7 @@ async function postSync(body, opt = {}) {
     const was = ls.get(LS.pend)
     ls.set(LS.pend, String(data.pend || 0))
     if (canManage() && Number(data.pend || 0) > Number(was || 0)) toast('有新的加入申請：點首頁卡片審核')
-    if (was !== ls.get(LS.pend) && ['home', 'settings'].includes(state.view)) setTimeout(render, 0)
+    if (was !== ls.get(LS.pend) && ['home', 'settings', 'settings-adv'].includes(state.view)) setTimeout(render, 0)
   }
   // 權限隨時可能被管理員改：每次回覆都更新
   if (data.me?.role) {
@@ -7183,6 +7183,9 @@ async function keepRestore() {
 }
 /** 清除這台的資料（退出同步、被移除權限時） */
 async function wipeLocal(msg) {
+  navigator.serviceWorker?.ready.then((r) => r.pushManager?.getSubscription()).then((x) => x?.unsubscribe()).catch(() => {})
+  ls.set(LS.pushOn, '')
+  ls.set(LS.pushSvc, '')
   caches.delete(KEEP).catch(() => {})
   clearTimeout(syncTimer)
   for (const k of [LS.moveHintOff, LS.syncKey, LS.sheet, LS.pulled, LS.lastSync, LS.deleted, LS.settingsAt, LS.settingsSyncT, LS.locations, LS.catalog, LS.memberName, LS.memberRole, LS.memberId, LS.roster, LS.counterId, LS.aiSharedClaude, LS.claudeKey, LS.claudeModel, LS.claudePinned, LS.serverGemini, LS.joinReq, LS.pend, LS.backupDone, LS.joinNote, LS.gAuth, LS.gEmail]) ls.set(k, '')
@@ -7304,7 +7307,7 @@ async function applyRemote(rec) {
   // 雲端補好的名稱（names:盤點:照片）：放回那次盤點
   if (kind === 'names') {
     const [sid, pid] = id.split(':')
-    return !rec.del && rec.d ? applyNamesData(sid, pid, rec.d) : false
+    return !rec.del && rec.d ? applyNamesData(sid, pid, rec.d, { remote: true }) : false
   }
   const store = SYNC_STORES[kind]
   if (!store) return false // photo:… 之類的不在這裡處理（照片是打開那次盤點才抓）
@@ -7546,6 +7549,11 @@ async function syncNow(report = () => {}) {
     // 正在看的那次盤點先抓照片，其他的在背景慢慢抓
     if (state.session?.photos.some((p) => p.pending)) fetchPhotos(state.session, { skipMissing: true }).catch(() => {})
     setTimeout(() => prefetchPhotos().catch(() => {}), 1500)
+    // 第一次同步下載完：沒補完的名稱接著補（雲端補好的已經拿回來了）
+    if (!namesResumeOk) {
+      namesResumeOk = true
+      setTimeout(() => resumeNames().catch(() => {}), 500)
+    }
     return { pushed: sent, pulled: got, changed }
   })()
     .catch((e) => {
@@ -7762,7 +7770,7 @@ async function syncStart() {
   syncNow((m) => toast(m))
     .then((r) => toast(`同步完成：上傳 ${r.pushed} 筆。接著可至「共用設定」邀請成員`))
     .catch((err) => toast(`同步沒成功：${err.message}`))
-    .finally(() => state.view === 'settings' && render())
+    .finally(() => state.view.startsWith('settings') && render())
   // 先問名字：大家會看到「誰盤的」
   return nameSheet('owner', '你的名字？', '盤點紀錄會顯示盤點人（例如：小宇、店長）。')
 }
@@ -7923,7 +7931,7 @@ async function loadGoogleId() {
     const d = await res.json()
     if (!d.ok || (d.clientId || '') === googleId()) return
     ls.set(LS.googleId, d.clientId || '')
-    if (state.view === 'home' || state.view === 'settings') render()
+    if (state.view === 'home' || state.view.startsWith('settings')) render()
   } catch {
     /* 沒網路：下次再問 */
   }
@@ -8126,12 +8134,12 @@ function shareSheet() {
         }
         // 舊版雲端程式碼不認得這個動作：回覆裡沒有 code
         if (!('code' in r)) {
-          box.innerHTML = `<div class="hint-card" style="margin-bottom:12px"><b>雲端程式碼版本過舊，無法使用通行碼</b>：請擁有者更新 Apps Script（設定 → Google 試算表 → 複製試算表程式碼，貼上並部署新版本）。</div>`
+          box.innerHTML = `<div class="hint-card" style="margin-bottom:12px"><b>雲端程式碼版本過舊，無法使用通行碼</b>：請擁有者更新 Apps Script（設定 → 進階設定 → Google 試算表 → 複製試算表程式碼，貼上並部署新版本）。</div>`
           return
         }
         const pendWas = ls.get(LS.pend)
         ls.set(LS.pend, String(r.pending.length))
-        if (pendWas !== ls.get(LS.pend) && ['home', 'settings'].includes(state.view)) render()
+        if (pendWas !== ls.get(LS.pend) && ['home', 'settings', 'settings-adv'].includes(state.view)) render()
         // 沒變就不重畫（每 8 秒自動更新一次，不要打斷正在選的權限、正在打的字）
         const sig = JSON.stringify([r.code, r.pending, r.allow, r.googleClientId, r.ownerEmail])
         if (!force && sig === loadJoin.sig) return
@@ -8365,10 +8373,10 @@ function moveSheet() {
           ls.set(LS.sheet, oldUrl)
           await postSync({ action: 'moveTo', url: newUrl })
           ls.set(LS.sheet, newUrl)
-          status(`搬移完成：所有成員的 App 下次同步時會自動切換。確認無誤後，可刪除舊的試算表與資料夾。${aiWas ? '共用的 AI 金鑰不會一併搬移：請至「設定 → AI」再按一次「放到雲端」，成員才能繼續使用拍照辨識。' : ''}`)
+          status(`搬移完成：所有成員的 App 下次同步時會自動切換。確認無誤後，可刪除舊的試算表與資料夾。${aiWas ? '共用的 AI 金鑰不會一併搬移：請至「設定 → 進階設定」再按一次「放到雲端」，成員才能繼續使用拍照辨識。' : ''}`)
           if (aiWas) {
             ls.set(LS.aiSharedClaude, '')
-            alert('搬移完成。\n\n共用的 AI 金鑰不會一併搬移（金鑰不會從雲端傳回手機）。\n請至「設定 → AI」再按一次「放到雲端」，成員才能繼續使用拍照辨識。')
+            alert('搬移完成。\n\n共用的 AI 金鑰不會一併搬移（金鑰不會從雲端傳回手機）。\n請至「設定 → 進階設定」再按一次「放到雲端」，成員才能繼續使用拍照辨識。')
             render()
           } else toast('搬移完成')
         } catch (e) {
@@ -8655,7 +8663,7 @@ async function viewQuality() {
           ${
             worst.length
               ? `<p class="section-title">最常數錯的</p><div class="group">${worst.map((w) => `<div class="row"><span class="grow"><span class="title">${esc(w.label)}</span><br><span class="meta">${w.n} 次裡 ${w.n - w.exact} 次數量不對，一共差 ${w.err} 個</span></span></div>`).join('')}</div>
-                 <p class="footnote">常錯的那一種，拍一張清楚的樣品照（設定 → 樣品照），名稱和尺寸寫清楚，AI 下次就會拿來比。</p>`
+                 <p class="footnote">常錯的那一種，拍一張清楚的樣品照（設定 → 進階設定 → 樣品照），名稱和尺寸寫清楚，AI 下次就會拿來比。</p>`
               : ''
           }
           ${
@@ -9042,7 +9050,8 @@ function applyNames(s, photo, boxes, names) {
     const b = boxes[Number(n.id) - 1]
     if (b) byBox.set(b, n)
   }
-  const overridden = new Set(groupsOf(s).filter((g) => !g.manual && s.counts?.[g.key] !== undefined && s.counts[g.key] !== g.boxes).map((g) => g.key))
+  // 數量絕對不能變：數量是照「種類」記的（counts）。改名前那一種、或改名後會併進去的那一種，只要記過數量，就只給建議
+  const hasCount = (k) => s.counts?.[k] !== undefined
   let named = 0
   let suggested = 0
   for (const o of photo.objects) {
@@ -9053,7 +9062,7 @@ function applyNames(s, photo, boxes, names) {
     const nx = it ? { label: it.label, brand: it.brand || '', model: it.model || '', spec: it.spec || '' } : raw
     if (looseKey(nx) === looseKey(o)) continue
     const sameKind = norm(nx.label).includes(norm(o.label)) || norm(o.label).includes(norm(nx.label))
-    if (sameKind && !o.checked && !overridden.has(keyOf(o))) {
+    if (sameKind && !o.checked && !hasCount(keyOf(o)) && !hasCount(keyOf(nx))) {
       const wasAi = o.ai === keyOf(o)
       Object.assign(o, nx)
       if (wasAi) o.ai = keyOf(o) // 也是 AI 的答案：「AI 準不準」才不會把補名稱算成 AI 錯
@@ -9069,12 +9078,19 @@ function applyNames(s, photo, boxes, names) {
   delete photo.naming
   return { named, suggested }
 }
-/** 補名稱的結果（雲端存的、或直接拿到的）：放回那次盤點、存檔、已經記進品項庫的就再記一次、跳橫幅 */
-async function applyNamesData(sid, pid, d) {
-  const open = state.session?.id === sid
-  const s = open ? state.session : await db.get(sid).catch(() => null)
+/** 這次盤點最新的那一份：打開中的用畫面上的；已經被刪掉回 null（不要把刪掉的救回來） */
+const freshSession = async (sid) => (state.session?.id === sid ? state.session : (await db.get(sid).catch(() => null)) || null)
+/** 這張照片還在補名稱（失敗 3 次、或已經不是快速模式就不算） */
+const namingPending = (p) => namesMode() && !!p.naming && !p.namedAt && !(p.naming.err && (p.naming.tries || 0) >= 3)
+/**
+ * 補名稱的結果（雲端存的、或直接拿到的）：放回那次盤點、存檔、已經記進品項庫的就再記一次、跳橫幅。
+ * remote（同步拿到的）：只有送出的那一台會套用；別台等那一台把改好的盤點同步過來（不然舊的那份會蓋掉別台改過的數量）
+ */
+async function applyNamesData(sid, pid, d, { remote = false } = {}) {
+  const s = await freshSession(sid)
   const photo = s?.photos.find((p) => p.id === pid)
   if (!photo || (photo.namedAt && photo.namedAt >= (d.at || 0))) return false
+  if (remote && photo.naming?.dev !== deviceId()) return false
   if (Number(d.status) !== 200) {
     // 失敗：記下來，之後會自動再試（最多 3 次）
     photo.naming = { ...(photo.naming || {}), at: d.at || photo.naming?.at || 0, err: d.error || `錯誤 ${d.status}` }
@@ -9096,37 +9112,44 @@ async function applyNamesData(sid, pid, d) {
   await itemsAll()
   const r = applyNames(s, photo, d.boxes || photo.naming?.boxes || [], names)
   await db.put(s)
-  if (s.linkedAt && !s.photos.some((p) => p.naming)) await linkSession(s).catch(() => {})
-  if (!s.photos.some((p) => p.naming)) {
+  if (!s.photos.some(namingPending)) {
+    if (s.linkedAt) await linkSession(s).catch(() => {})
     const where = s.place ? placeLabel(s.place) : fmtTime(s.createdAt)
     banner(`${where} 名稱整理完成${r.suggested ? `・${r.suggested} 個要確認` : ''}`, () => {
+      // 正在拍、正在辨識、正在點貨：不要直接跳走（照片只在記憶體裡，跳走就不見）
+      if (['capture', 'analyzing', 'pick-edit'].includes(state.view)) return toast('先完成目前的工作，再到首頁打開那次盤點查看')
       state.session = s
       go('review', { photoIndex: 0 })
     })
   }
-  if (open && state.view === 'review') render()
+  if (state.session === s && state.view === 'review') render()
   else if (state.view === 'home') render()
   return true
 }
 /** 送出一張照片的補名稱：有雲端共用金鑰就交給雲端（App 關掉也會跑完）；用自己的金鑰只能在 App 開著時跑 */
-async function sendNames(s, photo, refs, batch) {
-  if (photo.status !== 'done' || !photo.objects.length || !photo.blob) return
+async function sendNames(s0, photo0, refs, batch) {
+  if (photo0.status !== 'done' || !photo0.objects.length || !photo0.blob) return
   const model = await refineModel()
-  const req = await nameRequest(photo, refs)
+  const req = await nameRequest(photo0, refs)
+  const boxes = photo0.objects.map(boxKey)
+  // 存檔前拿最新的一份（這段時間你可能改過、或刪掉了這次盤點）
+  const s = await freshSession(s0.id)
+  const photo = s?.photos.find((p) => p.id === photo0.id)
+  if (!photo || photo.namedAt) return
   const at = Date.now()
-  photo.naming = { at, boxes: photo.objects.map(boxKey), tries: (photo.naming?.tries || 0) + 1 }
+  photo.naming = { at, boxes, tries: (photo.naming?.tries || 0) + 1, dev: deviceId() }
   await db.put(s)
   if ((state.session === s && state.view === 'review') || state.view === 'home') render() // 顯示「AI 正在補名稱」
   if (viaSheetNow()) {
     const body = toClaude(`models/${model}:generateContent`, { body: JSON.stringify(req) }).body
-    const r = await postSync({ action: 'nameRun', sid: s.id, pid: photo.id, at, boxes: photo.naming.boxes, body: JSON.stringify(body), batch })
+    const r = await postSync({ action: 'nameRun', sid: s.id, pid: photo.id, at, boxes, body: JSON.stringify(body), batch })
     if (typeof r.status !== 'number') throw new ApiError('雲端程式碼版本過舊，還不會補名稱：請擁有者更新 Apps Script', 403, 'sheet: no nameRun')
-    return applyNamesData(s.id, photo.id, { at, boxes: photo.naming?.boxes, status: r.status, body: r.body, error: r.error })
+    return applyNamesData(s.id, photo.id, { at, boxes, status: r.status, body: r.body, error: r.error })
   }
   const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req) }, 120000)
-  return applyNamesData(s.id, photo.id, { at, boxes: photo.naming.boxes, status: 200, body: JSON.stringify({ content: [{ type: 'text', text: data.candidates[0].content.parts[0].text }], stop_reason: 'end_turn' }) })
+  return applyNamesData(s.id, photo.id, { at, boxes, status: 200, body: JSON.stringify({ content: [{ type: 'text', text: data.candidates[0].content.parts[0].text }], stop_reason: 'end_turn' }) })
 }
-/** 一次盤點的照片一張一張送（背景，不用等）；送不出去的記下來，之後 resumeNames 會再試 */
+/** 一次盤點的照片送去補名稱（背景，不用等）：一次 3 張同時送（太多會撞到雲端、Claude 的上限）；送不出去的記下來，之後 resumeNames 會再試 */
 let namesBusy = Promise.resolve()
 function queueNames(s, photos) {
   namesBusy = namesBusy.then(async () => {
@@ -9135,29 +9158,37 @@ function queueNames(s, photos) {
     if (!todo.length) return
     const where = s.place ? placeLabel(s.place) : fmtTime(s.createdAt)
     const batch = { id: `${s.id}-${Date.now()}`, total: todo.length, title: `${where} 名稱整理完成`, body: '品名、規格補好了，點開確認（數量沒有變）' }
-    // 同時送出：一張一張等的話，手機一被關掉，後面的就送不出去；同時送，雲端每一張都會跑完
-    await Promise.all(
-      todo.map((p) =>
-        sendNames(s, p, refs, batch).catch(async (e) => {
-          p.naming = { ...(p.naming || {}), err: e.message || String(e) }
-          await db.put(s).catch(() => {})
-        }),
-      ),
-    )
+    const failed = async (p, e) => {
+      const cur = await freshSession(s.id)
+      const ph = cur?.photos.find((x) => x.id === p.id)
+      if (!ph) return
+      ph.naming = { ...(ph.naming || {}), err: e.message || String(e) }
+      await db.put(cur).catch(() => {})
+    }
+    const pool = [...todo]
+    const run = async () => {
+      while (pool.length) {
+        const p = pool.shift()
+        await sendNames(s, p, refs, batch).catch((e) => failed(p, e))
+      }
+    }
+    await Promise.all([run(), run(), run()])
     if (state.view === 'home') render()
   })
   return namesBusy
 }
-/** 打開 App、回到 App 時：送出去超過 3 分鐘還沒結果（App 被關掉、網路斷了）的，再送一次（每張最多 3 次） */
+/** 第一次同步下載完才補送：雲端可能早就補好了（App 關掉的那段時間），先拿回來，不要重複花錢 */
+let namesResumeOk = false
+/** 打開 App、回到 App 時：這台送出去超過 3 分鐘還沒結果的，再送一次（每張最多 3 次；別台送的不管） */
 async function resumeNames() {
-  if (!namesMode() || !syncReady()) return
+  if (!namesMode() || !syncReady() || !namesResumeOk) return
   for (const s of await db.all()) {
-    const stale = s.photos.filter((p) => p.naming && !p.namedAt && (p.naming.tries || 0) < 3 && Date.now() - (p.naming.at || 0) > 180000)
+    const stale = s.photos.filter((p) => namingPending(p) && p.naming.dev === deviceId() && (p.naming.tries || 0) < 3 && Date.now() - (p.naming.at || 0) > 180000)
     if (stale.length) queueNames(state.session?.id === s.id ? state.session : s, stale)
   }
 }
 /** 還在補名稱的照片有幾張（首頁顯示） */
-const namingCount = (sessions) => sessions.reduce((n, s) => n + s.photos.filter((p) => p.naming && !p.namedAt && !(p.naming.err && (p.naming.tries || 0) >= 3)).length, 0)
+const namingCount = (sessions) => sessions.reduce((n, s) => n + s.photos.filter(namingPending).length, 0)
 
 // ───────────── 通知（4.14）：雲端補好名稱時，鎖定畫面也跳通知 ─────────────
 // 公鑰（公開資訊）；私鑰只在擁有者自己的 Cloudflare 通知服務裡
@@ -9191,23 +9222,33 @@ async function enablePush() {
   toast(r.pushOn ? '已開啟通知' : '已開啟通知；擁有者設定好通知服務後才會收到')
 }
 
-/** App 裡的橫幅（像 iPhone 的通知）：從上面滑下來，點一下打開；4 秒後自己收起來 */
+/** App 裡的橫幅（像 iPhone 的通知）：從上面滑下來，點一下打開；4.5 秒後自己收起來（手指、游標停在上面時不收） */
 function banner(msg, onTap) {
   document.querySelector('.app-banner')?.remove()
-  const b = document.createElement('button')
+  const b = document.createElement('div')
   b.className = 'app-banner'
   b.setAttribute('role', 'status')
-  b.innerHTML = `<span class="app-banner-ico" aria-hidden="true">${icon('check', 18)}</span><span class="grow">${esc(msg)}</span>${onTap ? '<span class="app-banner-go">查看</span>' : ''}`
+  b.innerHTML = `<span class="app-banner-ico" aria-hidden="true">${icon('check', 18)}</span><span class="grow">${esc(msg)}</span>${onTap ? '<button class="app-banner-go" type="button">查看</button>' : ''}`
+  let timer = 0
   const hide = () => {
+    clearTimeout(timer)
     b.classList.add('out')
     setTimeout(() => b.remove(), 300)
   }
+  const arm = () => {
+    clearTimeout(timer)
+    timer = setTimeout(hide, 4500)
+  }
+  b.addEventListener('pointerenter', () => clearTimeout(timer))
+  b.addEventListener('pointerleave', arm)
+  b.addEventListener('focusin', () => clearTimeout(timer))
+  b.addEventListener('focusout', arm)
   b.onclick = () => {
     hide()
     onTap?.()
   }
   document.body.appendChild(b)
-  setTimeout(hide, 4500)
+  arm()
 }
 
 /**
@@ -9779,7 +9820,7 @@ $app.addEventListener('click', async (e) => {
       if (!syncReady()) return toast('這台還沒開啟多台同步，沒有連線可以複製')
       const link = moveLink()
       // 試算表網址不是標準格式時做不出邀請連結：桌面 App 會認不得，先講清楚
-      if (!parseLinkCode(link)) return toast('這台記的試算表網址格式不對，複製了桌面 App 也認不得：請擁有者到「設定 → Google 試算表」重新貼一次網址')
+      if (!parseLinkCode(link)) return toast('這台記的試算表網址格式不對，複製了桌面 App 也認不得：請擁有者到「設定 → 進階設定 → Google 試算表」重新貼一次網址')
       // 複製好：首頁的提醒收起來；這台還沒傳的資料先傳上去（傳不上去要講，不然桌面 App 會少資料）
       const copied = () => {
         ls.set(LS.moveHintOff, '1')
@@ -10482,7 +10523,7 @@ keepRestore().then((back) => {
 if (freshPhone()) loadGoogleId()
 // 管理的人：App 開著時每 15 秒看一次有沒有新的加入申請（有就跳提示、首頁出現卡片）
 setInterval(() => {
-  if (document.visibilityState === 'visible' && syncReady() && canManage() && !joinPending() && !syncing && ['home', 'settings'].includes(state.view)) postSync({ action: 'hello' }).catch(() => {})
+  if (document.visibilityState === 'visible' && syncReady() && canManage() && !joinPending() && !syncing && ['home', 'settings', 'settings-adv'].includes(state.view)) postSync({ action: 'hello' }).catch(() => {})
 }, 15000)
 // 打開 App：有開同步就先跟大家對一次
 if (syncReady()) setTimeout(() => syncNow().catch(() => {}), 1200)

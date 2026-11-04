@@ -5278,3 +5278,14 @@ html.is-scrolled .nav {
 .adv-link {
   margin-top: 22px;
 }
+.app-banner-go {
+  flex: none;
+  min-height: 36px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--tint);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
