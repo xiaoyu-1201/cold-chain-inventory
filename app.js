@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.17.0（11/05・辨識中可先離開、結果留在首頁；很多框改細框、保溫管不再只框一個）'
+const VERSION = '4.17.1（11/05・框很多時照片上標流水號與總數）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2647,17 +2647,33 @@ function viewReview() {
   groups.forEach((g, gi) => g.refs.forEach((r) => colorOfRef.set(`${r.pi}:${r.oi}`, { color: g.color, gi, key: g.key })))
   const doubts = doubtsOf(s)
   const doubtSet = new Set(doubts.map((d) => d.o))
-  const boxesOf = (pi) =>
-    s.photos[pi].objects
+  // 框很多時的流水號：照閱讀順序（由上到下；差不多高的算同一排，同一排由左到右），照片上才核對得到「到底有幾個」
+  const seqOf = (pi) => {
+    const objs = s.photos[pi].objects
+    const idx = objs.map((_, i) => i)
+    const rowH = 60 // 0～1000 的座標：約 6% 照片高度內算同一排
+    idx.sort((a, b) => {
+      const ya = objs[a].box[0]
+      const yb = objs[b].box[0]
+      return Math.abs(ya - yb) < rowH ? objs[a].box[1] - objs[b].box[1] : ya - yb
+    })
+    const m = new Map()
+    idx.forEach((i, k) => m.set(i, k + 1))
+    return m
+  }
+  const boxesOf = (pi) => {
+    const seq = s.photos[pi].objects.length > 12 ? seqOf(pi) : null
+    return s.photos[pi].objects
       .map((o, oi) => {
         const ref = colorOfRef.get(`${pi}:${oi}`)
         if (!ref) return ''
         const [y1, x1, y2, x2] = o.box
         const on = state.focusObj ? state.focusObj === o : state.focus === ref.key
         const doubt = doubtSet.has(o)
-        return `<div class="box ${on ? 'on' : ''} ${doubt ? 'doubt' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}" data-obj="${pi}:${oi}"><span class="tag">${ref.gi + 1}</span>${doubt ? '<span class="qmark" aria-label="要確認">?</span>' : ''}</div>`
+        return `<div class="box ${on ? 'on' : ''} ${doubt ? 'doubt' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}" data-obj="${pi}:${oi}"><span class="tag">${ref.gi + 1}</span>${seq ? `<span class="seq">${seq.get(oi)}</span>` : ''}${doubt ? '<span class="qmark" aria-label="要確認">?</span>' : ''}</div>`
       })
       .join('')
+  }
   const boxes = photo ? boxesOf(state.photoIndex) : ''
   const total = totalQty(s)
   const doubtsByKey = new Map()
@@ -2705,7 +2721,7 @@ function viewReview() {
             s.photos.some((p) => p.lost && !fetching.has(s.id))
               ? `<div class="hint-card lost-card" role="status"><b>${s.photos.filter((p) => p.lost).length} 張照片在此手機遺失</b>（iPhone 的限制；框與數量仍保留）。若雲端有備份，可取回。<button class="btn small" data-action="repair-photos">從雲端拿回照片</button></div>`
               : ''
-          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''} ${photo.objects.length > 12 ? 'dense' : ''} ${groups.filter((g) => !g.manual).length > 1 ? 'multi' : ''}" data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
+          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''} ${photo.objects.length > 12 ? 'dense' : ''} ${groups.filter((g) => !g.manual).length > 1 ? 'multi' : ''}" ${photo.objects.length > 12 ? `data-total="共 ${photo.objects.length} 個框"` : ''} data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
             photo.blob ? `<img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">` : `<div class="photo-ph ${fetching.has(s.id) || photo.pending ? 'loading' : ''}" role="img" aria-label="${photo.pending ? '照片下載中' : '這張照片不見了'}">${fetching.has(s.id) || photo.pending ? '<span class="photo-ph-text">照片下載中…</span>' : ''}</div>`
           }${boxes}
              <button class="photo-zoom" data-action="zoom" aria-label="放大看照片">${icon('maximize', 22)}</button>
