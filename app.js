@@ -27,6 +27,8 @@ const LS = {
   // 通知（4.14）：這台開了通知、雲端設好了通知服務
   pushOn: 'inventory:pushOn',
   pushSvc: 'inventory:pushSvc',
+  // 今天整理過舊照片了沒（4.15）
+  photoFreeDay: 'inventory:photoFreeDay',
   catalog: 'inventory:catalog',
   sheet: 'inventory:sheetUrl',
   autoSync: 'inventory:autoSync',
@@ -111,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.14.3（11/05・框改用像素座標，不再整排偏掉）'
+const VERSION = '4.15.0（11/05・手機只留最近 30 天的照片）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2859,7 +2861,7 @@ async function viewSettings() {
     </details>` : ''}
     <p class="section-title">資料</p>
     ${canManage() ? '<div class="row-actions"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>' : ''}
-    <p class="footnote">${syncReady() ? '紀錄（含照片）已同步到公司雲端；這支手機另有一份。' : '紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。'}品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
+    <p class="footnote">${syncReady() ? `紀錄（含照片）已同步到公司雲端。這支手機只留最近 ${PHOTO_KEEP_DAYS} 天的照片（更早的打開那次盤點會自動從雲端抓回來），不會占滿手機。` : '紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。'}品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
     </div></div>
     <p class="footnote" style="margin-top:18px;text-align:center">聖佳智慧庫存 版本 ${VERSION}</p>
     <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
@@ -6974,6 +6976,35 @@ function fetchPhotos(s, { quiet = true, skipMissing = false } = {}) {
   fetching.set(s.id, job)
   return job
 }
+/**
+ * 省手機空間（4.15）：PHOTO_KEEP_DAYS 天以前、已經傳上雲端的盤點照片，從手機刪掉（雲端還在；打開那次盤點會自動抓回來）。
+ * 數字資料很小，全部留著。不刪的：沒開同步、照片還沒傳上去、還沒按完成、還在補名稱、當成標準答案（考 AI 要用）、正在看的那次。
+ * 一天最多整理一次；只改本機（putRaw：不改修改時間、不同步）。
+ */
+const PHOTO_KEEP_DAYS = 30
+async function freeOldPhotos() {
+  if (!syncReady() || !serverV2()) return 0
+  const today = new Date().toDateString()
+  if (ls.get(LS.photoFreeDay) === today) return 0
+  ls.set(LS.photoFreeDay, today)
+  const cutoff = Date.now() - PHOTO_KEEP_DAYS * 86400000
+  let n = 0
+  for (const s of await db.all()) {
+    if (s.createdAt > cutoff || !s.linkedAt || s.golden || state.session?.id === s.id) continue
+    if (s.photos.some((p) => p.naming && !p.namedAt)) continue
+    let hit = false
+    for (const p of s.photos) {
+      if (!p.blob || !p.up) continue
+      p.blob = undefined
+      p.pending = true
+      dropUrl(p.id)
+      hit = true
+      n++
+    }
+    if (hit) await db.putRaw(s)
+  }
+  return n
+}
 /** 同步完，趁沒事慢慢把還沒下載的照片抓下來（新的先），首頁縮圖才會慢慢出現；一次一筆、不影響使用 */
 let prefetching = false
 const PREFETCH_SESSIONS = 5
@@ -6984,7 +7015,8 @@ async function prefetchPhotos() {
     for (let i = 0; i < 200; i++) {
       if (document.visibilityState !== 'visible' || state.view === 'analyzing' || state.busy) break
       // 只自動抓最近 PREFETCH_SESSIONS 次盤點的照片：新加入的人不用等全部照片下載完（以前要等快 5 分鐘）；更早的打開那次盤點時才抓
-      const recent = (await db.all()).sort((x, y) => y.createdAt - x.createdAt).slice(0, PREFETCH_SESSIONS)
+      const keepFrom = Date.now() - PHOTO_KEEP_DAYS * 86400000
+      const recent = (await db.all()).filter((x) => x.createdAt > keepFrom).sort((x, y) => y.createdAt - x.createdAt).slice(0, PREFETCH_SESSIONS)
       const s = recent.find((x) => x.photos.some((p) => p.pending && !missingRecently(x.id, p.id)))
       if (!s) break
       try {
@@ -7564,6 +7596,7 @@ async function syncNow(report = () => {}) {
     if (!namesResumeOk) {
       namesResumeOk = true
       setTimeout(() => resumeNames().catch(() => {}), 500)
+      setTimeout(() => freeOldPhotos().catch(() => {}), 5000)
     }
     return { pushed: sent, pulled: got, changed }
   })()
