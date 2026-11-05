@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.18.1（11/05・數的時候順便標出「可能混進別堆」的接頭）'
+const VERSION = '4.18.2（11/05・修正框位置左右上下對調的問題）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -862,7 +862,7 @@ const COUNT_SCHEMA = {
   type: 'OBJECT',
   properties: {
     kinds: { type: 'ARRAY', items: { type: 'STRING' }, description: '照片裡有哪幾種商品（中文名稱，例如「三通」「乾燥過濾器」）' },
-    boxes: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'INTEGER' } }, description: '每一個商品一筆：[ymin, xmin, ymax, xmax, 第幾種（kinds 的索引，從 0 開始）, 信心 0～100, 疑似混入的原因編號（odd_notes 的第幾筆，從 1 開始；正常填 0）]' },
+    boxes: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'INTEGER' } }, description: '每一個商品一筆：[x1, y1, x2, y2（照片像素：左、上、右、下）, 第幾種（kinds 的索引，從 0 開始）, 信心 0～100, 疑似混入的原因編號（odd_notes 的第幾筆，從 1 開始；正常填 0）]' },
     odd_notes: { type: 'ARRAY', items: { type: 'STRING' }, description: '疑似混進別堆的原因（15 字內，例如「像彎頭，旁邊是 T 型」）；沒有就空陣列' },
     note: { type: 'STRING', description: '看不清楚、可能數錯的地方；沒有就空字串' },
     location: { type: 'STRING', description: '照片裡看得到儲位標籤（例如 A-01）就填代號；沒有就空字串' },
