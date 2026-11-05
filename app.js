@@ -111,7 +111,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.14.2（11/05・補名稱橫幅只跳一次、長品名不擋數量）'
+const VERSION = '4.14.3（11/05・框改用像素座標，不再整排偏掉）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -797,7 +797,7 @@ const SCHEMA = {
           brand: { type: 'STRING', description: '品牌（看標籤或外盒）；看不出來就空字串' },
           model: { type: 'STRING', description: '型號（例如 DML 083、KP 15）；看不出來就空字串' },
           spec: { type: 'STRING', description: '尺寸／容量／規格（例如 3分、10.9kg、4L）；看不出來就空字串' },
-          box_2d: { type: 'ARRAY', items: { type: 'INTEGER' }, description: '[ymin, xmin, ymax, xmax]，0～1000' },
+          box_2d: { type: 'ARRAY', items: { type: 'INTEGER' }, description: '四個座標（照說明的格式）' },
           confidence: { type: 'NUMBER', description: '0～1，有多確定' },
           odd: { type: 'BOOLEAN', description: '跟同一種的其他個比，大小、粗細、形狀、顏色或標籤明顯不一樣就 true' },
           odd_reason: { type: 'STRING', description: 'odd 是 true 時，10 個字以內寫哪裡不同（例如「比較粗」「側口比較細」）' },
@@ -825,14 +825,14 @@ const itemsPrompt = () => {
     : ''
 }
 
-function prompt(sampleCount = 0) {
+function prompt(sampleCount = 0, dims = null) {
   return `你是冷凍空調材料行的盤點助手。請找出照片裡每一個「商品」，每一個各給一個框。
 規則：
 1. 名稱優先用下面「店內品項清單」的寫法；清單沒有就用最具體的中文名稱（例如「乾燥過濾器」，不要只寫「零件」）。
 2. 標籤看得到就分開填：brand＝品牌（例如 Danfoss）、model＝型號（例如 DML 083、KP 15）、spec＝尺寸／容量／規格（例如 3分、10.9kg、4L、R404A）。看不出來就空字串，不要猜。
 3. 同一種東西有幾個就給幾個框，不要合併成一個；品牌、型號或尺寸不同就算不同的東西。被擋住一半以上的也要算，但 confidence 給低一點。
 4. 貨架、標價牌、手、紙箱外的雜物不算商品。
-5. box_2d 用 [ymin, xmin, ymax, xmax]，是相對整張照片的 0～1000。
+5. box_2d：${pxRule(dims)}。
 6. 外觀很像、只差尺寸或形狀的同類商品（例如銅管三通、彎頭、接頭），要逐個比較：管子粗細、三個接口是不是一樣粗（等徑）還是有一個比較細（異徑）、長短。不一樣的就分成不同品項，spec 寫出差別（例如「等徑・粗」「等徑・細」「異徑・側口細」）；看得出分數（2分、3分、4分…）就寫分數。不要把不同尺寸全部歸成同一種。
 7. 同一種有好幾個時，一個一個看：如果某一個的大小、粗細、接口、顏色或標籤跟其他個不一樣（你不確定是不是同一種），那一個的 odd 設 true，odd_reason 用 10 個字以內寫哪裡不同。一樣的就不用寫 odd。
 8. 同一個東西只給一個框，不要重複框。
@@ -850,7 +850,7 @@ ${catalogLines().join('\n')}${itemsPrompt()}`
 /** 簡化模式不用 responseSchema，改在文字裡說明要的格式 */
 const JSON_HINT = `
 只回 JSON，不要其他文字，格式：
-{"objects":[{"label":"品名","brand":"品牌","model":"型號","spec":"尺寸／規格","box_2d":[ymin,xmin,ymax,xmax],"confidence":0.9,"odd":false,"odd_reason":"","item_no":""}],"note":"需要人工確認的地方","location":""}`
+{"objects":[{"label":"品名","brand":"品牌","model":"型號","spec":"尺寸／規格","box_2d":[x1,y1,x2,y2],"confidence":0.9,"odd":false,"odd_reason":"","item_no":""}],"note":"需要人工確認的地方","location":""}`
 
 /**
  * 只數數量的回答格式（4.13）：先列有哪幾種，每個框只寫「座標＋第幾種＋信心」。
@@ -866,27 +866,28 @@ const COUNT_SCHEMA = {
   },
   required: ['kinds', 'boxes', 'note'],
 }
-function countPrompt() {
+function countPrompt(dims) {
   return `你是冷凍空調材料行的盤點助手。任務：準確數出照片裡每一個商品，數量一定要對。
 規則：
 1. 每一個商品各給一個框；同一種有幾個就給幾個框，不要合併成一個。被擋住一半以上的也要算，信心給低一點。
 2. 同一個東西只給一個框，不要重複框。疊在一起、排在後面的，看得到一部分就要算。
 3. 貨架、標價牌、手、紙箱外的雜物、儲位標籤不算商品。
 4. kinds 列出照片裡有哪幾種商品；外觀明顯不同（大小、形狀、顏色、包裝）的分成不同種。名稱優先用下面「店內品項清單」的寫法（不用寫括號裡的說明）。
-5. boxes 每個商品一筆：[ymin, xmin, ymax, xmax, 第幾種, 信心]；座標是相對整張照片的 0～1000，第幾種是 kinds 的索引（從 0 開始），信心 0～100。
-6. 照片裡看得到儲位標籤（白底黑字的代號，例如 A-01、B-12）時，location 填標籤上的代號。
-7. 看不清楚、可能數錯的地方寫在 note；沒有就空字串。
+5. boxes 每個商品一筆：[四個座標, 第幾種, 信心]；${pxRule(dims)}。第幾種是 kinds 的索引（從 0 開始），信心 0～100。
+6. 先整張看一遍、一個一個數完再回答；疊在一起的要看清楚邊緣，不要把兩個算成一個，也不要把一個算成兩個。
+7. 照片裡看得到儲位標籤（白底黑字的代號，例如 A-01、B-12）時，location 填標籤上的代號。
+8. 看不清楚、可能數錯的地方寫在 note；沒有就空字串。
 店內品項清單：
 ${catalogLines().join('\n')}`
 }
 const COUNT_JSON_HINT = `
 只回 JSON，不要其他文字，格式：
-{"kinds":["品名"],"boxes":[[ymin,xmin,ymax,xmax,0,90]],"note":"","location":""}`
+{"kinds":["品名"],"boxes":[[x1,y1,x2,y2,0,90]],"note":"","location":""}`
 
 /** 只數數量：送一次辨識，轉成跟完整模式一樣的框（品牌、型號、規格留白） */
-async function generateCount(model, image, simple, signal) {
+async function generateCount(model, image, simple, signal, dims = null) {
   const body = {
-    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: image } }, { text: countPrompt() + (simple ? COUNT_JSON_HINT : '') }] }],
+    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: image } }, { text: countPrompt(dims) + (simple ? COUNT_JSON_HINT : '') }] }],
     generationConfig: simple ? { temperature: 0, responseMimeType: 'application/json' } : { temperature: 0, responseMimeType: 'application/json', responseSchema: COUNT_SCHEMA },
   }
   const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, TIMEOUT.detect)
@@ -913,7 +914,7 @@ async function generateCount(model, image, simple, signal) {
         brand: '',
         model: '',
         spec: '',
-        box: b.slice(0, 4).map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
+        box: toBox(b, dims),
         // 信心是 0～100；只有簡化模式（沒有格式限制）才可能回 0～1
         confidence: Number.isFinite(c) ? Math.min(1, Math.max(0, simple && c <= 1 ? c : c / 100)) : 0.5,
       }
@@ -927,8 +928,18 @@ async function generateCount(model, image, simple, signal) {
  * 用某個模型送一次辨識。
  * simple＝簡化請求（不帶 responseSchema，改在文字裡說格式）：忙線重試到最後一次才用。
  */
-async function generate(model, image, simple = false, refs = [], signal = undefined) {
-  if (countMode()) return generateCount(model, image, simple, signal)
+/** 照片尺寸（像素）＋座標說明；沒有尺寸（很舊的照片）就照以前的 0～1000 */
+const pxRule = (dims) => (dims?.w && dims?.h ? `座標用這張照片的像素（照片寬 ${dims.w}、高 ${dims.h} 像素，左上角是 0,0）：[x1, y1, x2, y2]＝左、上、右、下，框要緊貼商品的外緣` : '座標是相對整張照片的 0～1000：[ymin, xmin, ymax, xmax]')
+/** AI 給的框 → App 用的 [ymin, xmin, ymax, xmax]（0～1000） */
+function toBox(b, dims) {
+  const n = b.slice(0, 4).map((v) => Number(v) || 0)
+  if (!(dims?.w && dims?.h)) return n.map((v) => Math.min(1000, Math.max(0, v)))
+  const [x1, y1, x2, y2] = n
+  const c = (v) => Math.min(1000, Math.max(0, Math.round(v)))
+  return [c((Math.min(y1, y2) / dims.h) * 1000), c((Math.min(x1, x2) / dims.w) * 1000), c((Math.max(y1, y2) / dims.h) * 1000), c((Math.max(x1, x2) / dims.w) * 1000)]
+}
+async function generate(model, image, simple = false, refs = [], signal = undefined, dims = null) {
+  if (countMode()) return generateCount(model, image, simple, signal, dims)
   // 有樣品照：先放樣品（每張前面寫正確名稱），最後才放要盤點的照片，緊接著說明
   const sampleParts = refs.length
     ? [
@@ -938,7 +949,7 @@ async function generate(model, image, simple = false, refs = [], signal = undefi
       ]
     : []
   const body = {
-    contents: [{ role: 'user', parts: [...sampleParts, { inline_data: { mime_type: 'image/jpeg', data: image } }, { text: prompt(refs.length) + (simple ? JSON_HINT : '') }] }],
+    contents: [{ role: 'user', parts: [...sampleParts, { inline_data: { mime_type: 'image/jpeg', data: image } }, { text: prompt(refs.length, dims) + (simple ? JSON_HINT : '') }] }],
     generationConfig: simple ? { temperature: 0, responseMimeType: 'application/json' } : { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA },
   }
   const data = await call(`models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, TIMEOUT.detect)
@@ -965,7 +976,7 @@ async function generate(model, image, simple = false, refs = [], signal = undefi
       if (!firstOf.has(k)) firstOf.set(k, raw)
       return {
         ...(it ? { label: it.label, brand: it.brand, model: it.model, spec: it.spec } : firstOf.get(k)),
-        box: o.box_2d.map((n) => Math.min(1000, Math.max(0, Number(n) || 0))),
+        box: toBox(o.box_2d, dims),
         confidence: Math.min(1, Math.max(0, Number(o.confidence) || 0)),
         ...(o.odd ? { odd: true, oddReason: String(o.odd_reason || '').trim().slice(0, 20) } : {}),
       }
@@ -1012,7 +1023,7 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
   const first = await currentModel()
   const list = cachedModels() ?? (await fetchModels().catch(() => [first]))
   const backup = list.find((m) => m !== first && isLite(m)) ?? list.find((m) => m !== first)
-  return attemptChain([first, backup].filter(Boolean), image, refs, onStatus)
+  return attemptChain([first, backup].filter(Boolean), image, refs, onStatus, undefined, photo.w && photo.h ? { w: photo.w, h: photo.h } : null)
 }
 
 /** 這次的 AI 請求會經過 Apps Script（這台沒有自己的金鑰、用擁有者的共用金鑰） */
@@ -1021,7 +1032,7 @@ const viaSheetNow = () => !ls.get(K().key) && aiViaSheet()
 const MAX_NET_FAILS = 3
 
 /** 依序試：同一個模型（照原樣 → 再送一次 → 簡化），不行就換下一個模型 */
-async function attemptChain(models, image, refs, onStatus, signal) {
+async function attemptChain(models, image, refs, onStatus, signal, dims = null) {
   let lastErr
   let netFails = 0
   for (const [mi, model] of models.entries()) {
@@ -1044,7 +1055,7 @@ async function attemptChain(models, image, refs, onStatus, signal) {
       }
       try {
         t0 = Date.now()
-        const r = await generate(model, image, step.simple, refs, signal)
+        const r = await generate(model, image, step.simple, refs, signal, dims)
         onStatus(`${model} 完成（${Math.round((Date.now() - t0) / 1000)} 秒，找到 ${r.objects.length} 個）`)
         // 這個模型比較順：之後先用它（但不要換成 Haiku：分不出相似品，只當備用）
         if (mi > 0 && !isLite(model)) ls.set(K().model, model)
