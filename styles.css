@@ -5380,3 +5380,7 @@ html.is-scrolled .nav {
 .photo-wrap.dense2 .box {
   border-width: 1.5px;
 }
+/* 4.17.3 很多框時也用各品項自己的顏色（第一種是藍色），不再硬用黃色；細框＋小編號已經不會疊成一團 */
+.photo-wrap.dense .box {
+  border-color: var(--c, var(--tint));
+}
