@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.18.2（11/05・修正框位置左右上下對調的問題）'
+const VERSION = '4.18.3（11/05・橫幅可往上滑掉、頁面下拉就同步）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -7198,6 +7198,67 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !syncReady() || syncing || state.moving || state.view === 'analyzing') return
   if (Date.now() - Number(ls.get(LS.lastSync, '0')) > 10000) syncNow().catch(() => {})
 })
+/** 馬上同步一次並告知結果（同步鈕、下拉都用） */
+function syncAndToast() {
+  // 已經在同步了：不要再開一次，也不要讓人以為壞掉
+  if (syncing) return toast(`正在同步，請稍候（${state.syncMsg || '照片較多時需較長時間'}）`)
+  toast('同步中…')
+  return syncNow((m) => toast(m))
+    .then((r) => toast(joinPending() ? '還在等管理員核准' : r.pushed || r.pulled ? `同步完成：上傳 ${r.pushed}、下載 ${r.pulled}` : '已是最新'))
+    .catch((err) => toast(`同步沒成功：${err.message}`))
+    .finally(updateSyncPill)
+}
+/** 下拉同步：已經在最上面時再往下拉一段（超過 90px），放開就同步；拍照、辨識中、點照片、開著視窗時不啟用 */
+{
+  let y0 = null
+  let pull = 0
+  let pill = null
+  const atTop = () => (document.getElementById('app')?.scrollTop || 0) + (window.scrollY || 0) <= 0
+  const clear = () => {
+    pill?.remove()
+    pill = null
+    y0 = null
+    pull = 0
+  }
+  document.addEventListener(
+    'touchstart',
+    (e) => {
+      clear()
+      if (!syncReady() || e.touches.length !== 1 || ['capture', 'analyzing', 'pick-edit'].includes(state.view)) return
+      if (e.target.closest('.photo-wrap, .viewer, .sheet-backdrop, input, textarea, select') || !atTop()) return
+      y0 = e.touches[0].clientY
+    },
+    { passive: true },
+  )
+  document.addEventListener(
+    'touchmove',
+    (e) => {
+      if (y0 == null) return
+      pull = e.touches[0].clientY - y0
+      if (pull <= 12 || !atTop()) {
+        pill?.remove()
+        pill = null
+        return
+      }
+      if (!pill) {
+        pill = document.createElement('div')
+        pill.className = 'pull-pill'
+        pill.setAttribute('aria-hidden', 'true')
+        document.body.appendChild(pill)
+      }
+      pill.textContent = pull > 90 ? '放開同步' : '下拉同步'
+      pill.style.transform = `translate(-50%, ${Math.min(pull * 0.4, 44)}px)`
+    },
+    { passive: true },
+  )
+  const end = () => {
+    const fire = pull > 90
+    clear()
+    if (fire) syncAndToast()
+  }
+  document.addEventListener('touchend', end)
+  document.addEventListener('touchcancel', clear)
+}
 /** 雲端（Apps Script）回的錯誤：data＝雲端的回覆（看得出是檢視者、被移除、次數到上限，還是網路問題） */
 class SyncError extends Error {
   constructor(message, data = {}) {
@@ -9454,7 +9515,35 @@ function banner(msg, onTap) {
   b.addEventListener('pointerleave', arm)
   b.addEventListener('focusin', () => clearTimeout(timer))
   b.addEventListener('focusout', arm)
+  // 往上滑掉（像系統通知）：拖超過 24px 放開就收起，沒到就彈回去
+  let y0 = null
+  let dy = 0
+  let swiped = false
+  b.addEventListener('pointerdown', (e) => {
+    y0 = e.clientY
+    dy = 0
+    swiped = false
+    clearTimeout(timer)
+  })
+  b.addEventListener('pointermove', (e) => {
+    if (y0 == null) return
+    dy = Math.min(0, e.clientY - y0)
+    b.style.transition = 'none'
+    b.style.transform = `translate(-50%, ${dy}px)`
+  })
+  const release = () => {
+    if (y0 == null) return
+    y0 = null
+    swiped = dy < -24
+    b.style.transition = ''
+    b.style.transform = ''
+    if (swiped) hide()
+    else arm()
+  }
+  b.addEventListener('pointerup', release)
+  b.addEventListener('pointercancel', release)
   b.onclick = (e) => {
+    if (swiped) return
     hide()
     if (e.target.closest('.app-banner-go')) onTap?.()
   }
@@ -10134,13 +10223,7 @@ $app.addEventListener('click', async (e) => {
       return wipeLocal('這台已退出同步，資料已清除')
     case 'sync-now':
       if (!syncReady()) return go('settings')
-      // 已經在同步了：不要再開一次，也不要讓人以為壞掉
-      if (syncing) return toast(`正在同步，請稍候（${state.syncMsg || '照片較多時需較長時間'}）`)
-      toast('同步中…')
-      return syncNow((m) => toast(m))
-        .then((r) => toast(joinPending() ? '還在等管理員核准' : r.pushed || r.pulled ? `同步完成：上傳 ${r.pushed}、下載 ${r.pulled}` : '已是最新'))
-        .catch((err) => toast(`同步沒成功：${err.message}`))
-        .finally(updateSyncPill)
+      return syncAndToast()
     case 'finish': {
       // 完成：記進品項庫；有設定 Google 試算表又開著自動同步，就順便寫進去（在背景送，不用等）
       const s = state.session
