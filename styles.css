@@ -5365,3 +5365,18 @@ html.is-scrolled .nav {
   font-weight: 700;
   pointer-events: none;
 }
+/* 框超過 50 個：編號放在框的正中間（四個角常被旁邊的框蓋住）、字更小、底更淡 */
+.photo-wrap.dense2 .box .seq {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  min-width: 0;
+  padding: 0 2px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.5);
+  font-size: 8px;
+  line-height: 11px;
+}
+.photo-wrap.dense2 .box {
+  border-width: 1.5px;
+}

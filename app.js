@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.17.1（11/05・框很多時照片上標流水號與總數）'
+const VERSION = '4.17.2（11/05・框超過 50 個時編號放中間、更小，不互相蓋住）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2721,7 +2721,7 @@ function viewReview() {
             s.photos.some((p) => p.lost && !fetching.has(s.id))
               ? `<div class="hint-card lost-card" role="status"><b>${s.photos.filter((p) => p.lost).length} 張照片在此手機遺失</b>（iPhone 的限制；框與數量仍保留）。若雲端有備份，可取回。<button class="btn small" data-action="repair-photos">從雲端拿回照片</button></div>`
               : ''
-          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''} ${photo.objects.length > 12 ? 'dense' : ''} ${groups.filter((g) => !g.manual).length > 1 ? 'multi' : ''}" ${photo.objects.length > 12 ? `data-total="共 ${photo.objects.length} 個框"` : ''} data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
+          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''} ${photo.objects.length > 12 ? 'dense' : ''} ${photo.objects.length > 50 ? 'dense2' : ''} ${groups.filter((g) => !g.manual).length > 1 ? 'multi' : ''}" ${photo.objects.length > 12 ? `data-total="共 ${photo.objects.length} 個框"` : ''} data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
             photo.blob ? `<img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">` : `<div class="photo-ph ${fetching.has(s.id) || photo.pending ? 'loading' : ''}" role="img" aria-label="${photo.pending ? '照片下載中' : '這張照片不見了'}">${fetching.has(s.id) || photo.pending ? '<span class="photo-ph-text">照片下載中…</span>' : ''}</div>`
           }${boxes}
              <button class="photo-zoom" data-action="zoom" aria-label="放大看照片">${icon('maximize', 22)}</button>
