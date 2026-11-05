@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.16.0（11/05・App 拍的照片可一鍵存到相簿）'
+const VERSION = '4.16.1（11/05・框修緊、一堆小東西改分區數）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -869,6 +869,7 @@ const COUNT_SCHEMA = {
   required: ['kinds', 'boxes', 'note'],
 }
 function countPrompt(dims) {
+  const tileRule = dims?.tile ? '\n這只是整張照片切出來的一小塊：被切在邊緣、只露出一小部分（不到一半）的商品不要算。' : ''
   return `你是冷凍空調材料行的盤點助手。任務：準確數出照片裡每一個商品，數量一定要對。
 規則：
 1. 每一個商品各給一個框；同一種有幾個就給幾個框，不要合併成一個。被擋住一半以上的也要算，信心給低一點。
@@ -876,7 +877,7 @@ function countPrompt(dims) {
 3. 貨架、標價牌、手、紙箱外的雜物、儲位標籤不算商品。
 4. kinds 列出照片裡有哪幾種商品；外觀明顯不同（大小、形狀、顏色、包裝）的分成不同種。名稱優先用下面「店內品項清單」的寫法（不用寫括號裡的說明）。
 5. boxes 每個商品一筆：[四個座標, 第幾種, 信心]；${pxRule(dims)}。第幾種是 kinds 的索引（從 0 開始），信心 0～100。
-6. 先整張看一遍、一個一個數完再回答；疊在一起的要看清楚邊緣，不要把兩個算成一個，也不要把一個算成兩個。
+6. 先整張看一遍、一個一個數完再回答；疊在一起的要看清楚邊緣，不要把兩個算成一個，也不要把一個算成兩個。${tileRule}
 7. 照片裡看得到儲位標籤（白底黑字的代號，例如 A-01、B-12）時，location 填標籤上的代號。
 8. 看不清楚、可能數錯的地方寫在 note；沒有就空字串。
 店內品項清單：
@@ -1020,12 +1021,70 @@ async function sampleRefs() {
  * Claude 沒有免費額度：最多試兩個模型（現在的 → Haiku），也不「同時請備用模型」（同時兩個＝每張慢的照片付兩次錢）。
  * onStatus 用來在畫面上顯示目前在做什麼。
  */
-async function analyze(photo, onStatus = () => {}, refs = []) {
-  const image = await blobToBase64(photo.blob)
+async function analyzeRaw(image, dims, refs, onStatus) {
   const first = await currentModel()
   const list = cachedModels() ?? (await fetchModels().catch(() => [first]))
   const backup = list.find((m) => m !== first && isLite(m)) ?? list.find((m) => m !== first)
-  return attemptChain([first, backup].filter(Boolean), image, refs, onStatus, undefined, photo.w && photo.h ? { w: photo.w, h: photo.h } : null)
+  return attemptChain([first, backup].filter(Boolean), image, refs, onStatus, undefined, dims)
+}
+async function analyze(photo, onStatus = () => {}, refs = []) {
+  return analyzeRaw(await blobToBase64(photo.blob), photo.w && photo.h ? { w: photo.w, h: photo.h } : null, refs, onStatus)
+}
+/**
+ * 分區數：照片切成 2×2 四塊（多重疊一點），每塊分開問、再合起來（跨塊重複的框去掉）。
+ * 一大堆小東西（例如保溫管）整張一次看，AI 容易整堆當成一個；切小塊每塊的東西變大、變少，數得準很多。
+ */
+async function analyzeTiled(photo, onStatus = () => {}) {
+  const bmp = await bitmapOf(photo.blob)
+  const W = bmp.width
+  const H = bmp.height
+  const ov = 0.08
+  const objects = []
+  let note = ''
+  let location = ''
+  let model = ''
+  for (let r = 0; r < 2; r++)
+    for (let c = 0; c < 2; c++) {
+      const sx = Math.max(0, (c / 2 - (c ? ov : 0)) * W)
+      const sy = Math.max(0, (r / 2 - (r ? ov : 0)) * H)
+      const ex = Math.min(W, ((c + 1) / 2 + (c ? 0 : ov)) * W)
+      const ey = Math.min(H, ((r + 1) / 2 + (r ? 0 : ov)) * H)
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.round(ex - sx)
+      canvas.height = Math.round(ey - sy)
+      canvas.getContext('2d').drawImage(bmp, sx, sy, ex - sx, ey - sy, 0, 0, canvas.width, canvas.height)
+      const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.88))
+      if (!blob) throw new ApiError('照片處理失敗（記憶體可能不足），請再試一次', 0, 'tile: toBlob null')
+      onStatus(`分區數：第 ${r * 2 + c + 1}／4 塊`)
+      const t = await analyzeRaw(await blobToBase64(blob), { w: canvas.width, h: canvas.height, tile: true }, [], onStatus)
+      model = t.model
+      note = note || t.note
+      location = location || t.location
+      for (const o of t.objects) {
+        const [y1, x1, y2, x2] = o.box.map((n) => n / 1000)
+        const box = [((sy + y1 * canvas.height) / H) * 1000, ((sx + x1 * canvas.width) / W) * 1000, ((sy + y2 * canvas.height) / H) * 1000, ((sx + x2 * canvas.width) / W) * 1000].map((n) => Math.min(1000, Math.max(0, Math.round(n))))
+        // 別塊已經有幾乎一樣的框（兩塊重疊的地方看到同一個）：留比較有把握的
+        const dup = objects.findIndex((p) => iou(p.box, box) > 0.5)
+        if (dup < 0) objects.push({ ...o, box })
+        else if (o.confidence > objects[dup].confidence) objects[dup] = { ...o, box }
+      }
+    }
+  bmp.close?.()
+  return { objects, note: [note, '分區數：照片切成 4 塊分開數。'].filter(Boolean).join(' '), model, mode: 'count', location }
+}
+/** 一般辨識；數量模式下如果只框到 1～2 個、而且有框大到蓋掉半張照片（一堆東西被當成一個），自動改用分區數 */
+async function analyzeSmart(photo, onStatus, refs) {
+  const r = await analyze(photo, onStatus, refs)
+  if (r.mode === 'count' && r.objects.length <= 2 && r.objects.some((o) => ((o.box[2] - o.box[0]) * (o.box[3] - o.box[1])) / 1e6 > 0.5)) {
+    onStatus('只框到很少、而且框很大：改用分區再數一次')
+    try {
+      const t = await analyzeTiled(photo, onStatus)
+      if (t.objects.length > r.objects.length) return t
+    } catch (e) {
+      onStatus(`分區數沒成功：${e.message}`)
+    }
+  }
+  return r
 }
 
 /** 這次的 AI 請求會經過 Apps Script（這台沒有自己的金鑰、用擁有者的共用金鑰） */
@@ -2648,7 +2707,7 @@ function viewReview() {
            </div>
            ${state.addMode ? '<div class="add-hint" role="status"><b>點照片上遺漏的項目</b>，會在該處新增一個框 <button class="btn small plain" data-action="add-cancel">取消</button></div>' : ''}
            ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''} ${p.blob ? '' : 'lost'}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張${p.pending ? '（下載中）' : p.lost ? '（照片不見了）' : ''}">${p.blob ? `<img src="${urlOf(p)}" alt="" decoding="async">` : ''}</button>`).join('')}</div>` : ''}
-           <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>${icon('plus', 18)}有遺漏？點照片新增框</button></div>
+           <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>${icon('plus', 18)}有遺漏？點照片新增框</button><button class="btn small plain" data-action="recount-tiled">數得不對？分區再數一次</button></div>
            <p class="footnote">點照片上的框，選擇其種類；修改後視窗會關閉，並可在下方「復原」。點品項清單可查看位置；數量不符請按 ＋／－。</p>`
         : ''
     }
@@ -8928,7 +8987,7 @@ async function runAnalysis(indices) {
           // 已經試過、而且不是網路斷線（例如逾時、金鑰、格式）：直接顯示錯誤，讓人按「再試一次」，不要再整條重跑
           if (got.e && got.e.status !== 0) throw got.e
         }
-        if (!r) r = await analyze(photo, log, refs)
+        if (!r) r = await analyzeSmart(photo, log, refs)
         Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '', aiGone: [], model: r.model })
         markAi(photo) // 記下 AI 原本的答案（算準確率用）
         s.model = r.model + (r.mode === 'count' ? (namesMode() ? '（快速＋補名稱）' : '（只數數量）') : '')
@@ -9057,43 +9116,87 @@ const NAME_SCHEMA = {
           model: { type: 'STRING' },
           spec: { type: 'STRING', description: '尺寸／規格，例如 3分、4分×3分、等徑・粗' },
           confidence: { type: 'NUMBER', description: '0～1，有多確定' },
+          box: { type: 'ARRAY', items: { type: 'INTEGER' }, description: '這個物件在它特寫小圖裡的緊框 [x1, y1, x2, y2]（小圖像素）；看不準就 [0,0,0,0]' },
         },
-        required: ['id', 'label', 'brand', 'model', 'spec', 'confidence'],
+        required: ['id', 'label', 'brand', 'model', 'spec', 'confidence', 'box'],
       },
     },
   },
   required: ['names'],
 }
 /** 補名稱的請求（Gemini 格式；送出前會轉成 Claude 的）：整張照片＋編號紅框＋每個框的特寫＋樣品照＋品項庫 */
+/** 每個框切一張特寫（多留 pad 的邊，才救得回框漏掉的部分）；記下切的位置，AI 回小圖座標時才換算得回去 */
+async function cropsForBoxes(photo, objs, pad = 0.4, side = 448) {
+  const bmp = await bitmapOf(photo.blob)
+  const out = []
+  for (const o of objs) {
+    const [y1, x1, y2, x2] = o.box.map((n) => n / 1000)
+    const bw = (x2 - x1) * bmp.width
+    const bh = (y2 - y1) * bmp.height
+    const sx = Math.max(0, x1 * bmp.width - bw * pad)
+    const sy = Math.max(0, y1 * bmp.height - bh * pad)
+    const ex = Math.min(bmp.width, x2 * bmp.width + bw * pad)
+    const ey = Math.min(bmp.height, y2 * bmp.height + bh * pad)
+    const sw = Math.max(1, ex - sx)
+    const sh = Math.max(1, ey - sy)
+    const scale = Math.min(1, side / Math.max(sw, sh))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(sw * scale))
+    canvas.height = Math.max(1, Math.round(sh * scale))
+    canvas.getContext('2d').drawImage(bmp, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.9))
+    if (!blob) throw new ApiError('照片處理失敗（記憶體可能不足），請再試一次', 0, 'crop: toBlob null')
+    out.push({ data: await blobToBase64(blob), w: canvas.width, h: canvas.height, sx, sy, scale, W: bmp.width, H: bmp.height })
+  }
+  bmp.close?.()
+  return out
+}
 async function nameRequest(photo, refs) {
   const objs = photo.objects
-  const { crops, overview } = await refineImages(photo, objs)
+  const { overview } = await refineImages(photo, objs)
   const useCrops = objs.length <= 30 // 框太多：只給整張（請求才不會太大）
+  const crops = useCrops ? await cropsForBoxes(photo, objs) : []
+  const geo = crops.map((c) => ({ sx: c.sx, sy: c.sy, scale: c.scale, W: c.W, H: c.H }))
   const list = promptItems()
   const text = `你是冷凍空調材料行的盤點助手。照片裡的商品已經數好了（紅框和編號），數量不用改。請替每一個物件寫出品名、品牌、型號、規格：
 1. label 優先用「店內品項清單」或「品項庫」的寫法；清單沒有就用最具體的中文名稱。
 2. 標籤看得到就分開填 brand、model、spec；看不出來就空字串，不要猜。
 3. 外觀很像、只差尺寸的（例如三通、彎頭、接頭），比較管子粗細、接口是不是一樣粗（等徑／異徑），spec 寫出差別；看得出分數就寫分數。
 4. 每一個編號都要回一筆（id 是編號）；confidence 寫 0～1。
-${refs.length ? '5. 跟某張樣品一樣的，label、brand、model、spec 照那張樣品填，一字不差。\n' : ''}店內品項清單：
+5. box：這個物件在它「特寫小圖」裡的位置，用小圖的像素 [x1, y1, x2, y2]（左、上、右、下），緊貼這一個物件的外緣、要把整個物件（包含伸出去的管子）都框進來，不要框到旁邊的物件；沒有特寫小圖、或看不準就回 [0, 0, 0, 0]。
+${refs.length ? '6. 跟某張樣品一樣的，label、brand、model、spec 照那張樣品填，一字不差。\n' : ''}店內品項清單：
 ${catalogLines().join('\n')}${list.length ? `\n品項庫（品名｜品牌｜型號｜尺寸／規格）：\n${list.map((it) => [it.label, it.brand || '—', it.model || '—', it.spec || '—'].join('｜')).join('\n')}` : ''}`
   const parts = [
     ...(refs.length ? [{ text: '【店內樣品】每張只拍一個商品，名稱是正確的：' }, ...refs.flatMap((r, i) => [{ text: `樣品 ${i + 1}：${[r.label, r.brand, r.model, r.spec].map((v) => v || '—').join('｜')}` }, { inline_data: { mime_type: 'image/jpeg', data: r.data } }])] : []),
     { text: '【整張照片】縮小過；紅框和編號是要命名的商品：' },
     { inline_data: { mime_type: 'image/jpeg', data: overview } },
-    ...(useCrops ? [{ text: '【特寫小圖】從原照片切下來；同一種的小圖用同一個比例切（小圖越大，東西越大）：' }, ...crops.flatMap((c, k) => [{ text: `物件 ${k + 1}（數量那一次分成：${objs[k].label}）` }, { inline_data: { mime_type: 'image/jpeg', data: c.data } }])] : []),
+    ...(useCrops ? [{ text: '【特寫小圖】從原照片切下來；同一種的小圖用同一個比例切（小圖越大，東西越大）：' }, ...crops.flatMap((c, k) => [{ text: `物件 ${k + 1}（小圖寬 ${c.w}、高 ${c.h} 像素；數量那一次分成：${objs[k].label}；框在小圖正中央）` }, { inline_data: { mime_type: 'image/jpeg', data: c.data } }])] : []),
     { text },
   ]
-  return { contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: NAME_SCHEMA } }
+  return { req: { contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: NAME_SCHEMA } }, geo }
 }
 const boxKey = (o) => o.box.join(',')
+/** AI 回的小圖緊框 → 整張照片的 [ymin,xmin,ymax,xmax]（0～1000）；不合理（太小、跑出小圖、跟原框差太多）回 null，維持原框 */
+function fixBox(old, nb, g) {
+  if (!g || !Array.isArray(nb) || nb.length < 4) return null
+  const [x1, y1, x2, y2] = nb.slice(0, 4).map(Number)
+  if (![x1, y1, x2, y2].every(Number.isFinite) || x2 - x1 < 6 || y2 - y1 < 6) return null
+  const clamp = (v) => Math.min(1000, Math.max(0, Math.round(v)))
+  const fx = (v) => ((g.sx + v / g.scale) / g.W) * 1000
+  const fy = (v) => ((g.sy + v / g.scale) / g.H) * 1000
+  const box = [clamp(fy(y1)), clamp(fx(x1)), clamp(fy(y2)), clamp(fx(x2))]
+  if (box[2] - box[0] < 5 || box[3] - box[1] < 5) return null
+  const ratio = ((box[2] - box[0]) * (box[3] - box[1])) / Math.max(1, (old[2] - old[0]) * (old[3] - old[1]))
+  if (ratio < 0.4 || ratio > 2.5 || iou(old, box) < 0.25) return null
+  return box
+}
 /**
  * 把補好的名稱放回框上（數量絕對不變：不新增、不刪框）：
  * - 你改過的框不碰；你確認過、或 AI 說是「另一類」的（例如三通→彎頭）：只標「要確認」＋建議，你按「改成…」才改
  * - 同一類補細節（三通 → 三通・3分）：直接寫上；那一種你手動改過數量的，也只給建議（不然改名後數量會對不上）
  * 用框的座標對回去（補名稱期間你刪了、補了框也不會對錯）。
  */
-function applyNames(s, photo, boxes, names) {
+function applyNames(s, photo, boxes, names, geo = []) {
   const byBox = new Map()
   for (const n of names) {
     const b = boxes[Number(n.id) - 1]
@@ -9123,9 +9226,23 @@ function applyNames(s, photo, boxes, names) {
       suggested++
     }
   }
+  // 框修緊（只動位置，不動數量、名稱）：AI 給的小圖座標換算回整張照片；要跟原本的框夠像才用（不然可能框到旁邊的物件）
+  let fixed = 0
+  for (const o of photo.objects) {
+    if (o.edited || o.boxFixed) continue
+    const idx = boxes.indexOf(boxKey(o))
+    const n = idx >= 0 && names.find((x) => Number(x.id) === idx + 1)
+    const g = geo[idx]
+    const nb = fixBox(o.box, n?.box, g)
+    if (nb) {
+      o.box = nb
+      o.boxFixed = true
+      fixed++
+    }
+  }
   photo.namedAt = Date.now()
   delete photo.naming
-  return { named, suggested }
+  return { named, suggested, fixed }
 }
 /** 這次盤點最新的那一份：打開中的用畫面上的；已經被刪掉回 null（不要把刪掉的救回來） */
 const freshSession = async (sid) => (state.session?.id === sid ? state.session : (await db.get(sid).catch(() => null)) || null)
@@ -9159,7 +9276,7 @@ async function applyNamesData(sid, pid, d, { remote = false } = {}) {
     return false
   }
   await itemsAll()
-  applyNames(s, photo, d.boxes || photo.naming?.boxes || [], names)
+  applyNames(s, photo, d.boxes || photo.naming?.boxes || [], names, d.geo || photo.naming?.geo || [])
   await db.put(s)
   if (!s.photos.some(namingPending)) {
     if (s.linkedAt) await linkSession(s).catch(() => {})
@@ -9180,14 +9297,14 @@ async function applyNamesData(sid, pid, d, { remote = false } = {}) {
 async function sendNames(s0, photo0, refs, batch) {
   if (photo0.status !== 'done' || !photo0.objects.length || !photo0.blob) return
   const model = await refineModel()
-  const req = await nameRequest(photo0, refs)
+  const { req, geo } = await nameRequest(photo0, refs)
   const boxes = photo0.objects.map(boxKey)
   // 存檔前拿最新的一份（這段時間你可能改過、或刪掉了這次盤點）
   const s = await freshSession(s0.id)
   const photo = s?.photos.find((p) => p.id === photo0.id)
   if (!photo || photo.namedAt) return
   const at = Date.now()
-  photo.naming = { at, boxes, tries: (photo.naming?.tries || 0) + 1, dev: deviceId() }
+  photo.naming = { at, boxes, geo, tries: (photo.naming?.tries || 0) + 1, dev: deviceId() }
   await db.put(s)
   if ((state.session === s && state.view === 'review') || state.view === 'home') render() // 顯示「AI 正在補名稱」
   if (viaSheetNow()) {
@@ -9328,7 +9445,7 @@ function preAnalyze(photo) {
         // 還沒輪到就被刪掉、或這次盤點已經放棄：不送（不花錢）
         if (!state.session?.photos.includes(photo)) return resolve({ skipped: true, trace })
         try {
-          resolve({ r: await analyze(photo, log, []), trace })
+          resolve({ r: await analyzeSmart(photo, log, []), trace })
         } catch (e) {
           resolve({ e, trace })
         }
@@ -9572,6 +9689,31 @@ $app.addEventListener('click', async (e) => {
       state.cancel = false // 上一次按過取消：不要影響這次拍照後先辨識的重試
       state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], counts: {}, manual: [], by: currentCounter()?.name || '', byId: currentCounter()?.id || '' }
       return go('capture')
+    case 'recount-tiled': {
+      const s = state.session
+      const photo = s?.photos[state.photoIndex]
+      if (!photo?.blob || !canEdit()) return toast('這張照片還沒下載，或你沒有修改的權限')
+      if (!confirm('把這張照片切成 4 塊重新數？\n這張現在的框和數量會被取代（你改過的也會不見）。要繼續嗎？')) return
+      const done = busyBtn(t, '分區數中…')
+      try {
+        const r = await analyzeTiled(photo, (m) => (t.textContent = m))
+        photo.objects = r.objects
+        photo.note = r.note
+        photo.status = 'done'
+        for (const k of Object.keys(s.counts || {})) delete s.counts[k]
+        markAi(photo)
+        delete photo.namedAt
+        await save()
+        toast(`重新數好了：${r.objects.length} 個`)
+        if (namesMode()) queueNames(s, [photo])
+      } catch (e) {
+        toast(`分區數沒成功：${e.message}`)
+      } finally {
+        done()
+        render()
+      }
+      return
+    }
     case 'save-photos': {
       const files = state.session.photos.map((p) => camOrigins.get(p)).filter(Boolean)
       if (!files.length) return toast('沒有用 App 拍的照片')
