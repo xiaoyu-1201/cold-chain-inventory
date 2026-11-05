@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.15.1（11/05・通知名稱改為「辨識完成通知」）'
+const VERSION = '4.15.2（11/05・一般成員的設定頁只留最簡單的）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2868,6 +2868,7 @@ async function viewSettings() {
     <p class="footnote" style="text-align:center">新版會自動更新；也可手動檢查。盤點紀錄、樣品照與 API 金鑰不會被刪除。</p>
   </main>`
   }
+  const simple = syncReady() && !canManage() // 一般成員：只看最簡單的
   return `
   <main class="app">
     <div class="nav">${backBtn('home', '盤點')}</div>
@@ -2900,17 +2901,20 @@ async function viewSettings() {
           </div>`
         : ''
     }
-    <p class="section-title">AI 辨識</p>
-    <div class="group"><div class="row mode-row"><span class="grow"><span class="title">辨識內容</span><br><span class="meta">${MODE_DESC[aiMode()]}${aiMode() === 'fast' ? (aiViaSheet() && !ls.get(K().key) ? '（交給雲端，App 關掉也會跑完）' : '（在這支手機上補，App 要開著）') : ''}</span>${canEdit() ? `<span class="chips mode-chips" role="group" aria-label="辨識內容">${Object.keys(MODE_LABEL).map((k) => `<button class="chip" data-action="ai-mode" data-mode="${k}" aria-pressed="${aiMode() === k}">${MODE_LABEL[k]}</button>`).join('')}</span>` : ''}</span></div>
+    ${simple ? '' : '<p class="section-title">AI 辨識</p>'}
+    ${simple ? '' : `<div class="group"><div class="row mode-row"><span class="grow"><span class="title">辨識內容</span><br><span class="meta">${MODE_DESC[aiMode()]}${aiMode() === 'fast' ? (aiViaSheet() && !ls.get(K().key) ? '（交給雲端，App 關掉也會跑完）' : '（在這支手機上補，App 要開著）') : ''}</span>${canEdit() ? `<span class="chips mode-chips" role="group" aria-label="辨識內容">${Object.keys(MODE_LABEL).map((k) => `<button class="chip" data-action="ai-mode" data-mode="${k}" aria-pressed="${aiMode() === k}">${MODE_LABEL[k]}</button>`).join('')}</span>` : ''}</span></div>
       <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">比對 AI 原始結果與確認後的結果、檢視相似品比對成效；也可用標準答案測試 AI</span></span>${chev}</button></div>
+    </div>`}
+    ${simple ? pushRows() : ''}
+    ${simple && syncReady() ? `<div class="group" style="margin-top:22px"><button class="row" data-action="sync-leave"><span class="grow"><span class="title" style="color:var(--red)">退出並清除此裝置資料</span><br><span class="meta">歸還或更換手機時使用；雲端資料不會刪除</span></span>${chev}</button></div>` : ''}
     </div><div class="settings-col">
-    <p class="section-title">盤點規則</p>
+    ${simple ? '' : `<p class="section-title">盤點規則</p>
     <div class="group">
       <label class="row"><span class="grow"><span class="title">盲盤</span><br><span class="meta">盤點人員看不到帳面數與差異（僅擁有者、管理員可見）。看得到帳面數會變成「對答案」，無法發現錯誤。</span></span><input type="checkbox" id="rule-blind" ${ls.get(LS.blind, '1') === '1' ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
       <label class="row"><span class="grow"><span class="title">有差異先複盤</span><br><span class="meta">實盤與帳面不符時，請由另一人複盤；兩次一致才確認差異，並選擇原因，再由擁有者或管理員決定是否調整帳面。</span></span><input type="checkbox" id="rule-recount" ${recountOn() ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
     </div>
     <p class="footnote">${canManage() ? '改了會同步給大家。' : '由擁有者或管理員設定。'}</p>
-    <div class="group adv-link"><button class="row" data-go="settings-adv"><span class="grow"><span class="title">進階設定</span><br><span class="meta">${myRole() === 'owner' ? 'AI 金鑰、品項清單、樣品照、Google 試算表、備份、清除資料' : canManage() ? '品項清單、樣品照、備份、通知、清除資料' : canEdit() ? '品項清單、樣品照、備份、通知' : '品項清單、備份這台裝置'}</span></span>${chev}</button></div>
+    <div class="group adv-link"><button class="row" data-go="settings-adv"><span class="grow"><span class="title">進階設定</span><br><span class="meta">${myRole() === 'owner' ? 'AI 金鑰、品項清單、樣品照、Google 試算表、備份、清除資料' : canManage() ? '品項清單、樣品照、備份、通知、清除資料' : canEdit() ? '品項清單、樣品照、備份、通知' : '品項清單、備份這台裝置'}</span></span>${chev}</button></div>`}
     </div></div>
     <p class="footnote" style="margin-top:18px;text-align:center">版本 ${VERSION}</p>
   </main>`
