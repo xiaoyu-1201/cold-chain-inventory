@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.17.4（11/05・辨識過程多記 AI 給的原始座標，框跑掉時查原因）'
+const VERSION = '4.18.1（11/05・數的時候順便標出「可能混進別堆」的接頭）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -862,7 +862,8 @@ const COUNT_SCHEMA = {
   type: 'OBJECT',
   properties: {
     kinds: { type: 'ARRAY', items: { type: 'STRING' }, description: '照片裡有哪幾種商品（中文名稱，例如「三通」「乾燥過濾器」）' },
-    boxes: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'INTEGER' } }, description: '每一個商品一筆：[ymin, xmin, ymax, xmax, 第幾種（kinds 的索引，從 0 開始）, 信心 0～100]' },
+    boxes: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'INTEGER' } }, description: '每一個商品一筆：[ymin, xmin, ymax, xmax, 第幾種（kinds 的索引，從 0 開始）, 信心 0～100, 疑似混入的原因編號（odd_notes 的第幾筆，從 1 開始；正常填 0）]' },
+    odd_notes: { type: 'ARRAY', items: { type: 'STRING' }, description: '疑似混進別堆的原因（15 字內，例如「像彎頭，旁邊是 T 型」）；沒有就空陣列' },
     note: { type: 'STRING', description: '看不清楚、可能數錯的地方；沒有就空字串' },
     location: { type: 'STRING', description: '照片裡看得到儲位標籤（例如 A-01）就填代號；沒有就空字串' },
   },
@@ -875,17 +876,18 @@ function countPrompt(dims) {
 1. 每一個商品各給一個框；同一種有幾個就給幾個框，不要合併成一個。被擋住一半以上的也要算，信心給低一點。
 2. 同一個東西只給一個框，不要重複框。疊在一起、排在後面的，看得到一部分就要算。
 3. 貨架、標價牌、手、紙箱外的雜物、儲位標籤不算商品。
-4. kinds 列出照片裡有哪幾種商品；外觀明顯不同（大小、形狀、顏色、包裝）的分成不同種。名稱優先用下面「店內品項清單」的寫法（不用寫括號裡的說明）。
+4. kinds 列出照片裡有哪幾種商品；外觀明顯不同（大小、形狀、顏色、包裝）的分成不同種。接頭要特別注意：彎頭、T 型（三通）、直通、異徑等形狀不同的，一定要分成不同種，就算整堆只有一個也一樣。名稱優先用下面「店內品項清單」的寫法（不用寫括號裡的說明）。
 5. boxes 每個商品一筆：[四個座標, 第幾種, 信心]；${pxRule(dims)}。第幾種是 kinds 的索引（從 0 開始），信心 0～100。
 6. 不管有多少個、排得多密，都要一個一個給框；絕對不可以用一個框代表一堆，也不可以只在備註寫「大約幾個」。先整張看一遍、一個一個數完再回答；疊在一起的要看清楚邊緣，不要把兩個算成一個，也不要把一個算成兩個。${tileRule}
 7. 照片裡看得到儲位標籤（白底黑字的代號，例如 A-01、B-12）時，location 填標籤上的代號。
-8. 看不清楚、可能數錯的地方寫在 note；沒有就空字串。
+8. 小東西常常不小心混進別堆。逐堆檢查：有沒有哪一個的形狀或尺寸跟旁邊那堆不一樣、或你不確定是不是同一種？有的話原因（15 字內，例如「像彎頭，旁邊是 T 型」）寫進 odd_notes，並把那個框的第 7 個數字填成這個原因的編號（從 1 開始）；其他框填 0。只標真的可疑的，通常幾個而已。數量照實數、種類照你的判斷分，這只是提醒人再看一眼。
+9. 看不清楚、可能數錯的地方寫在 note；沒有就空字串。
 店內品項清單：
 ${catalogLines().join('\n')}`
 }
 const COUNT_JSON_HINT = `
 只回 JSON，不要其他文字，格式：
-{"kinds":["品名"],"boxes":[[x1,y1,x2,y2,0,90]],"note":"","location":""}`
+{"kinds":["品名"],"boxes":[[x1,y1,x2,y2,0,90,0]],"odd_notes":[],"note":"","location":""}`
 
 /** 只數數量：送一次辨識，轉成跟完整模式一樣的框（品牌、型號、規格留白） */
 async function generateCount(model, image, simple, signal, dims = null) {
@@ -904,6 +906,7 @@ async function generateCount(model, image, simple, signal, dims = null) {
     throw new ApiError('AI 回傳格式錯誤，請再試一次。', 0, `bad json: ${text.slice(0, 120)}`)
   }
   const kinds = (parsed.kinds || []).map((k) => cleanLabel(k))
+  const oddNotes = Array.isArray(parsed.odd_notes) ? parsed.odd_notes : []
   const all = (parsed.boxes || []).filter((b) => Array.isArray(b) && b.length >= 4)
   // 少了「第幾種」：只有一種時就是那一種；索引不對的框算不出是哪一種，寫進備註（不能默默少算）
   const kindOf = (b) => kinds[b.length >= 5 ? Math.round(Number(b[4])) : kinds.length === 1 ? 0 : -1]
@@ -920,8 +923,12 @@ async function generateCount(model, image, simple, signal, dims = null) {
         box: toBox(b, dims),
         // 信心是 0～100；只有簡化模式（沒有格式限制）才可能回 0～1
         confidence: Number.isFinite(c) ? Math.min(1, Math.max(0, simple && c <= 1 ? c : c / 100)) : 0.5,
+        ...(Number(b[6]) >= 1 && oddNotes[Math.round(Number(b[6])) - 1] ? { odd: true, oddReason: `可能混進來（${String(oddNotes[Math.round(Number(b[6])) - 1]).trim().slice(0, 20)}）` } : {}),
       }
     })
+  // 標太多＝AI 沒在挑，反而吵：最多留 5 個或 15%
+  let oddLeft = Math.max(5, Math.ceil(objects.length * 0.15))
+  for (const o of objects) if (o.odd && oddLeft-- <= 0) delete o.odd, delete o.oddReason
   const { kept, merged } = dedupe(objects)
   const note = [String(parsed.note || ''), merged ? `重複框選的項目已合併 ${merged} 個。` : '', bad ? `有 ${bad} 個框格式不對、沒算進去，請看照片補上。` : ''].filter(Boolean).join(' ')
   const dbg = `照片 ${dims?.w || '?'}×${dims?.h || '?'}；AI 回 ${(parsed.boxes || []).length} 個；前 3 個原始座標 ${JSON.stringify((parsed.boxes || []).slice(0, 3).map((b) => (Array.isArray(b) ? b.slice(0, 4) : b)))}`
@@ -1004,7 +1011,11 @@ function iou(a, b) {
 function dedupe(objects) {
   const sorted = [...objects].sort((a, b) => b.confidence - a.confidence)
   const kept = []
-  for (const o of sorted) if (!kept.some((k) => norm(k.label) === norm(o.label) && iou(k.box, o.box) > 0.7)) kept.push(o)
+  for (const o of sorted) {
+    const k = kept.find((k) => norm(k.label) === norm(o.label) && iou(k.box, o.box) > 0.7)
+    if (!k) kept.push(o)
+    else if (o.odd && !k.odd) Object.assign(k, { odd: true, oddReason: o.oddReason }) // 同一個東西框兩次：留信心高的，但混入提醒要保留
+  }
   // 保持原本的順序
   const keep = new Set(kept)
   return { kept: objects.filter((o) => keep.has(o)), merged: objects.length - kept.length }
@@ -1067,7 +1078,13 @@ async function analyzeTiled(photo, onStatus = () => {}) {
         // 別塊已經有幾乎一樣的框（兩塊重疊的地方看到同一個）：留比較有把握的
         const dup = objects.findIndex((p) => iou(p.box, box) > 0.5)
         if (dup < 0) objects.push({ ...o, box })
-        else if (o.confidence > objects[dup].confidence) objects[dup] = { ...o, box }
+        else {
+          const p = objects[dup]
+          const win = o.confidence > p.confidence ? { ...o, box } : p
+          const odd = o.odd ? o : p.odd ? p : null
+          if (odd && !win.odd) Object.assign(win, { odd: true, oddReason: odd.oddReason })
+          objects[dup] = win
+        }
       }
     }
   bmp.close?.()
@@ -1430,7 +1447,8 @@ function groupsOf(session) {
  * 「要確認」的框：自動挑出可能不一樣的，你只要看這幾個（不用一個一個看）。
  * 理由（照順序判斷，一個框只列一個理由）：
  * ⓪ 相似品比對覺得它可能是別的（o.suggest；按「改成…」才會改）
- * ① AI 自己說跟同一種的其他個不一樣（odd）
+ * ① AI 自己說跟同一種的其他個不一樣（odd；只數數量時是「可能混進別堆」）
+ * 排序：AI 建議、混入（rank 0）排最前面，再來是大小差很多、沒把握（rank 1）
  * ② 大小跟同一種的其他個差很多（同一張照片裡比；3 個以上差 30%、只有 2 個差 35%）
  * ③ AI 沒把握（信心 < 0.6）
  * 你確認過（按「一樣」或改過種類）就不再列出。
@@ -1438,7 +1456,7 @@ function groupsOf(session) {
 function doubtsOf(session) {
   const out = []
   session.photos.forEach((photo, pi) => photoDoubts(photo, (o) => o.checked || o.edited).forEach((d) => out.push({ pi, ...d })))
-  return out
+  return out.sort((a, b) => a.rank - b.rank) // 混進別堆的排最前面
 }
 /** 一張照片裡要確認的框（skip＝不用再列的，例如你確認過、改過的） */
 function photoDoubts(photo, skip = () => false) {
@@ -1463,7 +1481,7 @@ function photoDoubts(photo, skip = () => false) {
       else if (objs.length >= 3 && Math.abs(diff) > 0.3) reason = `比同一種的其他個${diff > 0 ? '大' : '小'}約 ${Math.round(Math.abs(diff) * 100)}%`
       else if (pairGap > 1.35) reason = '這一種只有 2 個，但大小差很多'
       else if (o.confidence < 0.6) reason = 'AI 不太確定這是什麼'
-      if (reason) out.push({ o, reason })
+      if (reason) out.push({ o, reason, rank: (o.suggest && !o.edited) || o.odd ? 0 : 1 })
     })
   }
   return out
