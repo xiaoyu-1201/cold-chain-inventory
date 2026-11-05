@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.15.0（11/05・手機只留最近 30 天的照片）'
+const VERSION = '4.15.1（11/05・通知名稱改為「辨識完成通知」）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -9251,9 +9251,9 @@ const pushCan = () => 'PushManager' in window && 'serviceWorker' in navigator &&
 function pushRows() {
   if (!syncReady() || !canEdit()) return ''
   const on = pushCan() && Notification.permission === 'granted' && ls.get(LS.pushOn) === '1'
-  const meta = !pushCan() ? (isIOS() && !standalone() ? '要先把 App 加到主畫面（iOS 16.4 以上）才能收通知' : '這個瀏覽器不支援通知') : on ? '已開啟：關掉 App、鎖定畫面也看得到' : '關掉 App 也能收到「名稱整理完成」'
+  const meta = !pushCan() ? (isIOS() && !standalone() ? '要先把 App 加到主畫面（iOS 16.4 以上）才能收通知' : '這個瀏覽器不支援通知') : on ? '已開啟：關掉 App、鎖定畫面也看得到' : '名稱整理完成時通知你；關掉 App 也收得到'
   return `<p class="section-title">通知</p><div class="group">
-    <div class="row"><span class="grow"><span class="title">名稱補好時通知我</span><br><span class="meta">${meta}</span></span>${pushCan() ? `<button class="btn small ${on ? 'secondary' : ''}" data-action="push-enable">${on ? '重新開啟' : '開啟'}</button>` : ''}</div>
+    <div class="row"><span class="grow"><span class="title">辨識完成通知</span><br><span class="meta">${meta}</span></span>${pushCan() ? `<button class="btn small ${on ? 'secondary' : ''}" data-action="push-enable">${on ? '重新開啟' : '開啟'}</button>` : ''}</div>
     ${
       myRole() === 'owner'
         ? `<div class="row"><span class="grow"><span class="title">通知服務</span><br><span class="meta">${ls.get(LS.pushSvc) === '1' ? '已設定' : '還沒設定：照說明文件建好 Cloudflare 通知服務，把網址貼在下面'}</span></span></div>
