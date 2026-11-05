@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.16.1（11/05・框修緊、一堆小東西改分區數）'
+const VERSION = '4.17.0（11/05・辨識中可先離開、結果留在首頁；很多框改細框、保溫管不再只框一個）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -590,7 +590,7 @@ function strictSchema(s) {
  */
 function claudeThinking(model) {
   if (/sonnet-5-5/.test(model)) return { thinking: { type: 'between_tools' } }
-  if (/opus-5-5|fable|mythos/.test(model)) return { output_config: { effort: 'low' } }
+  if (/opus-5-5|fable|mythos/.test(model)) return { output_config: { effort: countMode() ? 'medium' : 'low' } } // 數量模式要認真數：medium
   if (/haiku-5-5|(sonnet|opus)-5(-\d{8})?$/.test(model)) return { thinking: { type: 'disabled' } }
   return {}
 }
@@ -877,7 +877,7 @@ function countPrompt(dims) {
 3. 貨架、標價牌、手、紙箱外的雜物、儲位標籤不算商品。
 4. kinds 列出照片裡有哪幾種商品；外觀明顯不同（大小、形狀、顏色、包裝）的分成不同種。名稱優先用下面「店內品項清單」的寫法（不用寫括號裡的說明）。
 5. boxes 每個商品一筆：[四個座標, 第幾種, 信心]；${pxRule(dims)}。第幾種是 kinds 的索引（從 0 開始），信心 0～100。
-6. 先整張看一遍、一個一個數完再回答；疊在一起的要看清楚邊緣，不要把兩個算成一個，也不要把一個算成兩個。${tileRule}
+6. 不管有多少個、排得多密，都要一個一個給框；絕對不可以用一個框代表一堆，也不可以只在備註寫「大約幾個」。先整張看一遍、一個一個數完再回答；疊在一起的要看清楚邊緣，不要把兩個算成一個，也不要把一個算成兩個。${tileRule}
 7. 照片裡看得到儲位標籤（白底黑字的代號，例如 A-01、B-12）時，location 填標籤上的代號。
 8. 看不清楚、可能數錯的地方寫在 note；沒有就空字串。
 店內品項清單：
@@ -1075,8 +1075,12 @@ async function analyzeTiled(photo, onStatus = () => {}) {
 /** 一般辨識；數量模式下如果只框到 1～2 個、而且有框大到蓋掉半張照片（一堆東西被當成一個），自動改用分區數 */
 async function analyzeSmart(photo, onStatus, refs) {
   const r = await analyze(photo, onStatus, refs)
-  if (r.mode === 'count' && r.objects.length <= 2 && r.objects.some((o) => ((o.box[2] - o.box[0]) * (o.box[3] - o.box[1])) / 1e6 > 0.5)) {
-    onStatus('只框到很少、而且框很大：改用分區再數一次')
+  // 備註裡寫的數字（例如「約 150 支」）比框數多很多：AI 自己知道很多，卻沒有一個一個框
+  const noteMax = Math.max(0, ...[...String(r.note || '').matchAll(/([0-9]+)/g)].map((m) => Number(m[1])))
+  const area = (o) => ((o.box[2] - o.box[0]) * (o.box[3] - o.box[1])) / 1e6
+  const few = r.objects.length <= 3
+  if (r.mode === 'count' && few && (noteMax >= 8 && noteMax >= r.objects.length * 4 || r.objects.some((o) => area(o) > 0.5) || (r.objects.length > 0 && r.objects.every((o) => area(o) < 0.002)))) {
+    onStatus('只框到很少、而且跟備註對不起來：改用分區再數一次')
     try {
       const t = await analyzeTiled(photo, onStatus)
       if (t.objects.length > r.objects.length) return t
@@ -2474,6 +2478,7 @@ async function viewHome() {
     <div class="home-cards">
     ${moveCard()}
     ${joinStatusCards()}
+    ${unseenCards(sessions)}
     ${namingCount(sessions) ? `<div class="hint-card" role="status"><b>AI 正在補名稱</b>（${namingCount(sessions)} 張照片）：<span class="nb">可以先做別的事，</span><span class="nb">好了會通知你；</span><span class="nb">數量不會變。</span></div>` : ''}
     ${
       joinPending()
@@ -2606,7 +2611,7 @@ function viewAnalyzing() {
       <div class="wait-status" id="ai-status"></div>
     </div>
   </main>
-  <div class="toolbar"><div class="inner"><button class="btn plain" data-action="cancel">取消</button></div></div>`
+  <div class="toolbar"><div class="inner row-actions"><button class="btn plain" data-action="cancel" style="flex:1">取消</button><button class="btn secondary" data-go="home" style="flex:2">先去做別的事</button></div></div>`
 }
 let orbitRaf = 0
 /**
@@ -2700,7 +2705,7 @@ function viewReview() {
             s.photos.some((p) => p.lost && !fetching.has(s.id))
               ? `<div class="hint-card lost-card" role="status"><b>${s.photos.filter((p) => p.lost).length} 張照片在此手機遺失</b>（iPhone 的限制；框與數量仍保留）。若雲端有備份，可取回。<button class="btn small" data-action="repair-photos">從雲端拿回照片</button></div>`
               : ''
-          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''}" data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
+          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''} ${photo.objects.length > 12 ? 'dense' : ''} ${groups.filter((g) => !g.manual).length > 1 ? 'multi' : ''}" data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
             photo.blob ? `<img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">` : `<div class="photo-ph ${fetching.has(s.id) || photo.pending ? 'loading' : ''}" role="img" aria-label="${photo.pending ? '照片下載中' : '這張照片不見了'}">${fetching.has(s.id) || photo.pending ? '<span class="photo-ph-text">照片下載中…</span>' : ''}</div>`
           }${boxes}
              <button class="photo-zoom" data-action="zoom" aria-label="放大看照片">${icon('maximize', 22)}</button>
@@ -2721,7 +2726,7 @@ function viewReview() {
               <button class="btn small secondary" data-action="zoom-in" ${state.zoom >= ZOOM_MAX ? 'disabled' : ''} aria-label="放大">${icon('plus', 20)}</button>
               <button class="viewer-close" data-action="zoom-close" aria-label="關閉">${icon('x', 22)}</button>
             </div>
-            <div class="viewer-scroll"><div class="photo-wrap viewer-photo ${state.focusObj ? 'focus' : ''}" style="width:${state.zoom * 100}%" data-photo><img src="${urlOf(photo)}" alt="">${boxes}</div></div>
+            <div class="viewer-scroll"><div class="photo-wrap viewer-photo ${state.focusObj ? 'focus' : ''} ${photo.objects.length > 12 ? 'dense' : ''}" style="width:${state.zoom * 100}%" data-photo><img src="${urlOf(photo)}" alt="">${boxes}</div></div>
           </div>`
         : ''
     }
@@ -9002,7 +9007,7 @@ async function runAnalysis(indices) {
         Object.assign(photo, { status: 'error', error: e.message || String(e), errorDetail: e.detail || '' })
       }
       state.progress.done += 1
-      await save()
+      await db.put(s).catch(saveFailed)
       const sub = state.view === 'analyzing' && document.getElementById('wait-sub')
       if (sub) {
         if (!state.cancel) sub.innerHTML = waitSub(state.progress)
@@ -9012,10 +9017,12 @@ async function runAnalysis(indices) {
   await Promise.all([worker(), worker()])
   clearInterval(timer)
   releaseWakeLock()
-  go('review', { photoIndex: 0 })
+  // 還停在等待畫面才直接給你看結果；你已經離開去做別的事了，就留在首頁（不會硬把你拉回來）＋橫幅
+  if (state.view === 'analyzing') go('review', { photoIndex: 0 })
+  else await markUnseen(s, 'count')
   if (s.placeAuto) {
     delete s.placeAuto
-    toast(`看到儲位標籤，位置自動填「${placeLabel(s.place)}」`)
+    if (state.view === 'review') toast(`看到儲位標籤，位置自動填「${placeLabel(s.place)}」`)
   }
   // 結果先給你看；相似品在背景再比一次，好了自動更新
   // 只數數量不跑相似品比對（也不會有第二個 AI 改答案）；快速模式改成背景補名稱（不改數量）
@@ -9116,9 +9123,8 @@ const NAME_SCHEMA = {
           model: { type: 'STRING' },
           spec: { type: 'STRING', description: '尺寸／規格，例如 3分、4分×3分、等徑・粗' },
           confidence: { type: 'NUMBER', description: '0～1，有多確定' },
-          box: { type: 'ARRAY', items: { type: 'INTEGER' }, description: '這個物件在它特寫小圖裡的緊框 [x1, y1, x2, y2]（小圖像素）；看不準就 [0,0,0,0]' },
         },
-        required: ['id', 'label', 'brand', 'model', 'spec', 'confidence', 'box'],
+        required: ['id', 'label', 'brand', 'model', 'spec', 'confidence'],
       },
     },
   },
@@ -9163,33 +9169,18 @@ async function nameRequest(photo, refs) {
 2. 標籤看得到就分開填 brand、model、spec；看不出來就空字串，不要猜。
 3. 外觀很像、只差尺寸的（例如三通、彎頭、接頭），比較管子粗細、接口是不是一樣粗（等徑／異徑），spec 寫出差別；看得出分數就寫分數。
 4. 每一個編號都要回一筆（id 是編號）；confidence 寫 0～1。
-5. box：這個物件在它「特寫小圖」裡的位置，用小圖的像素 [x1, y1, x2, y2]（左、上、右、下），緊貼這一個物件的外緣、要把整個物件（包含伸出去的管子）都框進來，不要框到旁邊的物件；沒有特寫小圖、或看不準就回 [0, 0, 0, 0]。
-${refs.length ? '6. 跟某張樣品一樣的，label、brand、model、spec 照那張樣品填，一字不差。\n' : ''}店內品項清單：
+${refs.length ? '5. 跟某張樣品一樣的，label、brand、model、spec 照那張樣品填，一字不差。\n' : ''}店內品項清單：
 ${catalogLines().join('\n')}${list.length ? `\n品項庫（品名｜品牌｜型號｜尺寸／規格）：\n${list.map((it) => [it.label, it.brand || '—', it.model || '—', it.spec || '—'].join('｜')).join('\n')}` : ''}`
   const parts = [
     ...(refs.length ? [{ text: '【店內樣品】每張只拍一個商品，名稱是正確的：' }, ...refs.flatMap((r, i) => [{ text: `樣品 ${i + 1}：${[r.label, r.brand, r.model, r.spec].map((v) => v || '—').join('｜')}` }, { inline_data: { mime_type: 'image/jpeg', data: r.data } }])] : []),
     { text: '【整張照片】縮小過；紅框和編號是要命名的商品：' },
     { inline_data: { mime_type: 'image/jpeg', data: overview } },
-    ...(useCrops ? [{ text: '【特寫小圖】從原照片切下來；同一種的小圖用同一個比例切（小圖越大，東西越大）：' }, ...crops.flatMap((c, k) => [{ text: `物件 ${k + 1}（小圖寬 ${c.w}、高 ${c.h} 像素；數量那一次分成：${objs[k].label}；框在小圖正中央）` }, { inline_data: { mime_type: 'image/jpeg', data: c.data } }])] : []),
+    ...(useCrops ? [{ text: '【特寫小圖】從原照片切下來；同一種的小圖用同一個比例切（小圖越大，東西越大）：' }, ...crops.flatMap((c, k) => [{ text: `物件 ${k + 1}（數量那一次分成：${objs[k].label}）` }, { inline_data: { mime_type: 'image/jpeg', data: c.data } }])] : []),
     { text },
   ]
   return { req: { contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: NAME_SCHEMA } }, geo }
 }
 const boxKey = (o) => o.box.join(',')
-/** AI 回的小圖緊框 → 整張照片的 [ymin,xmin,ymax,xmax]（0～1000）；不合理（太小、跑出小圖、跟原框差太多）回 null，維持原框 */
-function fixBox(old, nb, g) {
-  if (!g || !Array.isArray(nb) || nb.length < 4) return null
-  const [x1, y1, x2, y2] = nb.slice(0, 4).map(Number)
-  if (![x1, y1, x2, y2].every(Number.isFinite) || x2 - x1 < 6 || y2 - y1 < 6) return null
-  const clamp = (v) => Math.min(1000, Math.max(0, Math.round(v)))
-  const fx = (v) => ((g.sx + v / g.scale) / g.W) * 1000
-  const fy = (v) => ((g.sy + v / g.scale) / g.H) * 1000
-  const box = [clamp(fy(y1)), clamp(fx(x1)), clamp(fy(y2)), clamp(fx(x2))]
-  if (box[2] - box[0] < 5 || box[3] - box[1] < 5) return null
-  const ratio = ((box[2] - box[0]) * (box[3] - box[1])) / Math.max(1, (old[2] - old[0]) * (old[3] - old[1]))
-  if (ratio < 0.4 || ratio > 2.5 || iou(old, box) < 0.25) return null
-  return box
-}
 /**
  * 把補好的名稱放回框上（數量絕對不變：不新增、不刪框）：
  * - 你改過的框不碰；你確認過、或 AI 說是「另一類」的（例如三通→彎頭）：只標「要確認」＋建議，你按「改成…」才改
@@ -9226,23 +9217,9 @@ function applyNames(s, photo, boxes, names, geo = []) {
       suggested++
     }
   }
-  // 框修緊（只動位置，不動數量、名稱）：AI 給的小圖座標換算回整張照片；要跟原本的框夠像才用（不然可能框到旁邊的物件）
-  let fixed = 0
-  for (const o of photo.objects) {
-    if (o.edited || o.boxFixed) continue
-    const idx = boxes.indexOf(boxKey(o))
-    const n = idx >= 0 && names.find((x) => Number(x.id) === idx + 1)
-    const g = geo[idx]
-    const nb = fixBox(o.box, n?.box, g)
-    if (nb) {
-      o.box = nb
-      o.boxFixed = true
-      fixed++
-    }
-  }
   photo.namedAt = Date.now()
   delete photo.naming
-  return { named, suggested, fixed }
+  return { named, suggested }
 }
 /** 這次盤點最新的那一份：打開中的用畫面上的；已經被刪掉回 null（不要把刪掉的救回來） */
 const freshSession = async (sid) => (state.session?.id === sid ? state.session : (await db.get(sid).catch(() => null)) || null)
@@ -9282,12 +9259,12 @@ async function applyNamesData(sid, pid, d, { remote = false } = {}) {
     if (s.linkedAt) await linkSession(s).catch(() => {})
     const where = s.place ? placeLabel(s.place) : fmtTime(s.createdAt)
     const total = s.photos.reduce((n, p) => n + p.objects.filter((o) => o.suggest).length, 0)
-    banner(`${where} 名稱整理完成${total ? `・${total} 個要確認` : ''}`, () => {
-      // 正在拍、正在辨識、正在點貨：不要直接跳走（照片只在記憶體裡，跳走就不見）
-      if (['capture', 'analyzing', 'pick-edit'].includes(state.view)) return toast('先完成目前的工作，再到首頁打開那次盤點查看')
-      state.session = s
-      go('review', { photoIndex: 0 })
-    })
+    if (state.session === s && state.view === 'review') banner(`${where} 名稱整理完成${total ? `・${total} 個要確認` : ''}`)
+    else {
+      s.unseen = 'names'
+      await db.putRaw(s).catch(() => {})
+      banner(`${where} 名稱整理完成${total ? `・${total} 個要確認` : ''}`, () => openUnseen(s))
+    }
   }
   if (state.session === s && state.view === 'review') render()
   else if (state.view === 'home') render()
@@ -9362,6 +9339,29 @@ async function resumeNames() {
     if (stale.length) queueNames(state.session?.id === s.id ? state.session : s, stale)
   }
 }
+/** 結果好了、你不在那一頁：記在那次盤點上（s.unseen），首頁留一張卡直到你點開看過；另外跳橫幅 */
+async function markUnseen(s, kind) {
+  s.unseen = kind
+  await db.putRaw(s).catch(() => {})
+  const where = s.place ? placeLabel(s.place) : fmtTime(s.createdAt)
+  banner(`${where} ${kind === 'names' ? '名稱整理完成' : '數量出來了'}`, () => openUnseen(s))
+  if (state.view === 'home') render()
+}
+function openUnseen(s) {
+  // 正在拍、正在辨識、正在點貨：不要直接跳走（照片只在記憶體裡，跳走就不見）
+  if (['capture', 'pick-edit'].includes(state.view)) return toast('先完成目前的工作，再到首頁打開那次盤點查看')
+  delete s.unseen
+  state.session = s
+  db.putRaw(s).catch(() => {})
+  go('review', { photoIndex: 0 })
+}
+/** 首頁：還沒點開看過的結果（數量出來了、名稱整理好了） */
+const unseenCards = (sessions) =>
+  sessions
+    .filter((x) => x.unseen)
+    .slice(0, 3)
+    .map((x) => `<button class="sum-doubt tip" data-open="${esc(x.id)}"><span class="sum-dot ok" aria-hidden="true">${icon('check', 14)}</span><span class="grow"><b>${esc(x.place ? placeLabel(x.place) : fmtTime(x.createdAt))} ${x.unseen === 'names' ? '名稱整理好了' : '數量出來了'}</b><br><span class="meta">點開查看</span></span>${chev}</button>`)
+    .join('')
 /** 還在補名稱的照片有幾張（首頁顯示） */
 const namingCount = (sessions) => sessions.reduce((n, s) => n + s.photos.filter(namingPending).length, 0)
 
@@ -9412,7 +9412,7 @@ function banner(msg, onTap) {
   }
   const arm = () => {
     clearTimeout(timer)
-    timer = setTimeout(hide, 4500)
+    timer = setTimeout(hide, 8000)
   }
   b.addEventListener('pointerenter', () => clearTimeout(timer))
   b.addEventListener('pointerleave', arm)
@@ -9549,6 +9549,10 @@ $app.addEventListener('click', async (e) => {
     if (!s) return toast('找不到這次盤點（可能在別台被刪掉了）')
     state.session = s
     delete state.session.edits // 第一版的舊欄位，不再使用
+    if (state.session.unseen) {
+      delete state.session.unseen
+      db.putRaw(state.session).catch(() => {})
+    }
     await itemsAll()
     go('review', { photoIndex: 0 })
     // 照片還沒下載的：現在抓這一次的（畫面先出來，照片到了再補上）

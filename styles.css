@@ -5310,3 +5310,29 @@ html.is-scrolled .nav {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* 4.16.2 框很多（超過 12 個）時：像標記筆畫的黃色細框，不放編號和「?」（疊在一起看不清楚）；要確認的改成橘色虛線 */
+.photo-wrap.dense .box {
+  border: 2px solid #ffe600;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+.photo-wrap.dense .box .tag,
+.photo-wrap.dense .box .qmark {
+  display: none;
+}
+.photo-wrap.dense .box.doubt {
+  border: 2px dashed #ff8a00;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+.photo-wrap.dense.focus .box.on {
+  border-color: var(--c, var(--tint));
+}
+.sum-dot.ok {
+  background: var(--green, #1d8348);
+  color: #fff;
+}
+/* 很多框＋多種品項：各品項保留自己的顏色（細框）；只有一種品項時維持黃色 */
+.photo-wrap.dense.multi .box {
+  border-color: var(--c, #ffe600);
+}
