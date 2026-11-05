@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.15.2（11/05・一般成員的設定頁只留最簡單的）'
+const VERSION = '4.16.0（11/05・App 拍的照片可一鍵存到相簿）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2501,6 +2501,7 @@ function viewCapture() {
       <label class="btn secondary" style="flex:1">${icon('camera')}拍照<input type="file" accept="image/*" capture="environment" id="cam" class="sr-only"></label>
       <label class="btn secondary" style="flex:1">${icon('image')}從相簿選<input type="file" accept="image/*" multiple id="pick" class="sr-only"></label>
     </div>
+    ${s.photos.some((p) => camOrigins.has(p)) ? `<div class="row-actions" style="margin-top:8px"><button class="btn small plain" data-action="save-photos">${icon('image', 18)}存到手機相簿（${s.photos.filter((p) => camOrigins.has(p)).length} 張）</button></div><p class="footnote">用 App 拍的照片不會自動進相簿（iPhone 不允許網頁偷偷存）：按這顆，再按「儲存影像」就會存進相簿，一次存完。</p>` : ''}
     <p class="section-title">怎麼拍比較準</p>
     <div class="group">
       <div class="row"><span>① 一次拍一層貨架，正面拍攝，避免傾斜</span></div>
@@ -9346,11 +9347,14 @@ function pumpPre() {
     })
   }
 }
-async function addFiles(files) {
+/** 用 App 的相機拍的原始照片檔（存到相簿用；從相簿選的本來就在相簿裡）。照片被刪掉、這次盤點結束就跟著放掉 */
+const camOrigins = new WeakMap()
+async function addFiles(files, fromCam = false) {
   const s = state.session
   for (const f of files) {
     try {
       const p = await prepareImage(f)
+      if (fromCam) camOrigins.set(p, f)
       s.photos.push(p)
       preAnalyze(p)
     } catch {
@@ -9568,6 +9572,27 @@ $app.addEventListener('click', async (e) => {
       state.cancel = false // 上一次按過取消：不要影響這次拍照後先辨識的重試
       state.session = { id: uid(), createdAt: Date.now(), place: '', photos: [], counts: {}, manual: [], by: currentCounter()?.name || '', byId: currentCounter()?.id || '' }
       return go('capture')
+    case 'save-photos': {
+      const files = state.session.photos.map((p) => camOrigins.get(p)).filter(Boolean)
+      if (!files.length) return toast('沒有用 App 拍的照片')
+      try {
+        if (navigator.canShare?.({ files })) {
+          await navigator.share({ files, title: '盤點照片' })
+          return toast('已交給「儲存影像」；存好就會在相簿裡')
+        }
+      } catch (e) {
+        if (e?.name === 'AbortError') return // 你自己按了取消
+      }
+      // 這個瀏覽器不能叫出分享：改成下載（電腦、Android 會存到「下載」資料夾）
+      for (const f of files) {
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(f)
+        a.download = f.name || `盤點-${Date.now()}.jpg`
+        a.click()
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+      }
+      return toast('已下載到手機的「下載」')
+    }
     case 'analyze':
       state.session.place = document.getElementById('place')?.value.trim() || ''
       return runAnalysis(state.session.photos.map((_, i) => i))
@@ -10394,7 +10419,7 @@ $app.addEventListener('click', async (e) => {
 })
 
 function bindInputs() {
-  document.getElementById('cam')?.addEventListener('change', (e) => addFiles([...e.target.files]))
+  document.getElementById('cam')?.addEventListener('change', (e) => addFiles([...e.target.files], true))
   document.getElementById('pick')?.addEventListener('change', (e) => addFiles([...e.target.files]))
   document.getElementById('sample-cam')?.addEventListener('change', (e) => e.target.files[0] && newSampleSheet(e.target.files[0]))
   document.getElementById('auto-sync')?.addEventListener('change', (e) => ls.set(LS.autoSync, e.target.checked ? '1' : '0'))
