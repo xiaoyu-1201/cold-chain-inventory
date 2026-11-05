@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.17.3（11/05・很多框也用藍色（品項自己的顏色）'
+const VERSION = '4.17.4（11/05・辨識過程多記 AI 給的原始座標，框跑掉時查原因）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -924,7 +924,8 @@ async function generateCount(model, image, simple, signal, dims = null) {
     })
   const { kept, merged } = dedupe(objects)
   const note = [String(parsed.note || ''), merged ? `重複框選的項目已合併 ${merged} 個。` : '', bad ? `有 ${bad} 個框格式不對、沒算進去，請看照片補上。` : ''].filter(Boolean).join(' ')
-  return { objects: kept, note, model, mode: 'count', location: String(parsed.location || '').trim().slice(0, 20) }
+  const dbg = `照片 ${dims?.w || '?'}×${dims?.h || '?'}；AI 回 ${(parsed.boxes || []).length} 個；前 3 個原始座標 ${JSON.stringify((parsed.boxes || []).slice(0, 3).map((b) => (Array.isArray(b) ? b.slice(0, 4) : b)))}`
+  return { objects: kept, note, model, mode: 'count', dbg, location: String(parsed.location || '').trim().slice(0, 20) }
 }
 
 /**
@@ -1122,6 +1123,7 @@ async function attemptChain(models, image, refs, onStatus, signal, dims = null) 
         t0 = Date.now()
         const r = await generate(model, image, step.simple, refs, signal, dims)
         onStatus(`${model} 完成（${Math.round((Date.now() - t0) / 1000)} 秒，找到 ${r.objects.length} 個）`)
+        if (r.dbg) onStatus(r.dbg)
         // 這個模型比較順：之後先用它（但不要換成 Haiku：分不出相似品，只當備用）
         if (mi > 0 && !isLite(model)) ls.set(K().model, model)
         return r
