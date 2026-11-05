@@ -5402,3 +5402,7 @@ html.is-scrolled .nav {
   font-weight: 600;
   pointer-events: none;
 }
+/* 4.18.4 首頁黃色通知卡片可左右滑掉：垂直捲動照常，橫向手勢給卡片 */
+.swipe-away {
+  touch-action: pan-y;
+}

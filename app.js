@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.18.3（11/05・橫幅可往上滑掉、頁面下拉就同步）'
+const VERSION = '4.18.4（11/05・首頁黃色通知卡片可左右滑掉）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -7259,6 +7259,61 @@ function syncAndToast() {
   document.addEventListener('touchend', end)
   document.addEventListener('touchcancel', clear)
 }
+/** 首頁「結果出來了」的黃色卡片：左右滑掉就當作看過（不用點開）；滑動時不會當成點擊 */
+{
+  let card = null
+  let x0 = 0
+  let dx = 0
+  let swiped = false
+  document.addEventListener('pointerdown', (e) => {
+    card = e.target.closest?.('[data-unseen]') || null
+    x0 = e.clientX
+    dx = 0
+    swiped = false
+  })
+  document.addEventListener('pointermove', (e) => {
+    if (!card) return
+    dx = e.clientX - x0
+    if (Math.abs(dx) < 8) return
+    card.style.transition = 'none'
+    card.style.transform = `translateX(${dx}px)`
+    card.style.opacity = String(Math.max(0.2, 1 - Math.abs(dx) / 260))
+  })
+  const release = async () => {
+    const c = card
+    card = null
+    if (!c) return
+    swiped = Math.abs(dx) > 8
+    c.style.transition = 'transform 0.2s ease-out, opacity 0.2s ease-out'
+    if (Math.abs(dx) < 90) {
+      c.style.transform = ''
+      c.style.opacity = ''
+      return
+    }
+    c.style.transform = `translateX(${dx > 0 ? 110 : -110}%)`
+    c.style.opacity = '0'
+    const sess = await db.get(c.dataset.unseen).catch(() => null)
+    if (sess?.unseen) {
+      delete sess.unseen
+      await db.putRaw(sess).catch(() => {})
+      if (state.session?.id === sess.id) delete state.session.unseen
+    }
+    setTimeout(() => state.view === 'home' && render(), 200)
+  }
+  document.addEventListener('pointerup', release)
+  document.addEventListener('pointercancel', release)
+  // 剛滑過的那一下不要當成點擊（會打開那次盤點）
+  document.addEventListener(
+    'click',
+    (e) => {
+      if (!swiped) return
+      swiped = false
+      e.stopPropagation()
+      e.preventDefault()
+    },
+    true,
+  )
+}
 /** 雲端（Apps Script）回的錯誤：data＝雲端的回覆（看得出是檢視者、被移除、次數到上限，還是網路問題） */
 class SyncError extends Error {
   constructor(message, data = {}) {
@@ -9457,7 +9512,7 @@ const unseenCards = (sessions) =>
   sessions
     .filter((x) => x.unseen)
     .slice(0, 3)
-    .map((x) => `<button class="sum-doubt tip" data-open="${esc(x.id)}"><span class="sum-dot ok" aria-hidden="true">${icon('check', 14)}</span><span class="grow"><b>${esc(x.place ? placeLabel(x.place) : fmtTime(x.createdAt))} ${x.unseen === 'names' ? '名稱整理好了' : '數量出來了'}</b><br><span class="meta">點開查看</span></span>${chev}</button>`)
+    .map((x) => `<button class="sum-doubt tip swipe-away" data-unseen="${esc(x.id)}" data-open="${esc(x.id)}"><span class="sum-dot ok" aria-hidden="true">${icon('check', 14)}</span><span class="grow"><b>${esc(x.place ? placeLabel(x.place) : fmtTime(x.createdAt))} ${x.unseen === 'names' ? '名稱整理好了' : '數量出來了'}</b><br><span class="meta">點開查看</span></span>${chev}</button>`)
     .join('')
 /** 還在補名稱的照片有幾張（首頁顯示） */
 const namingCount = (sessions) => sessions.reduce((n, s) => n + s.photos.filter(namingPending).length, 0)
