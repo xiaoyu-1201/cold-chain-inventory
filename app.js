@@ -111,7 +111,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.14.1（11/05・補名稱保護數量、通知修正）'
+const VERSION = '4.14.2（11/05・補名稱橫幅只跳一次、長品名不擋數量）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1222,7 +1222,7 @@ async function refineModel() {
 /** 建議的那一種，給人看的名字：「三通・4分」 */
 const suggestName = (x) => `${x.label}${x.spec ? `・${x.spec}` : ''}`
 /** 「要確認」的理由：AI 再檢查一次，覺得可能是「三通・4分」：側口比較細（新人看不懂「比對」是誰，所以寫 AI 再檢查） */
-const suggestReason = (x) => `AI 再檢查一次，覺得可能是「${suggestName(x)}」${x.why ? `：${x.why}` : ''}`
+const suggestReason = (x) => (x.src === 'names' ? `補名稱時 AI 覺得這個可能是「${suggestName(x)}」，請確認` : `AI 再檢查一次，覺得可能是「${suggestName(x)}」${x.why ? `：${x.why}` : ''}`)
 
 /**
  * 檢查 objects 裡 indices 這些框：不同意第一次答案、而且有把握的，存成建議 o.suggest（不改答案）；
@@ -2402,7 +2402,7 @@ async function viewHome() {
     <div class="home-cards">
     ${moveCard()}
     ${joinStatusCards()}
-    ${namingCount(sessions) ? `<div class="hint-card" role="status"><b>AI 正在補名稱</b>（${namingCount(sessions)} 張照片）：可以先做別的事，好了會通知你；數量不會變。</div>` : ''}
+    ${namingCount(sessions) ? `<div class="hint-card" role="status"><b>AI 正在補名稱</b>（${namingCount(sessions)} 張照片）：<span class="nb">可以先做別的事，</span><span class="nb">好了會通知你；</span><span class="nb">數量不會變。</span></div>` : ''}
     ${
       joinPending()
         ? ''
@@ -2652,7 +2652,7 @@ function viewReview() {
           </div>`
         : ''
     }
-    ${s.photos.some(namingPending) ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在補名稱…</b>可以先離開，好了會通知你；<span class="nb">數量不會變。</span></div>` : ''}
+    ${s.photos.some((p) => p.naming && !p.namedAt && p.naming.err) ? `<div class="hint-card" role="status" style="margin-top:12px"><b>名稱沒補成功</b>${s.photos.some((p) => namingPending(p) && p.naming.err) ? '稍後會自動再試；' : '已經試了 3 次，'}<span class="nb">可以點名稱自己改。</span><span class="nb">數量不受影響。</span></div>` : s.photos.some(namingPending) ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在補名稱…</b><span class="nb">可以先離開，</span><span class="nb">好了會通知你；</span><span class="nb">數量不會變。</span></div>` : ''}
     ${state.refining && state.refining.session === s.id ? `<div class="hint-card" role="status" style="margin-top:12px"><b>AI 正在再檢查相似品…</b><span class="nb">（${state.refining.done}/${state.refining.total} 張）</span>可先查看結果；<span class="nb">此檢查不會更改答案，</span><span class="nb">認為不同者</span><span class="nb">會標示為「要確認」。</span></div>` : ''}
     ${notes}
     ${s.photos
@@ -2848,7 +2848,7 @@ async function viewSettings() {
     </details>` : ''}
     <p class="section-title">資料</p>
     ${canManage() ? '<div class="row-actions"><button class="btn small danger" data-action="clear-all">刪除全部盤點紀錄</button></div>' : ''}
-    <p class="footnote">紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
+    <p class="footnote">${syncReady() ? '紀錄（含照片）已同步到公司雲端；這支手機另有一份。' : '紀錄（含照片）只存在這支手機的瀏覽器裡；要留底請用「匯出」。'}品項庫請到「品項 → ⋯ → 備份品項庫」。</p>
     </div></div>
     <p class="footnote" style="margin-top:18px;text-align:center">聖佳智慧庫存 版本 ${VERSION}</p>
     <div class="row-actions" style="justify-content:center"><button class="btn small secondary" data-action="force-update">檢查更新</button></div>
@@ -2888,7 +2888,7 @@ async function viewSettings() {
         : ''
     }
     <p class="section-title">AI 辨識</p>
-    <div class="group"><div class="row mode-row"><span class="grow"><span class="title">辨識內容</span><br><span class="meta">${MODE_DESC[aiMode()]}</span>${canEdit() ? `<span class="chips mode-chips" role="group" aria-label="辨識內容">${Object.keys(MODE_LABEL).map((k) => `<button class="chip" data-action="ai-mode" data-mode="${k}" aria-pressed="${aiMode() === k}">${MODE_LABEL[k]}</button>`).join('')}</span>` : ''}</span></div>
+    <div class="group"><div class="row mode-row"><span class="grow"><span class="title">辨識內容</span><br><span class="meta">${MODE_DESC[aiMode()]}${aiMode() === 'fast' ? (aiViaSheet() && !ls.get(K().key) ? '（交給雲端，App 關掉也會跑完）' : '（在這支手機上補，App 要開著）') : ''}</span>${canEdit() ? `<span class="chips mode-chips" role="group" aria-label="辨識內容">${Object.keys(MODE_LABEL).map((k) => `<button class="chip" data-action="ai-mode" data-mode="${k}" aria-pressed="${aiMode() === k}">${MODE_LABEL[k]}</button>`).join('')}</span>` : ''}</span></div>
       <button class="row" data-go="quality"><span class="grow"><span class="title" style="color:var(--tint)">AI 準不準</span><br><span class="meta">比對 AI 原始結果與確認後的結果、檢視相似品比對成效；也可用標準答案測試 AI</span></span>${chev}</button></div>
     </div><div class="settings-col">
     <p class="section-title">盤點規則</p>
@@ -2897,7 +2897,7 @@ async function viewSettings() {
       <label class="row"><span class="grow"><span class="title">有差異先複盤</span><br><span class="meta">實盤與帳面不符時，請由另一人複盤；兩次一致才確認差異，並選擇原因，再由擁有者或管理員決定是否調整帳面。</span></span><input type="checkbox" id="rule-recount" ${recountOn() ? 'checked' : ''} ${canManage() ? '' : 'disabled'} style="width:22px;height:22px"></label>
     </div>
     <p class="footnote">${canManage() ? '改了會同步給大家。' : '由擁有者或管理員設定。'}</p>
-    <div class="group adv-link"><button class="row" data-go="settings-adv"><span class="grow"><span class="title">進階設定</span><br><span class="meta">AI 金鑰、品項清單、樣品照、Google 試算表、備份、清除資料</span></span>${chev}</button></div>
+    <div class="group adv-link"><button class="row" data-go="settings-adv"><span class="grow"><span class="title">進階設定</span><br><span class="meta">${myRole() === 'owner' ? 'AI 金鑰、品項清單、樣品照、Google 試算表、備份、清除資料' : canManage() ? '品項清單、樣品照、備份、通知、清除資料' : canEdit() ? '品項清單、樣品照、備份、通知' : '品項清單、備份這台裝置'}</span></span>${chev}</button></div>
     </div></div>
     <p class="footnote" style="margin-top:18px;text-align:center">版本 ${VERSION}</p>
   </main>`
@@ -8882,7 +8882,7 @@ async function runAnalysis(indices) {
         if (!r) r = await analyze(photo, log, refs)
         Object.assign(photo, { objects: r.objects, note: r.note, status: 'done', error: '', errorDetail: '', aiGone: [], model: r.model })
         markAi(photo) // 記下 AI 原本的答案（算準確率用）
-        s.model = r.model + (r.mode === 'count' ? '（只數數量）' : '')
+        s.model = r.model + (r.mode === 'count' ? (namesMode() ? '（快速＋補名稱）' : '（只數數量）') : '')
         if (r.mode === 'count') s.aiMode = 'count'
         // 拍到儲位標籤：沒填位置就自動填（有建立過的儲位用那個寫法）
         if (r.location && !s.place) {
@@ -8990,7 +8990,7 @@ function releaseWakeLock() {
 // ───────────── 背景補名稱（4.14）─────────────
 const MODE_LABEL = { fast: '快速＋補名稱', count: '只數數量', full: '完整' }
 const MODE_DESC = {
-  fast: '數量先出來；品名、規格由雲端在背景補上（App 關掉也會跑完），不會改數量',
+  fast: '數量先出來；品名、規格在背景補上，不會改數量',
   count: '只數數量，品名只分大類；最快、最省',
   full: '一次寫出品名、品牌、型號、規格，並做相似品比對；最慢',
 }
@@ -9069,7 +9069,7 @@ function applyNames(s, photo, boxes, names) {
       o.named = true
       named++
     } else {
-      o.suggest = { ...nx, why: '背景補名稱：可能是另一種' }
+      o.suggest = { ...nx, why: '', src: 'names' }
       o.aiFlag = true
       suggested++
     }
@@ -9110,12 +9110,13 @@ async function applyNamesData(sid, pid, d, { remote = false } = {}) {
     return false
   }
   await itemsAll()
-  const r = applyNames(s, photo, d.boxes || photo.naming?.boxes || [], names)
+  applyNames(s, photo, d.boxes || photo.naming?.boxes || [], names)
   await db.put(s)
   if (!s.photos.some(namingPending)) {
     if (s.linkedAt) await linkSession(s).catch(() => {})
     const where = s.place ? placeLabel(s.place) : fmtTime(s.createdAt)
-    banner(`${where} 名稱整理完成${r.suggested ? `・${r.suggested} 個要確認` : ''}`, () => {
+    const total = s.photos.reduce((n, p) => n + p.objects.filter((o) => o.suggest).length, 0)
+    banner(`${where} 名稱整理完成${total ? `・${total} 個要確認` : ''}`, () => {
       // 正在拍、正在辨識、正在點貨：不要直接跳走（照片只在記憶體裡，跳走就不見）
       if (['capture', 'analyzing', 'pick-edit'].includes(state.view)) return toast('先完成目前的工作，再到首頁打開那次盤點查看')
       state.session = s
@@ -9165,6 +9166,14 @@ function queueNames(s, photos) {
       ph.naming = { ...(ph.naming || {}), err: e.message || String(e) }
       await db.put(cur).catch(() => {})
     }
+    // 先把整批都標成「補名稱中」：一次只送 3 張，還沒輪到的也要算在內（橫幅才不會太早跳）
+    const cur0 = await freshSession(s.id)
+    if (!cur0) return
+    for (const p of todo) {
+      const ph = cur0.photos.find((x) => x.id === p.id)
+      if (ph && !ph.namedAt) ph.naming = { ...(ph.naming || {}), at: ph.naming?.at || Date.now(), dev: deviceId(), err: '' }
+    }
+    await db.put(cur0)
     const pool = [...todo]
     const run = async () => {
       while (pool.length) {
@@ -9196,7 +9205,7 @@ const VAPID_PUBLIC = 'BOef3k7krm2Y0XFxRhaxZNMNkEOvpRfJoyWAElGwgxcaYrx1TDN7bMg84x
 const b64uBytes = (t) => Uint8Array.from(atob(t.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))
 const pushCan = () => 'PushManager' in window && 'serviceWorker' in navigator && 'Notification' in window
 function pushRows() {
-  if (!syncReady()) return ''
+  if (!syncReady() || !canEdit()) return ''
   const on = pushCan() && Notification.permission === 'granted' && ls.get(LS.pushOn) === '1'
   const meta = !pushCan() ? (isIOS() && !standalone() ? '要先把 App 加到主畫面（iOS 16.4 以上）才能收通知' : '這個瀏覽器不支援通知') : on ? '已開啟：關掉 App、鎖定畫面也看得到' : '關掉 App 也能收到「名稱整理完成」'
   return `<p class="section-title">通知</p><div class="group">
@@ -9212,7 +9221,7 @@ function pushRows() {
 /** 開啟通知：問 iPhone 允不允許 → 跟瀏覽器訂閱 → 訂閱交給雲端（補好名稱時雲端請通知服務發給這支手機） */
 async function enablePush() {
   const perm = await Notification.requestPermission()
-  if (perm !== 'granted') return toast('沒有允許通知：到 iPhone「設定 → 通知 → 聖佳庫存」打開')
+  if (perm !== 'granted') return toast(isIOS() ? '沒有允許通知：到 iPhone「設定 → 通知 → 聖佳庫存」打開' : '沒有允許通知：到瀏覽器的網站設定把通知打開')
   const reg = await navigator.serviceWorker.ready
   const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(VAPID_PUBLIC) }))
   const r = await postSync({ action: 'pushSub', sub: sub.toJSON() })
@@ -9243,9 +9252,9 @@ function banner(msg, onTap) {
   b.addEventListener('pointerleave', arm)
   b.addEventListener('focusin', () => clearTimeout(timer))
   b.addEventListener('focusout', arm)
-  b.onclick = () => {
+  b.onclick = (e) => {
     hide()
-    onTap?.()
+    if (e.target.closest('.app-banner-go')) onTap?.()
   }
   document.body.appendChild(b)
   arm()
@@ -9682,6 +9691,7 @@ $app.addEventListener('click', async (e) => {
       return render()
     case 'push-url-save': {
       const url = document.getElementById('push-url')?.value.trim() || ''
+      if (!url && !confirm('欄位是空的：要清除通知服務嗎？清除後大家都收不到通知。')) return
       try {
         const r = await postSync({ action: 'pushSetup', url })
         ls.set(LS.pushSvc, r.pushOn ? '1' : '')
@@ -9884,6 +9894,8 @@ $app.addEventListener('click', async (e) => {
       // 還有「要確認」沒看過：先提醒（按取消＝回去一個一個確認；按確定＝還是完成，沒確認的不算進「AI 準不準」）
       const open = s ? doubtsOf(s).length : 0
       if (open && !confirm(`還有 ${open} 個「要確認」沒看過。\n\n按「取消」回去一個一個確認；\n按「確定」還是完成（沒確認的不會算進「AI 準不準」）。`)) return quickSheet(doubtsOf(s), 0, { doubt: true })
+      // 補名稱還在跑：等名稱好了再記進品項庫（不然會多出舊名稱、數量 0 的空品項）；失敗的不擋
+      if (s?.photos.some((p) => p.naming && !p.namedAt && !p.naming.err)) return toast('AI 正在補名稱（通常 1 分鐘內），好了再按「完成」；數量已經可以先看')
       // 只數數量沒分尺寸：這一格原本分尺寸記的（例如三通 3分、2分），記進去會變成一筆「三通」→ 先問
       const cf = s ? await countConflicts(s) : []
       if (cf.length && !confirm(`這次是「只數數量」，品名沒分尺寸。\n品項庫這一格原本分尺寸記的：\n${cf.join('\n')}\n\n按「確定」：記成沒分尺寸的一筆，原本分尺寸的數量會從這一格拿掉。\n按「取消」：先回去點框補上尺寸（或到設定改成完整辨識再盤）。`)) return
