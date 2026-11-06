@@ -113,7 +113,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.18.4（11/05・首頁黃色通知卡片可左右滑掉）'
+const VERSION = '4.19.0（11/07・中文只在詞間換行、長字不撐版、刪框可復原、數量格不切數字）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -1647,6 +1647,34 @@ function moveObjects(session, refs, fields) {
   } else if (counts[newKey] !== undefined) counts[newKey] += moved
 }
 
+/** 刪框後 6 秒內可復原：只放回被刪的框，加回那一種的數量、AI 答案紀錄（這 6 秒內別的修改不動） */
+async function removeWithUndo(s, refs) {
+  const key = keyOf(s.photos[refs[0].pi].objects[refs[0].oi])
+  const had = s.counts?.[key]
+  const gone = refs.map((r) => {
+    const p = s.photos[r.pi]
+    return { pid: p.id, oi: r.oi, o: p.objects[r.oi], aiN: p.aiGone?.length || 0 }
+  })
+  removeObjects(s, refs)
+  const after = s.counts?.[key]
+  await save()
+  toast('已刪掉這個框', {
+    label: '復原',
+    run: async () => {
+      if (state.session !== s) return toast('已經換到別次盤點，沒辦法復原')
+      for (const g of [...gone].sort((a, b) => a.oi - b.oi)) {
+        const p = s.photos.find((x) => x.id === g.pid)
+        if (!p) continue
+        p.objects.splice(Math.min(g.oi, p.objects.length), 0, g.o)
+        if (p.aiGone) p.aiGone.length = Math.min(p.aiGone.length, g.aiN)
+      }
+      if (had !== undefined) (s.counts ??= {})[key] = s.counts?.[key] === after ? had : (s.counts?.[key] ?? 0) + gone.length
+      await save()
+      render()
+      toast('已復原')
+    },
+  })
+}
 /** 刪掉一些框（照片同一張要從後面刪，索引才不會亂） */
 function removeObjects(session, refs) {
   const counts = session.counts ?? {}
@@ -2076,7 +2104,7 @@ const backBtn = (to = 'home', label = '盤點') => `<button class="back" data-go
 // 點貨（4.7 測試版）放第二個：進出貨每天都會用，跟盤點放在一起；手機底部 4 個還放得下（iOS 最多 5 個）
 const TABS = [
   { id: 'home', label: '盤點', icon: 'scan' },
-  { id: 'pick', label: '點貨', icon: 'truck', fresh: true },
+  { id: 'pick', label: '點貨', icon: 'truck' },
   { id: 'items', label: '品項', icon: 'box' },
   { id: 'lookup', label: '查型號', icon: 'search' },
   { id: 'settings', label: '設定', icon: 'settings', wide: true },
@@ -2690,7 +2718,7 @@ function viewReview() {
         const [y1, x1, y2, x2] = o.box
         const on = state.focusObj ? state.focusObj === o : state.focus === ref.key
         const doubt = doubtSet.has(o)
-        return `<div class="box ${on ? 'on' : ''} ${doubt ? 'doubt' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}" data-obj="${pi}:${oi}"><span class="tag">${ref.gi + 1}</span>${seq ? `<span class="seq">${seq.get(oi)}</span>` : ''}${doubt ? '<span class="qmark" aria-label="要確認">?</span>' : ''}</div>`
+        return `<div class="box ${on ? 'on' : ''} ${doubt ? 'doubt' : ''} ${y1 < 90 ? 'edge-top' : ''}" style="--c:${ref.color};top:${y1 / 10}%;left:${x1 / 10}%;height:${(y2 - y1) / 10}%;width:${(x2 - x1) / 10}%" data-focus="${esc(ref.key)}" data-obj="${pi}:${oi}"><span class="tag">${ref.gi + 1}</span>${seq ? `<span class="seq">${seq.get(oi)}</span>` : ''}${doubt ? '<span class="qmark" aria-label="要確認">?</span>' : ''}</div>`
       })
       .join('')
   }
@@ -2784,7 +2812,7 @@ function viewReview() {
               <span class="name">${esc(g.label)}</span><span class="pencil" aria-hidden="true">${icon('edit', 16)}</span>${g.manual ? '<span class="badge edit">手動</span>' : doubtsByKey.get(g.key) ? `<span class="badge low">${doubtsByKey.get(g.key)} 個要確認</span>` : ''}${g.edited && !g.manual ? '<span class="badge edit">已修正</span>' : ''}${itemsCache && !findItem(itemsCache, g) ? '<span class="badge ok">新品項</span>' : ''}
               <br><span class="spec">${detailOf(g) ? detailHtml(g) : '點名稱補品牌、型號、尺寸'}${!g.manual && g.count !== g.boxes ? `・<span class="nb">照片裡 ${g.boxes} 個</span>` : ''}</span>
             </button>
-            <span class="stepper edit-only"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">${icon('minus', 20)}</button><input inputmode="numeric" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.label)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">${icon('plus', 20)}</button></span><span class="qty view-only"><b>${g.count}</b></span>
+            <span class="stepper edit-only"><button data-step="-1" data-key="${esc(g.key)}" aria-label="減一">${icon('minus', 20)}</button><input inputmode="numeric" style="width:${Math.max(44, 18 + 11 * String(g.count).length)}px" value="${g.count}" data-count="${esc(g.key)}" aria-label="${esc(g.label)} 數量"><button data-step="1" data-key="${esc(g.key)}" aria-label="加一">${icon('plus', 20)}</button></span><span class="qty view-only"><b>${g.count}</b></span>
           </div>`,
             )
             .join('')}</div>`
@@ -4210,7 +4238,7 @@ async function leavePickEdit() {
   const p = state.pick
   if (!p) return true
   if (editingCopy()) {
-    if (pickEditDirty() && !confirm('放棄這次的修改？\n\n按「確定」放棄，紀錄維持原本的樣子；\n按「取消」回去繼續改，改好按「完成修改」。')) return false
+    if (pickEditDirty() && !(await ask('放棄這次的修改？\n放棄：紀錄維持原本的樣子；回去：繼續改，改好按「完成修改」。', { ok: '放棄修改', cancel: '回去', danger: true }))) return false
     state.pickEdit = null
     state.pick = null
     return true
@@ -5458,49 +5486,166 @@ async function render() {
 const GLUE_SEL = 'p, li, .meta, .footnote, .subtitle, .sheet-sub, .hint-card > div, .doubt-reason, .setup-card p, .row.muted, .pk-name, .pk-tname, .pk-rrow .title, .pk-res .title, .pk-cross-row .title'
 function glueTails(root) {
   for (const el of root.querySelectorAll(GLUE_SEL)) {
-    if ((el.textContent || '').length < 14) continue
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
-    let last = null
-    let n
-    while ((n = walker.nextNode())) if (n.textContent.trim()) last = n
-    if (!last || last.parentElement.closest('.nb, input, textarea, svg, script, style')) continue
-    const t = last.textContent
-    let k = t.length
-    let count = 0
-    while (k > 0 && count < 3) {
-      k--
-      if (!/\s/.test(t[k])) count++
-    }
-    if (k <= 0) continue // 這一小段本來就很短：不用黏
+    // 先黏最後 3 個字（14 字以上才需要），再把前面的文字切詞（跳過 .nb）
+    if ((el.textContent || '').length >= 14) glueTail(el)
+    wordBreak(el)
+  }
+}
+function glueTail(el) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  let last = null
+  let n
+  while ((n = walker.nextNode())) if (n.textContent.trim()) last = n
+  if (!last || last.parentElement.closest('.nb, input, textarea, svg, script, style')) return
+  const btn = last.parentElement.closest('button, .btn')
+  if (btn && el.contains(btn)) return // 元素裡的按鈕標籤不黏字（flex 會多出空隙）
+  const t = last.textContent
+  let k = t.length
+  let count = 0
+  while (k > 0 && count < 3) {
+    k--
+    if (!/\s/.test(t[k])) count++
+  }
+  if (k <= 0) return // 這一小段本來就很短：不用黏
+  const span = document.createElement('span')
+  span.className = 'nb'
+  span.textContent = t.slice(k)
+  last.textContent = t.slice(0, k)
+  last.after(span)
+}
+
+/**
+ * 中文換行（4.19）：手機預設每個字中間都能斷（「重新／整理」「點貨紀／錄」）。
+ * 用 Google BudouX 繁中版（vendor/budoux-zh-hant.js，Apache-2.0）切成詞，只在詞跟詞中間放 <wbr>；沒有就退回瀏覽器內建斷詞。
+ * 只處理說明文字（GLUE_SEL）裡 8 字以上、含中文的文字；按鈕、輸入框、數字欄維持原樣（不換行或不動）。
+ */
+const KEEP_WORDS = ['品項', '品牌', '型號', '點貨', '庫存', '出貨', '進貨', '雲端', '確認', '權限', '對單', '比對', '答案', '對答案', '盲盤', '備份', '試算表', '相似品', '移除', '剩幾個', '離職', '成效', '比例', '更正', '同步', '冷媒', '蒸發器', '壓縮機', '冷媒鋼瓶', '點貨紀錄', '盤點紀錄', '安全存量', '重新整理', '重新辨識', '品項庫', '正航', '要確認', '盤點人', '複盤', '叫貨', '帳面', '實拿', '儲位', '三通', '彎頭', '異徑三通', '乾燥過濾器', '視液鏡', '保溫管', '銅管接頭']
+const HAN = /[一-鿿]/
+const BDX = window.BudouXzhHant || null
+const ISEG = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter('zh-Hant', { granularity: 'word' }) : null
+let keepCache = null
+const keepWords = () => (keepCache ||= [...new Set([...KEEP_WORDS, ...catalogNames().filter((w) => w.length >= 2)])])
+function wbPieces(t) {
+  const chunks = BDX ? BDX.parse(t) : ISEG ? [...ISEG.segment(t)].map((x) => x.segment) : [t]
+  const keep = new Set()
+  for (const w of keepWords()) for (let k = t.indexOf(w); k >= 0; k = t.indexOf(w, k + 1)) for (let x = k + 1; x < k + w.length; x++) keep.add(x)
+  const out = []
+  let pos = 0
+  for (const c of chunks) {
+    const prev = out[out.length - 1]
+    // 不准斷：專有名詞中間、開頭括號後面、標點和「了的嗎…」前面、英數字中間
+    const glue = prev !== undefined && (keep.has(pos) || /[（「【《“‘(]$/.test(prev) || /^[，。、；：！？）」】》”’),.!?%／了的嗎呢吧啊喔囉唷耶著過]/.test(c) || (/[A-Za-z0-9]$/.test(prev) && /^[A-Za-z0-9]/.test(c)))
+    if (glue) out[out.length - 1] += c
+    else out.push(c)
+    pos += c.length
+  }
+  return out
+}
+function wordBreak(el) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  const nodes = []
+  let n
+  while ((n = walker.nextNode())) nodes.push(n)
+  for (const node of nodes) {
+    const t = node.textContent
+    if (t.trim().length < 8 || !HAN.test(t) || node.parentElement.closest('.wb, .nb, input, textarea, select, svg, script, style')) continue
+    const btn = node.parentElement.closest('button, .btn')
+    if (btn && el.contains(btn)) continue
     const span = document.createElement('span')
-    span.className = 'nb'
-    span.textContent = t.slice(k)
-    last.textContent = t.slice(0, k)
-    last.after(span)
+    span.className = 'wb'
+    wbPieces(t).forEach((p, i) => {
+      if (i) span.append(document.createElement('wbr'))
+      span.append(p)
+    })
+    node.replaceWith(span)
   }
 }
 
 // ───────────────────────── 底部面板（Sheet）：點旁邊暗處或按 Esc 就關 ─────────────────────────
 /** onDismiss：使用者點旁邊暗處或按 Esc 關掉時才呼叫（程式自己 close() 不會） */
+const sheetStack = []
 function sheet(html, onMount, onDismiss) {
   const back = document.createElement('div')
   back.className = 'sheet-backdrop'
   back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div class="grabber"></div>${html}</div>`
+  const box = back.querySelector('.sheet')
+  const heading = box.querySelector('.sheet-title')
+  if (heading) {
+    heading.id ||= `sheet-t-${sheetStack.length}-${Date.now()}`
+    box.setAttribute('aria-labelledby', heading.id)
+  }
+  const prevFocus = document.activeElement
   const close = () => {
+    const i = sheetStack.indexOf(back)
+    if (i >= 0) sheetStack.splice(i, 1)
     back.remove()
     document.removeEventListener('keydown', onKey)
+    if (prevFocus?.isConnected && prevFocus !== document.body && !prevFocus.matches?.('input, textarea, select, [contenteditable]')) prevFocus.focus?.({ preventScroll: true })
   }
   const dismiss = () => {
     close()
     onDismiss?.()
   }
-  const onKey = (e) => e.key === 'Escape' && dismiss()
+  // 只有最上面那一層的視窗回應 Esc、Tab（視窗上再開視窗時不會一起關）；Tab 的焦點留在視窗裡
+  const onKey = (e) => {
+    if (sheetStack[sheetStack.length - 1] !== back) return
+    if (e.key === 'Escape') return dismiss()
+    if (e.key !== 'Tab') return
+    const items = [...box.querySelectorAll('a[href], summary, button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')].filter((x) => x.offsetParent)
+    if (!items.length) return e.preventDefault()
+    const first = items[0]
+    const last = items[items.length - 1]
+    if (!box.contains(document.activeElement) || (e.shiftKey && (document.activeElement === first || document.activeElement === box))) {
+      e.preventDefault()
+      ;(e.shiftKey ? last : first).focus()
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault()
+      first.focus()
+    }
+  }
   back.addEventListener('click', (e) => e.target === back && dismiss())
   document.addEventListener('keydown', onKey)
+  sheetStack.push(back)
   document.body.appendChild(back)
-  onMount?.(back.querySelector('.sheet'), close)
+  // 先把焦點放進視窗（放在視窗本身，不放輸入框：不然手機會馬上跳出鍵盤）；onMount 要自己聚焦輸入框的照舊
+  box.tabIndex = -1
+  box.focus({ preventScroll: true })
+  onMount?.(box, close)
   glueTails(back)
   return close
+}
+/** 取代原生 confirm：按鈕寫動作（不用「確定」），可換行；第一行當標題。回 true＝按了確認那顆 */
+function ask(text, { ok = '確定', cancel = '取消', danger = false } = {}) {
+  let t = String(text)
+  const q = t.indexOf('？')
+  if (!t.includes('\n') && q > 0 && q < t.length - 1) t = t.slice(0, q + 1) + '\n' + t.slice(q + 1)
+  const [title, ...rest] = t.split('\n')
+  const opened = Date.now()
+  return new Promise((resolve) => {
+    let done = false
+    const fin = (v) => {
+      if (!done) {
+        done = true
+        resolve(v)
+      }
+    }
+    sheet(
+      `<h2 class="sheet-title">${esc(title)}</h2>${rest.join('\n').trim() ? `<p class="sheet-sub" style="white-space:pre-line">${esc(rest.join('\n').trim())}</p>` : ''}
+       <div class="row-actions" style="margin-top:16px"><button class="btn secondary" id="ask-no" style="flex:1">${esc(cancel)}</button><button class="btn ${danger ? 'danger' : ''}" id="ask-ok" style="flex:1">${esc(ok)}</button></div>`,
+      (box, close) => {
+        box.querySelector('#ask-no').onclick = () => {
+          close()
+          fin(false)
+        }
+        box.querySelector('#ask-ok').onclick = () => {
+          if (Date.now() - opened < 350) return // 剛滑上來：可能是上一下連點
+          close()
+          fin(true)
+        }
+      },
+      () => fin(false),
+    )
+  })
 }
 
 // ───────────────────────── 放大看照片（全站共用同一個） ─────────────────────────
@@ -6039,7 +6184,7 @@ const undoTo = (s, snap) => ({
         render()
       })
       el.querySelector('#e-del').onclick = async () => {
-        if (!confirm(`刪掉「${g.label}」${g.manual ? '' : `（${g.boxes} 個框）`}？`)) return
+        if (!(await ask(`刪掉「${g.label}」${g.manual ? '' : `（${g.boxes} 個框）`}？`, { ok: '刪掉', danger: true }))) return
         const snap = snapSession(s)
         if (g.manual) s.manual = s.manual.filter((m) => m !== g.manual)
         else removeObjects(s, g.refs)
@@ -6319,12 +6464,13 @@ function quickSheet(entries, start = 0, { doubt = false } = {}) {
       body.querySelector('#q-prev').onclick = () => go(cur - 1)
       body.querySelector('#q-next').onclick = () => go(cur + 1)
       body.querySelector('#q-del').onclick = async () => {
+        if (guarded() || stale()) return
+        guardUntil = Date.now() + 600
         const oi = photo.objects.indexOf(o)
-        if (oi >= 0) removeObjects(s, [{ pi, oi }])
+        if (oi >= 0) await removeWithUndo(s, [{ pi, oi }]).catch(() => render())
+        guardUntil = Date.now() + 600 // 存檔慢的話，新畫出來的下一個框的「刪掉」鈕在同一個位置
         order.splice(cur, 1)
-        await save()
         render()
-        toast('已刪掉這個框')
         if (!order.length) return finish()
         go(Math.min(cur, order.length - 1))
       }
@@ -6375,13 +6521,15 @@ async function objectSheet(pi, oi) {
         close()
         render()
       }
-      el.querySelector('#o-del').onclick = async () => {
-        removeObjects(s, [{ pi, oi }])
+      el.querySelector('#o-del').onclick = async (ev) => {
+        ev.currentTarget.disabled = true // 連點兩下不會刪到下一個
         state.focus = null
-        await save()
         close()
-        render()
-        toast('已刪掉這個框')
+        try {
+          await removeWithUndo(s, [{ pi, oi }])
+        } finally {
+          render()
+        }
       }
     },
   )
@@ -6870,8 +7018,8 @@ function locationSheet(index = -1) {
         close()
         render()
       }
-      el.querySelector('#l-del')?.addEventListener('click', () => {
-        if (!confirm(`刪除儲位 ${loc.code}？`)) return
+      el.querySelector('#l-del')?.addEventListener('click', async () => {
+        if (!(await ask(`刪除儲位 ${loc.code}？`, { ok: '刪除', danger: true }))) return
         list.splice(index, 1)
         saveLocations(list)
         close()
@@ -7225,7 +7373,8 @@ function syncAndToast() {
     (e) => {
       clear()
       if (!syncReady() || e.touches.length !== 1 || ['capture', 'analyzing', 'pick-edit'].includes(state.view)) return
-      if (e.target.closest('.photo-wrap, .viewer, .sheet-backdrop, input, textarea, select') || !atTop()) return
+      if (!standalone()) return
+      if (e.target.closest('.photo-wrap, .viewer, .sheet-backdrop, .tabbar, .app-banner, .toast, input, textarea, select') || !atTop()) return
       y0 = e.touches[0].clientY
     },
     { passive: true },
@@ -7259,6 +7408,10 @@ function syncAndToast() {
   document.addEventListener('touchend', end)
   document.addEventListener('touchcancel', clear)
 }
+// 結果頁數量格：打字超過原本位數，寬度跟著變（不然 5 位數會被切）
+document.addEventListener('input', (e) => {
+  if (e.target.matches?.('.stepper input[data-count]')) e.target.style.width = `${Math.max(44, 18 + 11 * e.target.value.length)}px`
+})
 /** 首頁「結果出來了」的黃色卡片：左右滑掉就當作看過（不用點開）；滑動時不會當成點擊 */
 {
   let card = null
@@ -8157,7 +8310,7 @@ async function joinCheck() {
   } catch (e) {
     if (e.data?.pending) {
       state.syncState = 'pending'
-      syncProgress('等管理員核准')
+      syncProgress('待核准')
       return false
     }
     throw e
@@ -8322,6 +8475,7 @@ function shareSheet() {
               b.addEventListener('click', async () => {
                 const r = b.dataset.role
                 if (r === p.role) return
+                if (!(await ask(`把「${p.name}」的權限改成「${ROLE_LABEL[r]}」？`, { ok: '改權限' }))) return
                 try {
                   await postSync({ action: 'setRole', id: p.id, role: r })
                 } catch (e) {
@@ -8340,7 +8494,7 @@ function shareSheet() {
               nameSheet(p.id, `改「${p.name}」的名字`, '')
             }
             m.querySelector('[data-mem="reissue"]').onclick = async () => {
-              if (!confirm(`幫「${p.name}」重新產生連結碼？\n舊連結碼立即失效（舊手機的資料會在下次連線時清除）。`)) return
+              if (!(await ask(`幫「${p.name}」重新產生連結碼？\n舊連結碼立即失效（舊手機的資料會在下次連線時清除）。`, { ok: '重新產生', danger: true }))) return
               try {
                 const key = newSyncKey()
                 await postSync({ action: 'reissue', id: p.id, newKey: key })
@@ -8352,7 +8506,7 @@ function shareSheet() {
               }
             }
             m.querySelector('[data-mem="remove"]').onclick = async () => {
-              if (!confirm(`移除「${p.name}」的權限？\n僅該成員失效，其他成員不受影響。其手機下次連線時，App 內的公司資料會自動清除。`)) return
+              if (!(await ask(`移除「${p.name}」的權限？\n僅該成員失效，其他成員不受影響。其手機下次連線時，App 內的公司資料會自動清除。`, { ok: '移除', danger: true }))) return
               try {
                 await postSync({ action: 'remove', id: p.id })
               } catch (e) {
@@ -8659,7 +8813,7 @@ const syncLabel = () => {
   // 膠囊很小：同步中只顯示「同步中」和進度數字（完整的進度訊息只放在提示裡）
   if (state.syncState === 'syncing') return `同步中${state.syncMsg?.match(/[0-9]+/) ? ` ${state.syncMsg.match(/[0-9]+/)[0]}` : ''}`
   if (state.syncState === 'error') return '同步失敗'
-  if (joinPending()) return '等管理員核准'
+  if (joinPending()) return '待核准'
   const t = Number(ls.get(LS.lastSync, '0'))
   if (!t) return '尚未同步'
   return new Date(t).toDateString() === new Date().toDateString() ? new Date(t).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) : fmtTime(t)
@@ -9686,7 +9840,7 @@ $app.addEventListener('click', async (e) => {
     // 新盤點拍了照片、還沒按「開始辨識」就要離開：照片只在記憶體裡，離開就不見 → 先問
     if (photosAtRisk() && d.go !== 'capture') {
       const n = state.session.photos.length
-      if (!confirm(`還沒按「開始辨識」：要放棄這 ${n} 張照片嗎？\n\n放棄的話照片不會留下來。要留著就按「取消」，再按下面的「開始辨識」。`)) return mountLenses() // 取消：拖過去的鏡片彈回來
+      if (!(await ask(`還沒按「開始辨識」：要放棄這 ${n} 張照片嗎？\n\n放棄的話照片不會留下來。要留著就按「回去」，再按下面的「開始辨識」。`, { ok: '放棄照片', cancel: '回去', danger: true }))) return mountLenses() // 取消：拖過去的鏡片彈回來
       for (const p of state.session.photos) dropUrl(p.id)
       state.session = null
     }
@@ -9877,7 +10031,7 @@ $app.addEventListener('click', async (e) => {
       const s = state.session
       const photo = s?.photos[state.photoIndex]
       if (!photo?.blob || !canEdit()) return toast('這張照片還沒下載，或你沒有修改的權限')
-      if (!confirm('把這張照片切成 4 塊重新數？\n這張現在的框和數量會被取代（你改過的也會不見）。要繼續嗎？')) return
+      if (!(await ask('把這張照片切成 4 塊重新數？\n這張現在的框和數量會被取代（你改過的也會不見）。要繼續嗎？', { ok: '重新數' }))) return
       const done = busyBtn(t, '分區數中…')
       try {
         const r = await analyzeTiled(photo, (m) => (t.textContent = m))
@@ -9936,7 +10090,7 @@ $app.addEventListener('click', async (e) => {
     case 'export':
       return exportSheet()
     case 'delete-session':
-      if (!confirm('確定刪除這次盤點？照片和結果都會刪掉，記在品項庫的數量也會拿掉。')) return
+      if (!(await ask('確定刪除這次盤點？照片和結果都會刪掉，記在品項庫的數量也會拿掉。', { ok: '刪除', danger: true }))) return
       await db.del(state.session.id)
       tombstone(`session:${state.session.id}`)
       await unlinkSession(state.session.id)
@@ -9991,7 +10145,7 @@ $app.addEventListener('click', async (e) => {
       const list = (await db.all()).filter((s) => state.selected.has(s.id))
       // 編輯者一次最多刪 20 次（雲端也是這樣擋：刪更多＝刪光大家的紀錄，要擁有者或管理員來）
       if (!canManage() && syncReady() && list.length > 20) return toast(`一次最多刪 20 次盤點（你選了 ${list.length} 次）；要刪更多請洽擁有者或管理員`)
-      if (!list.length || !confirm(`刪除 ${list.length} 次盤點？照片和結果都會刪掉，記在品項庫的數量也會拿掉。刪掉的找不回來。`)) return
+      if (!list.length || !(await ask(`刪除 ${list.length} 次盤點？照片和結果都會刪掉，記在品項庫的數量也會拿掉。刪掉的找不回來。`, { ok: '刪除', danger: true }))) return
       t.disabled = true
       for (const s of list) {
         await db.del(s.id)
@@ -10156,10 +10310,12 @@ $app.addEventListener('click', async (e) => {
       return render()
     case 'save-catalog':
       ls.set(LS.catalog, document.getElementById('catalog').value.trim())
+      keepCache = null
       touchSettings()
       return toast('清單已儲存')
     case 'reset-catalog':
       ls.set(LS.catalog, '')
+      keepCache = null
       touchSettings()
       toast('已還原預設清單')
       return render()
@@ -10274,7 +10430,7 @@ $app.addEventListener('click', async (e) => {
       })
     }
     case 'sync-leave':
-      if (!confirm('這台退出同步，並清除這台的盤點紀錄、品項庫、樣品照、儲位？\n雲端和其他人的資料不會刪。API Key 也會一起清掉。')) return
+      if (!(await ask('這台退出同步，並清除這台的盤點紀錄、品項庫、樣品照、儲位？\n雲端和其他人的資料不會刪。API Key 也會一起清掉。', { ok: '退出並清除', danger: true }))) return
       return wipeLocal('這台已退出同步，資料已清除')
     case 'sync-now':
       if (!syncReady()) return go('settings')
@@ -10286,12 +10442,12 @@ $app.addEventListener('click', async (e) => {
       if (s && state.refining?.session === s.id) return toast('AI 還在再檢查相似品（通常 1 分鐘內），好了再按「完成」')
       // 還有「要確認」沒看過：先提醒（按取消＝回去一個一個確認；按確定＝還是完成，沒確認的不算進「AI 準不準」）
       const open = s ? doubtsOf(s).length : 0
-      if (open && !confirm(`還有 ${open} 個「要確認」沒看過。\n\n按「取消」回去一個一個確認；\n按「確定」還是完成（沒確認的不會算進「AI 準不準」）。`)) return quickSheet(doubtsOf(s), 0, { doubt: true })
+      if (open && !(await ask(`還有 ${open} 個「要確認」沒看過。\n\n「回去確認」：一個一個看；\n「仍要完成」：沒確認的不會算進「AI 準不準」。`, { ok: '仍要完成', cancel: '回去確認' }))) return quickSheet(doubtsOf(s), 0, { doubt: true })
       // 補名稱還在跑：等名稱好了再記進品項庫（不然會多出舊名稱、數量 0 的空品項）；失敗的不擋
       if (s?.photos.some((p) => p.naming && !p.namedAt && !p.naming.err)) return toast('AI 正在補名稱（通常 1 分鐘內），好了再按「完成」；數量已經可以先看')
       // 只數數量沒分尺寸：這一格原本分尺寸記的（例如三通 3分、2分），記進去會變成一筆「三通」→ 先問
       const cf = s ? await countConflicts(s) : []
-      if (cf.length && !confirm(`這次是「只數數量」，品名沒分尺寸。\n品項庫這一格原本分尺寸記的：\n${cf.join('\n')}\n\n按「確定」：記成沒分尺寸的一筆，原本分尺寸的數量會從這一格拿掉。\n按「取消」：先回去點框補上尺寸（或到設定改成完整辨識再盤）。`)) return
+      if (cf.length && !(await ask(`品名沒分尺寸，要記成一筆嗎？\n這次是「只數數量」。品項庫這一格原本分尺寸記的：\n${cf.join('\n')}\n\n記成一筆：原本分尺寸的數量會從這一格拿掉。\n回去：先點框補上尺寸（或到設定改成完整辨識再盤）。`, { ok: '記成一筆', cancel: '回去' }))) return
       if (s) {
         // 記進品項庫要 1～2 秒：按鈕先變「記進品項庫中…」，不然像沒反應
         busyBtn(t, '記進品項庫中…')
@@ -10397,7 +10553,7 @@ $app.addEventListener('click', async (e) => {
     case 'zoom-close':
       return closeReviewViewer()
     case 'del-sample':
-      if (!confirm('刪掉這張樣品照？')) return
+      if (!(await ask('刪掉這張樣品照？', { ok: '刪掉', danger: true }))) return
       await idb.samples.del(d.id)
       tombstone(`sample:${d.id}`)
       toast('已刪掉樣品照')
@@ -10405,7 +10561,7 @@ $app.addEventListener('click', async (e) => {
     case 'clear-all':
       // 有同步時會刪掉每一台的紀錄：只給擁有者、管理員（雲端也擋）
       if (!canManage()) return toast('只有擁有者或管理員可以刪除全部盤點紀錄')
-      if (!confirm(`確定刪除全部盤點紀錄（含照片）？刪了救不回來。\n品項庫、各位置的數量、儲位會保留。${syncReady() ? '\n有開多台同步：其他裝置的盤點紀錄也會一起刪掉。' : ''}`)) return
+      if (!(await ask(`確定刪除全部盤點紀錄（含照片）？刪了救不回來。\n品項庫、各位置的數量、儲位會保留。${syncReady() ? '\n有開多台同步：其他裝置的盤點紀錄也會一起刪掉。' : ''}`, { ok: '全部刪除', danger: true }))) return
       for (const s of await db.all()) tombstone(`session:${s.id}`)
       await db.clear()
       return toast('已全部刪除；品項庫保留')
@@ -10456,7 +10612,7 @@ $app.addEventListener('click', async (e) => {
     }
     case 'item-delete': {
       const it = await currentItem()
-      if (!it || !confirm(`刪除「${itemTitle(it)}」（${it.no}）？各位置的數量、進出紀錄都會刪掉。`)) return
+      if (!it || !(await ask(`刪除「${itemTitle(it)}」（${it.no}）？各位置的數量、進出紀錄都會刪掉。`, { ok: '刪除', danger: true }))) return
       await delItem(it)
       toast('已刪除')
       return go('items')
@@ -10678,7 +10834,7 @@ $app.addEventListener('click', async (e) => {
       const p = state.pick
       if (!p || editingCopy()) return go('pick')
       if (state.pickBusyId === p.id) return toast('AI 還在讀單子，讀完再刪')
-      if (p.lines.length && !confirm(`刪掉這張點貨單？已經加的 ${p.lines.length} 項都會刪掉。`)) return
+      if (p.lines.length && !(await ask(`刪掉這張點貨單？已經加的 ${p.lines.length} 項都會刪掉。`, { ok: '刪掉', danger: true }))) return
       p._gone = true
       if (pickSaving) await pickSaving
       await idb.picks.del(p.id).catch(() => {})
@@ -10708,7 +10864,7 @@ $app.addEventListener('click', async (e) => {
     case 'pk-delete': {
       if (!canManage()) return toast('只有擁有者或管理員可以刪點貨紀錄')
       const p = state.pick
-      if (!p || !confirm(`刪除這筆點貨紀錄（${PICK_KIND[p.kind] || '點貨'}${p.ref ? `・${p.ref}` : ''}）？${syncReady() ? '\n有開多台同步：大家的手機都會一起刪掉，' : '\n'}交叉比對也不會再算它。`)) return
+      if (!p || !(await ask(`刪除這筆點貨紀錄（${PICK_KIND[p.kind] || '點貨'}${p.ref ? `・${p.ref}` : ''}）？${syncReady() ? '\n有開多台同步：大家的手機都會一起刪掉，' : '\n'}交叉比對也不會再算它。`, { ok: '刪除', danger: true }))) return
       p._gone = true
       await idb.picks.del(p.id)
       tombstone(`pick:${p.id}`)

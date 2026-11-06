@@ -5406,3 +5406,128 @@ html.is-scrolled .nav {
 .swipe-away {
   touch-action: pan-y;
 }
+/* 4.19 中文只在詞跟詞中間換行（切詞見 app.js 的 wordBreak）；長英文、型號不撐破版面 */
+.wb {
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  line-break: strict;
+}
+p,
+.meta,
+.footnote,
+.subtitle,
+.sheet-sub {
+  text-wrap: pretty;
+}
+h1,
+h2,
+.large-title,
+.sheet-title {
+  text-wrap: balance;
+}
+.row > .grow,
+.item-head > .grow,
+.item-head > div,
+.stock-row .grow {
+  min-width: 0;
+}
+.row .title,
+.row .meta,
+.section-title,
+.item-head .meta,
+.item-head .subtitle {
+  overflow-wrap: anywhere;
+}
+/* 儲位標籤：位置很長時用 … 收尾（原本 inline-flex 的字是匿名項目，省略號不會出來）；結果頁的大標籤改成可換行 */
+.loc-tag {
+  display: inline-block;
+  text-align: center;
+  vertical-align: middle;
+}
+.loc-tag.xl {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+/* 設定「這台的盤點人」：名字很長時，左邊說明不被擠成直排 */
+.row > .btn.small {
+  max-width: 55%;
+  overflow-wrap: anywhere;
+}
+/* 點的範圍補到 44px（外觀不變） */
+.title-actions .icon-btn {
+  position: relative;
+}
+.title-actions .icon-btn::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+}
+.sync-pill {
+  position: relative;
+}
+.sync-pill::before {
+  content: '';
+  position: absolute;
+  inset: -8px -4px;
+}
+.app-banner-go {
+  min-width: 44px;
+  min-height: 44px;
+}
+/* 提示（toast）：底部有動作列的頁面（例如結果頁）放在動作列上面，不蓋到按鈕 */
+body:has(.toolbar) .toast {
+  bottom: calc(var(--safe-b) + 112px);
+}
+/* 輸入框字級 16px 以上：iPhone 才不會一點進去就把整頁放大 */
+.pk-need-num[data-len='6'],
+.pk-step input[data-len='6'],
+.pk-step input[data-len='7'],
+.pk-step input[data-len='8'],
+.pk-step input[data-len='9'] {
+  font-size: 16px;
+}
+.role-select,
+.role-pick {
+  font-size: 16px;
+}
+/* 深色模式：勾勾放在亮色圓上要用深色，不然幾乎看不到 */
+@media (prefers-color-scheme: dark) {
+  .sum-dot.ok {
+    color: #06210f;
+  }
+  .app-banner-ico {
+    color: #0b1f55;
+  }
+}
+/* 4.19.0 長儲位標籤：外層 flex 項目要能縮，標籤才會用 … 收尾；品項頁「剩幾個就要叫貨」格子放得下 5 位數 */
+.loc-pair,
+.loc-list {
+  min-width: 0;
+  max-width: 100%;
+}
+#safety {
+  min-width: 72px;
+}
+/* 框貼著照片上緣：編號徽章放到框裡面，不被照片邊緣切掉 */
+.box.edge-top .tag {
+  top: 2px;
+  left: 2px;
+  transform: none;
+  border-radius: 6px;
+}
+/* 4.19.0 品項頁「在哪裡」：長儲位標籤不蓋住數量和 × */
+.stock-row .grow > .title {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+/* 視窗本身拿到焦點時不畫藍框（焦點只是先放進來，避免背景被 Tab 到） */
+.sheet:focus {
+  outline: none;
+}
+/* 框貼著照片上緣：右上角「?」也放到框裡 */
+.box.edge-top .qmark {
+  top: 2px;
+  right: 2px;
+}

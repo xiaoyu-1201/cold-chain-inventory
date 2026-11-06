@@ -190,3 +190,5 @@
 ## 技術
 
 純 HTML／CSS／JavaScript，沒有套件、不用建置。檔案：`index.html`、`app.js`、`rules.js`（型號解讀、替代品對照）、`xlsx.js`（Excel）、`styles.css`、`sw.js`（離線快取）、`google-sheets.gs`、`manifest.webmanifest`。
+
+第三方：中文換行用 Google BudouX 繁中切詞（Apache-2.0，`vendor/budoux-zh-hant.js`；授權聲明在檔案結尾），只在詞跟詞中間才換行。
