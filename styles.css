@@ -2212,9 +2212,11 @@ a.row {
     position: sticky;
     top: calc(var(--safe-t) + 16px);
   }
-  .review-photo .photo-wrap {
+  .review-photo .photo-wrap,
+  .review-photo .seq-row {
     max-width: calc((100dvh - 220px) * var(--ar, 1.333));
-    margin: 0 auto;
+    margin-left: auto;
+    margin-right: auto;
   }
   .review-top {
     grid-column: 2;
@@ -5352,8 +5354,7 @@ html.is-scrolled .nav {
   text-align: center;
   pointer-events: none;
 }
-.photo-wrap.dense[data-total]::after {
-  content: attr(data-total);
+.photo-total {
   position: absolute;
   left: 8px;
   top: 8px;
@@ -5363,7 +5364,61 @@ html.is-scrolled .nav {
   color: #fff;
   font-size: 13px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+/* 4.20 各種分開算：照片下面一列「① 9 個 ② 22 個」＋編號方式；跟照片同寬、對齊 */
+.seq-row {
+  margin-top: 10px;
+}
+.pt-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.pt-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.pt-kind i {
+  display: grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: var(--c);
+  color: #fff;
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 700;
+}
+.seq-chips {
+  margin-top: 8px;
+}
+/* 「照片讀完就自動開始」：按鈕維持主色，加一個白色小轉圈，看得出在等 */
+.btn .spinner.on-brand {
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  border-width: 2px;
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+}
+.seq-row .footnote {
+  margin-top: 4px;
+}
+/* 4.20 選相簿：照片還在讀的格子 */
+.cap-loading {
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: rgba(120, 120, 128, 0.12);
 }
 /* 框超過 50 個：編號放在框的正中間（四個角常被旁邊的框蓋住）、字更小、底更淡 */
 .photo-wrap.dense2 .box .seq {

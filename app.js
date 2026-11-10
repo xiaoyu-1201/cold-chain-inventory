@@ -24,6 +24,9 @@ const LS = {
   claudePinned: 'inventory:claudePinned',
   // 辨識內容（4.13）：count＝只數數量（預設，快）、full＝完整（品名、品牌、規格、相似品比對）
   aiMode: 'inventory:aiMode',
+  // 4.20：辨識速度（'1'＝快速，先用 Haiku）；照片上的編號（'1'＝各種分開編號）。只記在這台
+  quick: 'inventory:quick',
+  seqSplit: 'inventory:seqSplit',
   // 通知（4.14）：這台開了通知、雲端設好了通知服務
   pushOn: 'inventory:pushOn',
   pushSvc: 'inventory:pushSvc',
@@ -113,7 +116,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.19.0（11/07・中文只在詞間換行、長字不撐版、刪框可復原、數量格不切數字）'
+const VERSION = '4.20.0（11/10・照片上各種分開算、快速辨識、選相簿不用等）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -408,6 +411,7 @@ async function prepareImage(file) {
   canvas.getContext('2d').drawImage(bmp, 0, 0, w, h)
   bmp.close?.()
   const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.85))
+  if (!blob) throw new Error('toBlob null') // 記憶體不夠：不要把空照片加進去
   return { id: uid(), blob, w, h, objects: [], status: 'pending' }
 }
 const blobToBase64 = (blob) =>
@@ -569,6 +573,8 @@ const aiMode = () => ({ fast: 'fast', count: 'count', full: 'full' })[ls.get(LS.
 const countMode = () => aiMode() !== 'full'
 /** 快速數量＋背景補名稱（4.14 預設）：數量先出來，名稱交給雲端在背景補（App 關掉也會跑完） */
 const namesMode = () => aiMode() === 'fast'
+/** 快速（4.20，使用者要 5～10 秒的選項）：數量先用最快的 Haiku，不行才換原本的模型；預設關。完整模式要分相似品，不適用 */
+const quickOn = () => countMode() && ls.get(LS.quick) === '1'
 /** 擁有者有把 Claude 金鑰放在雲端共用（不管這台能不能用） */
 function aiSharedOn() {
   return !!(ls.get(LS.sheet) && ls.get(LS.syncKey)) && ls.get(K().shared) === '1'
@@ -1033,10 +1039,13 @@ async function sampleRefs() {
  * Claude 沒有免費額度：最多試兩個模型（現在的 → Haiku），也不「同時請備用模型」（同時兩個＝每張慢的照片付兩次錢）。
  * onStatus 用來在畫面上顯示目前在做什麼。
  */
-async function analyzeRaw(image, dims, refs, onStatus) {
-  const first = await currentModel()
-  const list = cachedModels() ?? (await fetchModels().catch(() => [first]))
-  const backup = list.find((m) => m !== first && isLite(m)) ?? list.find((m) => m !== first)
+async function analyzeRaw(image, dims, refs, onStatus, noQuick = false) {
+  const std = await currentModel()
+  const list = cachedModels() ?? (await fetchModels().catch(() => [std]))
+  // 極速：最新的 Haiku 排第一個，原本的模型當備用（使用者按「數得不對？分區再數」時不用極速）
+  const lite = !noQuick && quickOn() && list.find(isLite)
+  const first = lite || std
+  const backup = first !== std ? std : (list.find((m) => m !== first && isLite(m)) ?? list.find((m) => m !== first))
   return attemptChain([first, backup].filter(Boolean), image, refs, onStatus, undefined, dims)
 }
 async function analyze(photo, onStatus = () => {}, refs = []) {
@@ -1046,7 +1055,7 @@ async function analyze(photo, onStatus = () => {}, refs = []) {
  * 分區數：照片切成 2×2 四塊（多重疊一點），每塊分開問、再合起來（跨塊重複的框去掉）。
  * 一大堆小東西（例如保溫管）整張一次看，AI 容易整堆當成一個；切小塊每塊的東西變大、變少，數得準很多。
  */
-async function analyzeTiled(photo, onStatus = () => {}) {
+async function analyzeTiled(photo, onStatus = () => {}, noQuick = false) {
   const bmp = await bitmapOf(photo.blob)
   const W = bmp.width
   const H = bmp.height
@@ -1068,7 +1077,7 @@ async function analyzeTiled(photo, onStatus = () => {}) {
       const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.88))
       if (!blob) throw new ApiError('照片處理失敗（記憶體可能不足），請再試一次', 0, 'tile: toBlob null')
       onStatus(`分區數：第 ${r * 2 + c + 1}／4 塊`)
-      const t = await analyzeRaw(await blobToBase64(blob), { w: canvas.width, h: canvas.height, tile: true }, [], onStatus)
+      const t = await analyzeRaw(await blobToBase64(blob), { w: canvas.width, h: canvas.height, tile: true }, [], onStatus, noQuick)
       model = t.model
       note = note || t.note
       location = location || t.location
@@ -1150,16 +1159,16 @@ async function attemptChain(models, image, refs, onStatus, signal, dims = null) 
         onStatus(`${model} 沒成功：${e.detail || e.message}（${Math.round((Date.now() - t0) / 1000)} 秒）`)
         if (!(e instanceof ApiError)) throw e
         if (e.status === 404) {
-          if (mi === 0) ls.set(K().model, '')
+          if (model === ls.get(K().model)) ls.set(K().model, '') // 極速的 Haiku 下架時，不要清掉原本選的模型
           break
         }
         // 等太久：同一個模型再等一次也是慢，直接換下一個（比較快的）模型
         if (e.status === 408) {
           // 共用金鑰：雲端那邊可能還在跑（會計費），先等一下再送下一個，不要兩個同時跑
           if (viaSheetNow() && mi < models.length - 1) {
-            onStatus(`${model} 太慢，等 3 秒再換比較快的模型`)
+            onStatus(`${model} 太慢，等 3 秒再換另一個模型`)
             await sleep(3000)
-          } else onStatus(`${model} 太慢，換比較快的模型`)
+          } else onStatus(`${model} 太慢，換另一個模型`)
           break
         }
         // 回答格式（schema）被拒絕：改用簡化模式（文字說明格式）再送一次
@@ -2603,12 +2612,12 @@ function viewCapture() {
             .join('')}</div>`
         : `<p class="footnote">請至「品項 → 儲位」建立代號並列印標籤貼在貨架上；拍照時會自動帶入位置，重盤同一格也會自動更新數量。</p>`
     }
-    <p class="section-title">照片（${s.photos.length}）</p>
     ${
-      s.photos.length
-        ? `<div class="photo-strip cap-strip">${s.photos.map((p, i) => `<div class="cap-thumb"><button class="cap-view" data-preview-photo="${i}" aria-label="放大看第 ${i + 1} 張"><img src="${urlOf(p)}" alt="" decoding="async"><span class="zoom-badge" aria-hidden="true">${icon('zoom-in', 13)}</span></button><button class="cap-del" data-remove-photo="${i}" aria-label="刪掉第 ${i + 1} 張" title="刪掉這張"><span>${icon('x', 14)}</span></button></div>`).join('')}</div><p class="footnote">點縮圖可放大；拍錯可按 × 刪除，並可復原。</p>`
+      countMode() && hasAi() && canEdit()
+        ? `<div class="group" style="margin-top:10px"><div class="row mode-row"><span class="grow"><span class="title">辨識速度</span><br><span class="meta"><span class="nb">標準：最準。</span><span class="nb">極速：一張約 5～10 秒，</span><span class="nb">很像的東西較容易分錯。</span></span><span class="chips mode-chips" role="group" aria-label="辨識速度"><button class="chip" data-action="ai-speed" data-quick="" aria-pressed="${!quickOn()}">標準</button><button class="chip" data-action="ai-speed" data-quick="1" aria-pressed="${quickOn()}">極速</button></span></span></div></div>`
         : ''
     }
+    <div id="cap-photos">${capPhotos(s)}</div>
     <div class="row-actions" style="margin-top:12px">
       <label class="btn secondary" style="flex:1">${icon('camera')}拍照<input type="file" accept="image/*" capture="environment" id="cam" class="sr-only"></label>
       <label class="btn secondary" style="flex:1">${icon('image')}從相簿選<input type="file" accept="image/*" multiple id="pick" class="sr-only"></label>
@@ -2622,7 +2631,21 @@ function viewCapture() {
       <div class="row"><span>④ 外觀相近、僅尺寸不同的（例如三通），每種先存一張「樣品照」，AI 會依此區分；或將同一種放在一起拍</span></div>
     </div>
   </main>
-  <div class="toolbar"><div class="inner"><button class="btn" data-action="analyze" ${s.photos.length ? '' : 'disabled'}>開始辨識${s.photos.length ? `（${s.photos.length} 張）` : ''}</button></div></div>`
+  <div class="toolbar"><div class="inner"><button class="btn" data-action="analyze" ${s.photos.length || addingN ? '' : 'disabled'}>${analyzeLabel(s)}</button></div></div>`
+}
+/** 拍照頁的照片區（讀取中只換這一塊，不整頁重畫：整頁重畫會把正在按的按鈕換掉、那一下就沒反應） */
+function capPhotos(s) {
+  return `<p class="section-title">照片（${s.photos.length}）${addingN ? `・讀取中 ${addingN} 張` : ''}</p>
+    ${
+      s.photos.length || addingN
+        ? `<div class="photo-strip cap-strip">${s.photos.map((p, i) => `<div class="cap-thumb"><button class="cap-view" data-preview-photo="${i}" aria-label="放大看第 ${i + 1} 張"><img src="${urlOf(p)}" alt="" decoding="async"><span class="zoom-badge" aria-hidden="true">${icon('zoom-in', 13)}</span></button><button class="cap-del" data-remove-photo="${i}" aria-label="刪掉第 ${i + 1} 張" title="刪掉這張"><span>${icon('x', 14)}</span></button></div>`).join('')}${'<div class="cap-thumb cap-loading" role="img" aria-label="照片讀取中"><span class="spinner small"></span></div>'.repeat(addingN)}</div><p class="footnote">點縮圖可放大；拍錯可按 × 刪除，並可復原。</p>`
+        : ''
+    }`
+}
+function analyzeLabel(s) {
+  if (state.startWhenReady) return `<span class="spinner small on-brand" aria-hidden="true"></span>照片讀完就自動開始（還有 ${addingN} 張）`
+  const n = s.photos.length + addingN
+  return `開始辨識${n ? `（${n} 張）` : ''}`
 }
 
 /** 等的時候輪流看的小撇步：就是拍照頁「怎麼拍比較準」那幾條（圖示、文字） */
@@ -2695,6 +2718,7 @@ function viewReview() {
   groups.forEach((g, gi) => g.refs.forEach((r) => colorOfRef.set(`${r.pi}:${r.oi}`, { color: g.color, gi, key: g.key })))
   const doubts = doubtsOf(s)
   const doubtSet = new Set(doubts.map((d) => d.o))
+  const split = ls.get(LS.seqSplit) === '1'
   // 框很多時的流水號：照閱讀順序（由上到下；差不多高的算同一排，同一排由左到右），照片上才核對得到「到底有幾個」
   const seqOf = (pi) => {
     const objs = s.photos[pi].objects
@@ -2706,9 +2730,24 @@ function viewReview() {
       return Math.abs(ya - yb) < rowH ? objs[a].box[1] - objs[b].box[1] : ya - yb
     })
     const m = new Map()
-    idx.forEach((i, k) => m.set(i, k + 1))
+    const per = new Map() // 各種分開編號：每一種從 1 開始
+    idx.forEach((i, k) => {
+      const key = colorOfRef.get(`${pi}:${i}`)?.key
+      per.set(key, (per.get(key) || 0) + 1)
+      m.set(i, split ? per.get(key) : k + 1)
+    })
     return m
   }
+  // 這張照片上每一種各幾個（照片左上角「共 N 個框」後面）
+  const kinds = photo ? groups.map((g, gi) => ({ gi, color: g.color, label: g.label, n: g.refs.filter((r) => r.pi === state.photoIndex).length })).filter((k) => k.n) : []
+  const dense = photo && photo.objects.length > 12
+  // 照片上只留一行「共 N 個框」（各種的數量放照片下面：放照片上會蓋住第一排的編號）
+  const totalBadge = dense ? `<div class="photo-total">共 ${photo.objects.length} 個框</div>` : ''
+  // 圓點裡寫品項編號（跟框上的號碼、下面清單一樣）：顏色相近也分得出來
+  const kindsRow =
+    dense && kinds.length > 1
+      ? `<div class="seq-row" style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}"><div class="pt-kinds">${kinds.map((k) => `<span class="pt-kind" aria-label="${esc(k.label)} ${k.n} 個"><i style="--c:${k.color}">${k.gi + 1}</i>${k.n} 個</span>`).join('')}</div><div class="chips seq-chips" role="group" aria-label="框上的編號"><button class="chip" data-action="seq-mode" data-split="" aria-pressed="${!split}">全部一起編號</button><button class="chip" data-action="seq-mode" data-split="1" aria-pressed="${split}">各種分開編號</button></div><p class="footnote">分開編號：每一種從 1 開始數，方便一種一種核對。</p></div>`
+      : ''
   const boxesOf = (pi) => {
     const seq = s.photos[pi].objects.length > 12 ? seqOf(pi) : null
     return s.photos[pi].objects
@@ -2769,11 +2808,12 @@ function viewReview() {
             s.photos.some((p) => p.lost && !fetching.has(s.id))
               ? `<div class="hint-card lost-card" role="status"><b>${s.photos.filter((p) => p.lost).length} 張照片在此手機遺失</b>（iPhone 的限制；框與數量仍保留）。若雲端有備份，可取回。<button class="btn small" data-action="repair-photos">從雲端拿回照片</button></div>`
               : ''
-          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''} ${photo.objects.length > 12 ? 'dense' : ''} ${photo.objects.length > 50 ? 'dense2' : ''} ${groups.filter((g) => !g.manual).length > 1 ? 'multi' : ''}" ${photo.objects.length > 12 ? `data-total="共 ${photo.objects.length} 個框"` : ''} data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
+          }<div class="photo-wrap ${state.focus || state.focusObj ? 'focus' : ''} ${state.addMode ? 'adding' : ''} ${photo.objects.length > 12 ? 'dense' : ''} ${photo.objects.length > 50 ? 'dense2' : ''} ${groups.filter((g) => !g.manual).length > 1 ? 'multi' : ''}" data-photo style="--ar:${photo.w && photo.h ? (photo.w / photo.h).toFixed(3) : '1.333'}">${
             photo.blob ? `<img src="${urlOf(photo)}" alt="第 ${state.photoIndex + 1} 張照片">` : `<div class="photo-ph ${fetching.has(s.id) || photo.pending ? 'loading' : ''}" role="img" aria-label="${photo.pending ? '照片下載中' : '這張照片不見了'}">${fetching.has(s.id) || photo.pending ? '<span class="photo-ph-text">照片下載中…</span>' : ''}</div>`
-          }${boxes}
+          }${boxes}${totalBadge}
              <button class="photo-zoom" data-action="zoom" aria-label="放大看照片">${icon('maximize', 22)}</button>
            </div>
+           ${kindsRow}
            ${state.addMode ? '<div class="add-hint" role="status"><b>點照片上遺漏的項目</b>，會在該處新增一個框 <button class="btn small plain" data-action="add-cancel">取消</button></div>' : ''}
            ${s.photos.length > 1 ? `<div class="photo-strip">${s.photos.map((p, i) => `<button class="${i === state.photoIndex ? 'on' : ''} ${p.blob ? '' : 'lost'}" data-photo-index="${i}" aria-label="看第 ${i + 1} 張${p.pending ? '（下載中）' : p.lost ? '（照片不見了）' : ''}">${p.blob ? `<img src="${urlOf(p)}" alt="" decoding="async">` : ''}</button>`).join('')}</div>` : ''}
            <div class="row-actions edit-only" style="margin-top:10px"><button class="btn small secondary" data-action="add-box" ${state.addMode ? 'disabled' : ''}>${icon('plus', 18)}有遺漏？點照片新增框</button><button class="btn small plain" data-action="recount-tiled">數得不對？分區再數一次</button></div>
@@ -9772,20 +9812,18 @@ function preAnalyze(photo) {
   const trace = []
   const t0 = Date.now()
   const log = (msg) => trace.push(`${Math.round((Date.now() - t0) / 100) / 10} 秒｜${msg}（拍照後先辨識）`)
-  preRuns.set(
-    photo,
-    new Promise((resolve) =>
-      preQueue.push(async () => {
-        // 還沒輪到就被刪掉、或這次盤點已經放棄：不送（不花錢）
-        if (!state.session?.photos.includes(photo)) return resolve({ skipped: true, trace })
-        try {
-          resolve({ r: await analyzeSmart(photo, log, []), trace })
-        } catch (e) {
-          resolve({ e, trace })
-        }
-      }),
-    ),
+  const run = new Promise((resolve) =>
+    preQueue.push(async () => {
+      // 還沒輪到就被刪掉、這次盤點已經放棄、或換了速度已經重排：不送（不花錢）
+      if (!state.session?.photos.includes(photo) || preRuns.get(photo) !== run) return resolve({ skipped: true, trace })
+      try {
+        resolve({ r: await analyzeSmart(photo, log, []), trace })
+      } catch (e) {
+        resolve({ e, trace })
+      }
+    }),
   )
+  preRuns.set(photo, run)
   pumpPre()
 }
 function pumpPre() {
@@ -9800,19 +9838,39 @@ function pumpPre() {
 }
 /** 用 App 的相機拍的原始照片檔（存到相簿用；從相簿選的本來就在相簿裡）。照片被刪掉、這次盤點結束就跟著放掉 */
 const camOrigins = new WeakMap()
-async function addFiles(files, fromCam = false) {
+/** 還在讀（縮小）的照片：幾張、什麼時候全部讀完。選完馬上出現格子、馬上可以按「開始辨識」（4.20） */
+let addingN = 0
+let adding = Promise.resolve()
+/** 一張接一張讀（順序不會亂、iPhone 不會同時解兩張大圖），每讀完一張就畫出來 */
+function addFiles(files, fromCam = false) {
   const s = state.session
-  for (const f of files) {
-    try {
-      const p = await prepareImage(f)
-      if (fromCam) camOrigins.set(p, f)
-      s.photos.push(p)
-      preAnalyze(p)
-    } catch {
-      toast('有一張照片讀不進來，換一張試試')
-    }
+  if (!files.length) return
+  addingN += files.length
+  // 只換照片區和按鈕文字：位置欄的鍵盤不會收起來、正在按的按鈕不會被換掉
+  const show = () => {
+    if (state.view !== 'capture' || !state.session) return
+    const box = document.getElementById('cap-photos')
+    const btn = document.querySelector('[data-action="analyze"]')
+    if (!box || !btn) return render()
+    box.innerHTML = capPhotos(state.session)
+    btn.innerHTML = analyzeLabel(state.session)
+    btn.disabled = !(state.session.photos.length || addingN)
   }
-  render()
+  show()
+  adding = adding.then(async () => {
+    for (const f of files) {
+      try {
+        const p = await prepareImage(f)
+        if (fromCam) camOrigins.set(p, f)
+        s.photos.push(p)
+        if (state.session === s) preAnalyze(p)
+      } catch {
+        toast('有一張照片讀不進來，換一張試試')
+      }
+      addingN--
+      show()
+    }
+  })
 }
 
 $app.addEventListener('click', async (e) => {
@@ -9839,7 +9897,7 @@ $app.addEventListener('click', async (e) => {
   if (d.go) {
     // 新盤點拍了照片、還沒按「開始辨識」就要離開：照片只在記憶體裡，離開就不見 → 先問
     if (photosAtRisk() && d.go !== 'capture') {
-      const n = state.session.photos.length
+      const n = state.session.photos.length + addingN
       if (!(await ask(`還沒按「開始辨識」：要放棄這 ${n} 張照片嗎？\n\n放棄的話照片不會留下來。要留著就按「回去」，再按下面的「開始辨識」。`, { ok: '放棄照片', cancel: '回去', danger: true }))) return mountLenses() // 取消：拖過去的鏡片彈回來
       for (const p of state.session.photos) dropUrl(p.id)
       state.session = null
@@ -10034,7 +10092,7 @@ $app.addEventListener('click', async (e) => {
       if (!(await ask('把這張照片切成 4 塊重新數？\n這張現在的框和數量會被取代（你改過的也會不見）。要繼續嗎？', { ok: '重新數' }))) return
       const done = busyBtn(t, '分區數中…')
       try {
-        const r = await analyzeTiled(photo, (m) => (t.textContent = m))
+        const r = await analyzeTiled(photo, (m) => (t.textContent = m), true)
         photo.objects = r.objects
         photo.note = r.note
         photo.status = 'done'
@@ -10073,9 +10131,21 @@ $app.addEventListener('click', async (e) => {
       }
       return toast('已下載到手機的「下載」')
     }
-    case 'analyze':
+    case 'analyze': {
+      if (state.startWhenReady) return
+      const s = state.session
+      // 照片還在讀：先記下「讀完就開始」，不用等在那裡
+      if (addingN) {
+        state.startWhenReady = true
+        t.innerHTML = analyzeLabel(s)
+        while (addingN) await adding // 等的時候又加照片：一起等
+        state.startWhenReady = false
+        if (state.session !== s || state.view !== 'capture') return state.view === 'capture' && render()
+      }
+      if (!s.photos.length) return render()
       state.session.place = document.getElementById('place')?.value.trim() || ''
       return runAnalysis(state.session.photos.map((_, i) => i))
+    }
     case 'cancel': {
       state.cancel = true
       // 畫面要看得出有按到（不然使用者會狂按）：按鈕變「取消中…」、說明改成收尾
@@ -10254,6 +10324,18 @@ $app.addEventListener('click', async (e) => {
       }
       return render()
     }
+    case 'seq-mode':
+      ls.set(LS.seqSplit, d.split)
+      return render()
+    case 'ai-speed':
+      if ((d.quick === '1') === quickOn()) return // 點已經選著的那顆：不要重送（會多花一次錢）
+      ls.set(LS.quick, d.quick)
+      // 已經先送出去的照片照新的速度重送（還沒輪到的舊工作會自己跳過）
+      for (const p of state.session?.photos || []) {
+        preRuns.delete(p)
+        preAnalyze(p)
+      }
+      return render()
     case 'ai-mode':
       ls.set(LS.aiMode, d.mode)
       toast(`辨識內容：${MODE_LABEL[aiMode()]}`)
@@ -10980,7 +11062,7 @@ function bindInputs() {
 // 離線也能打開（服務工作程式快取 App 本身；AI 辨識還是要網路）
 // updateViaCache: 'none'＝檢查新版時不用手機暫存；回到 App 時也檢查一次（新版裝好會自動重新整理）
 // 新版裝好了：不要馬上重新整理（拍了照片還沒辨識的話，照片只在記憶體裡，重新整理就全部不見）→ 等到安全的時候才重新整理
-const photosAtRisk = () => state.view === 'capture' && !!state.session?.photos.length
+const photosAtRisk = () => state.view === 'capture' && !!(state.session?.photos.length || addingN)
 const safeToReload = () =>
   // 只在清單類的頁面重新整理（盤點結果、品項頁、拍照頁等你換頁再說）
   ['home', 'items', 'lookup', 'settings', 'settings-adv', 'report', 'catalog', 'locations', 'quality', 'pick', 'pick-result'].includes(state.view) &&
