@@ -27,6 +27,8 @@
  * 編輯者不能改盲盤／複盤規則、不能匯入正航產品表、不能一次刪光盤點紀錄（雲端也擋）。
  * 更新方法：整段重新貼上 → 存檔 →「部署」→「管理部署作業」→ 鉛筆 → 版本選「新版本」→ 部署（網址不會變）。
  *
+ * 4.21：正航自動同步——公司電腦每小時把正航產品（含成本）寫進「正航產品」分頁（指令碼屬性 ERP_FEED_KEY 當鑰匙）；
+ *   擁有者、管理員的 App 同步時自動匯入（不含成本、帳面跟著更新）；「公司叫法」分頁給銷貨憑單工具搜尋用。
  * 4.11：用 Google 登入（OpenID Connect）：擁有者在 App 設定貼上「Google 登入用的 Client ID」（指令碼屬性 GOOGLE_CLIENT_ID，不是密碼）。
  * - 同事按「用 Google 登入」→ 驗證過的信箱在「預先登記」名單（GOOGLE_ALLOW）就直接加入；不在就排進待核准（核准畫面看得到信箱）。
  * - 登入資料綁在「這支手機自己產生的連結碼」：Google 的 nonce ＝ SHA-256(連結碼)，偷到登入資料也不能拿去註冊別支手機。
@@ -85,6 +87,8 @@ function doPost(e) {
   // 用 Google 登入（不用連結碼）；googleConfig 只回「Client ID」（公開資訊，App 靠它決定要不要顯示「用 Google 登入」）
   if (data.action === 'googleConfig') return json({ ok: true, clientId: P.GOOGLE_CLIENT_ID || '' })
   if (data.action === 'joinGoogle') return json(syncOn ? joinGoogle(data, props) : { ok: false, error: '還沒開啟同步：請先由擁有者在第一台裝置開啟' })
+  // 正航自動同步（公司電腦每小時送一次）：用指令碼屬性 ERP_FEED_KEY，不是成員的連結碼
+  if (data.action === 'erpFeed') return json(erpFeed(data, props, P))
   const who = syncOn ? whoIs(P, data.key) : null
   if (syncOn && !who) {
     // 申請了、還沒被核准：告訴 App「等一下」，不要當成連結碼錯誤；取消申請（joinWithdraw）就把那一筆拿掉
@@ -201,7 +205,9 @@ function doPost(e) {
   // ver 2：盤點的照片分開存（photo:盤點ID:照片ID），下載只拿資料，照片用 photos 另外要；App 看到 ver 才改用新格式上傳
   // fast：有沒有用到「同時讀寫」（4.7.6）；沒有的話，App 會教擁有者打開 Drive API
   if (data.action === 'hello') return json({ ok: true, ver: SYNC_VER, aiClaude: aiClaude, pend: pend, sheet: SpreadsheetApp.getActiveSpreadsheet().getName(), me: me, roster: roster, fast: driveApiEnabled() })
-  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, aiClaude: aiClaude, pend: pend, me: me, roster: roster, fast: driveApiEnabled() }))
+  // erpAt：正航自動同步最後一次送來的時間；擁有者、管理員的 App 看到比較新，就用 erpLatest 拿來匯入
+  if (data.action === 'pull') return json(Object.assign(syncPull(data, P), { ver: SYNC_VER, aiClaude: aiClaude, pend: pend, me: me, roster: roster, fast: driveApiEnabled(), erpAt: Number(P.ERP_FEED_AT) || 0 }))
+  if (data.action === 'erpLatest') return json(canManage ? erpLatest(P) : { ok: false, me: me, error: '只有擁有者和管理員可以匯入正航產品表' })
   if (data.action === 'photos') return json(Object.assign(syncPhotos(data, P), { ver: SYNC_VER, aiClaude: aiClaude, pend: pend, me: me }))
   if (data.action === 'push') return json(canEdit ? Object.assign(syncPush(data, props, P, !!canManage), { ver: SYNC_VER, aiClaude: aiClaude, pend: pend, me: me }) : { ok: false, viewer: true, aiClaude: aiClaude, pend: pend, me: me, error: '你是檢視者，只能看' })
   if (SYNC_ACTIONS.indexOf(data.action) >= 0) return json(canManage ? Object.assign(manage(data, props, P, who), { me: me }) : { ok: false, me: me, error: '只有擁有者和管理員可以管理共用的人' })
@@ -415,6 +421,114 @@ function notifyPush(props, who, title, body) {
 /** App 的「測試連線」會呼叫這個 */
 function doGet() {
   return json({ ok: true, app: '拍照盤點' })
+}
+
+// ───────────── 正航自動同步（4.21） ─────────────
+/**
+ * 公司電腦的「正航自動同步」每小時送一次 products [{ id, name, unit, cls, clsName, cost, qty, safe, wh{倉庫:數量} }]、at、note：
+ * - 寫進「正航產品」分頁（含成本：使用者 2026/11/13 同意，這份試算表只有內部的人能開；App 拿不到成本）
+ * - 回「公司叫法」分頁（叫法 → 產品編號）給銷貨憑單工具
+ * 鑰匙＝指令碼屬性 ERP_FEED_KEY（擁有者手動貼上，跟公司電腦「正航自動同步\.feed.cred」同一組）；刪掉它就斷開。
+ * 沒帶 products：只拿叫法。
+ */
+const ERP_SHEET = '正航產品'
+const ALIAS_SHEET = '公司叫法'
+const ERP_HEAD = ['產品編號', '品名規格', '單位', '類別', '類別名稱', '庫存', '安全存量', '成本', '各倉庫存']
+function erpFeed(data, props, P) {
+  const k = String(P.ERP_FEED_KEY || '')
+  if (k.length < 24 || sha(String(data.feedKey || '')) !== sha(k)) return { ok: false, error: '正航同步的鑰匙不對：請確認指令碼屬性 ERP_FEED_KEY' }
+  const ss = SpreadsheetApp.getActiveSpreadsheet()
+  const lock = LockService.getScriptLock()
+  lock.waitLock(30000)
+  try {
+    const aliases = aliasRows(ss)
+    if (!Array.isArray(data.products)) return { ok: true, aliases: aliases }
+    if (data.products.length < 100) return { ok: false, error: '只收到 ' + data.products.length + ' 種產品，不正常，這次不更新' }
+    // 文字欄（A–E、I）整欄設成純文字格式：= 開頭的字不會變成公式，0012 也不會變成 12
+    const txt = function (v) {
+      return String(v == null ? '' : v).trim()
+    }
+    const num = function (v) {
+      const n = Number(v)
+      return isFinite(n) ? n : 0
+    }
+    const rows = data.products.map(function (p) {
+      const wh = Object.keys((p && p.wh) || {}).map(function (w) {
+        return w + '=' + num(p.wh[w])
+      })
+      return [txt(p.id), txt(p.name), txt(p.unit), txt(p.cls), txt(p.clsName), num(p.qty), num(p.safe), num(p.cost), wh.join(', ')]
+    })
+    // 正航資料跟上次一樣：不重寫、不通知 App（不然每台管理員每小時都要重抓、重傳一次）
+    const hash = sha(JSON.stringify(rows))
+    if (hash === P.ERP_FEED_HASH && ss.getSheetByName(ERP_SHEET)) return { ok: true, n: rows.length, same: true, aliases: aliases }
+    const sh = ss.getSheetByName(ERP_SHEET) || ss.insertSheet(ERP_SHEET)
+    if (sh.getMaxRows() < rows.length + 1) sh.insertRowsAfter(sh.getMaxRows(), rows.length + 1 - sh.getMaxRows())
+    if (sh.getMaxColumns() < ERP_HEAD.length + 1) sh.insertColumnsAfter(sh.getMaxColumns(), ERP_HEAD.length + 1 - sh.getMaxColumns())
+    sh.clearContents()
+    sh.getRange(1, 1, rows.length + 1, 5).setNumberFormat('@')
+    sh.getRange(1, 9, rows.length + 1, 1).setNumberFormat('@')
+    sh.getRange(1, 1, 1, ERP_HEAD.length + 1).setValues([ERP_HEAD.concat(['更新：' + String(data.note || '').slice(0, 30) + '（每小時自動，不要手動改）'])])
+    sh.getRange(2, 1, rows.length, ERP_HEAD.length).setValues(rows)
+    sh.setFrozenRows(1)
+    // ERP_FEED_AT 用雲端自己的時間（App 靠它判斷「有新的」）；報表時間另外記（公司電腦的時鐘，給交叉比對基準用）
+    props.setProperties({ ERP_FEED_AT: String(Date.now()), ERP_FEED_REPORT: String(Number(data.at) || Date.now()), ERP_FEED_HASH: hash })
+    return { ok: true, n: rows.length, aliases: aliases }
+  } finally {
+    lock.releaseLock()
+  }
+}
+/** 「公司叫法」分頁：A 叫法、B 產品編號（C 之後隨便寫）；沒有就建一個 */
+function aliasRows(ss) {
+  let sh = ss.getSheetByName(ALIAS_SHEET)
+  if (!sh) {
+    sh = ss.insertSheet(ALIAS_SHEET)
+    sh.getRange('A:B').setNumberFormat('@')
+    sh.getRange(1, 1, 2, 4).setValues([
+      ['叫法', '產品編號', '誰加的', '備註'],
+      ['（例）溫控615', '（填正航的產品編號）', '', '一行一個叫法；同一個產品可以有好幾行。銷貨憑單工具每小時更新一次'],
+    ])
+    sh.setFrozenRows(1)
+  }
+  const n = sh.getLastRow()
+  if (n < 2) return []
+  return sh
+    .getRange(2, 1, n - 1, 2)
+    .getDisplayValues()
+    .map(function (r) {
+      return [String(r[0]).trim().slice(0, 60), String(r[1]).trim().slice(0, 60)]
+    })
+    .filter(function (r) {
+      return r[0] && r[1] && r[0].charAt(0) !== '（'
+    })
+    .slice(0, 5000)
+}
+/** 給擁有者、管理員的 App：「正航產品」分頁轉成正航報表的格式（不含成本），App 用原本的匯入 */
+function erpLatest(P) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(ERP_SHEET)
+  if (!sh || sh.getLastRow() < 2) return { ok: false, error: '還沒有正航自動同步的資料' }
+  const q = function (s) {
+    return '"' + String(s).replace(/"/g, '""') + '"'
+  }
+  const lines = [['產品編號', '品名規格', '計量單位', '產品類別', '類別名稱', '倉庫編號', '實際在庫'].join('\t')]
+  sh.getRange(2, 1, sh.getLastRow() - 1, ERP_HEAD.length)
+    .getValues()
+    .forEach(function (r) {
+      const base = [r[0], r[1], r[2], r[3], r[4]].map(q)
+      const wh = String(r[8] || '')
+        .split(', ')
+        .map(function (x) {
+          return x.split('=')
+        })
+        .filter(function (x) {
+          return x.length === 2 && x[0]
+        })
+      if (!wh.length) lines.push(base.concat([q(''), q(r[5])]).join('\t'))
+      else
+        wh.forEach(function (w) {
+          lines.push(base.concat([q(w[0]), q(w[1])]).join('\t'))
+        })
+    })
+  return { ok: true, at: Number(P.ERP_FEED_REPORT) || 0, text: lines.join('\n') }
 }
 
 function json(obj) {

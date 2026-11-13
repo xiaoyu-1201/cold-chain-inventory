@@ -85,6 +85,7 @@ const LS = {
   pickCross: 'inventory:pickCross',
   pickCrossLast: 'inventory:pickCrossLast',
   pickPullDone: 'inventory:pickPullDone',
+  erpFeedAt: 'inventory:erpFeedAt', // 上次自動匯入的正航自動同步時間
 }
 /** 檢視者不能用的動作 */
 const EDIT_ACTIONS = new Set(['new', 'analyze', 'add', 'delete-session', 'finish', 'save-catalog', 'reset-catalog', 'add-box', 'del-sample', 'clear-all', 'review-doubts', 'item-add', 'import', 'item-edit', 'item-confirm', 'item-merge', 'item-delete', 'move-in', 'move-out', 'book-set', 'equiv-add', 'read-add', 'loc-add', 'safety-pick', 'recount', 'recount-reason', 'recount-adjust', 'recount-keep', 'golden-run', 'bulk-finish', 'bulk-delete', 'erp-import', 'erp-cats', 'erp-link', 'pk-new', 'pk-add', 'pk-step', 'pk-done', 'pk-confirm', 'pk-qty', 'pk-more', 'pk-assign', 'pk-remove', 'pk-finish', 'pk-discard', 'pk-cancel-edit', 'pk-reopen', 'pk-delete'])
@@ -116,7 +117,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.20.0（11/10・照片上各種分開算、快速辨識、選相簿不用等）'
+const VERSION = '4.21.0（11/13・正航每小時自動同步、不用再手動匯入）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -3272,17 +3273,21 @@ async function importErp(text, { reportAt = 0 } = {}) {
   for (const p of products) {
     const it = index.of(p.no)
     if (!it) continue
+    let dirty = false // 沒變就不存：存了會改修改時間，整批品項（含照片）重傳，還可能蓋掉同事剛改的
     if (it.erpNo !== p.no) {
       it.erpNo = p.no
       it.erpAt = Date.now()
+      dirty = true
     }
     index.link(it, p.no)
     if (it.book !== p.qty) {
       it.book = p.qty
-      ;(it.moves ||= []).push({ at: Date.now(), kind: 'set', qty: p.qty, from: 'erp' }) // 很舊的品項沒有進出紀錄欄位
+      // 時間用報表時間：兩台管理員匯入同一份正航資料，合併時才會當成同一筆
+      ;(it.moves ||= []).push({ at, kind: 'set', qty: p.qty, from: 'erp' }) // 很舊的品項沒有進出紀錄欄位
       booked++
+      dirty = true
     }
-    await putItem(it)
+    if (dirty) await putItem(it)
   }
   return { products: products.length, stocked: products.filter((p) => p.qty > 0).length, booked, cats: Object.keys(parsed.cats).length, cross }
 }
@@ -7966,9 +7971,11 @@ async function syncNow(report = () => {}) {
     const fromStart = cursor === 0 // 剛加入、第一次：本來就是從頭拿全部
     let got = 0
     let changed = false
+    let erpAt = 0
     for (let round = 0; round < 200; round++) {
       onProgress(got ? `下載了 ${got} 筆，還有…` : fromStart ? `下載中（首次較久${serverV2() ? '' : '，照片都要抓下來'}）` : '下載中…')
       const r = await postSync({ action: 'pull', since: cursor })
+      erpAt = Number(r.erpAt) || erpAt
       for (const rec of r.records) {
         // 一筆壞掉的資料不能卡住後面全部：跳過那一筆、記在主控台
         try {
@@ -7985,6 +7992,23 @@ async function syncNow(report = () => {}) {
       if (!r.more) break
     }
     ls.set(LS.lastSync, String(Date.now()))
+    // 4.21 正航自動同步：雲端有比上次新的正航資料 → 擁有者、管理員這台自動匯入（跟手動匯入一樣：產品表＋帳面），下次同步傳給大家
+    // 交叉比對開著時不自動匯入：基準每小時一換，比對會失效（照舊手動匯入）
+    // 用「不一樣」不用「比較新」：公司電腦時鐘跳到未來一次，也不會卡住之後的匯入
+    if (canManage() && !crossOn() && erpAt && erpAt !== (Number(ls.get(LS.erpFeedAt, '0')) || 0)) {
+      onProgress('更新正航產品表…')
+      try {
+        const f = await postSync({ action: 'erpLatest' })
+        if (f.ok && f.text) {
+          await importErp(f.text, { reportAt: Number(f.at) || 0 })
+          changed = true
+        } else console.error('erpLatest', f.error)
+      } catch (e) {
+        console.error('erpLatest', e)
+      }
+      // 成功失敗都記：失敗等下一份正航資料（約一小時）再試，不要每 40 秒重抓
+      ls.set(LS.erpFeedAt, String(erpAt))
+    }
     // 剛從頭下載過一次，就不用再「重新下載全部」（不然剛加入的人會下載兩次，等很久）
     if (fromStart) ls.set(LS.fullPullDone, '1')
     // 自動從雲端重新下載一次全部：這台有照片不見了（轉新存法時發現），或剛更新到 4.0.7（之前同步卡住，這台可能少了資料）
