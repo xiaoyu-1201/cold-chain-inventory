@@ -234,8 +234,7 @@ function doPost(e) {
     }
     if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEAD.length).setValues(rows)
     sh.getRange(2, 1, Math.max(1, sh.getLastRow() - 1), 1).setNumberFormat('yyyy/mm/dd')
-    if (data.report && data.report.items) writeReports(ss, data.report)
-    else if (data.items && data.items.length) writeTable(ss, '庫存', 1, data.items, { color: COLOR.green }) // 舊版 App
+    if (data.report && data.report.items) writeReports(ss, data.report) // 舊版 App 送的 items（只寫「庫存」）11/24 起不寫
     return json({ ok: true, rows: rows.length, items: data.report ? data.report.items.length - 1 : 0 })
   } finally {
     lock.releaseLock()
@@ -479,8 +478,8 @@ function erpFeed(data, props, P) {
   }
 }
 /**
- * 安全存量分析（2026/11/24）：公司電腦每天用正航近 12 個月進銷紀錄算好，送 rows [[產品編號, 建議門檻, 分類, 為什麼, 賣出, 月數, 天數, 沒貨先賣天數], …]。
- * 只寫 B（產品編號）、H（使用者自己訂：照產品編號搬到新的那一列，不會跟錯產品）、I～O；A、C～G 是公式，不碰。鑰匙跟 erpFeed 同一把。
+ * 安全存量分析（2026/11/24）：公司電腦每天用正航近 12 個月進銷紀錄算好，送 rows [[產品編號, 建議門檻, 重要度, 分類, 為什麼, 賣出, 月數, 天數, 沒貨先賣天數], …]（已照重要度排好）。
+ * 只寫 B（重要度）、C（產品編號）、I（使用者自己訂：照產品編號搬到新的那一列，不會跟錯產品）、J～P；A、D～H 是公式，不碰。鑰匙跟 erpFeed 同一把。
  */
 const USAGE_SHEET = '安全存量分析'
 function usageFeed(data, P) {
@@ -501,7 +500,7 @@ function usageFeed(data, P) {
       return isFinite(n) ? n : 0
     }
     // 舊的「自己訂」照產品編號記下來
-    const old = sh.getLastRow() >= 3 ? sh.getRange(3, 2, sh.getLastRow() - 2, 7).getValues() : []
+    const old = sh.getLastRow() >= 3 ? sh.getRange(3, 3, sh.getLastRow() - 2, 7).getValues() : [] // C 產品編號～I 自己訂
     const mine = {}
     old.forEach(function (r) {
       const id = String(r[0]).trim()
@@ -513,28 +512,28 @@ function usageFeed(data, P) {
       sent[txt(r[0])] = true
     })
     Object.keys(mine).forEach(function (id) {
-      if (!sent[id]) rows.push([id, 0, '一年沒賣', '近 12 個月沒賣、現在也沒庫存（保留你自己訂的門檻）', 0, 0, 0, 0])
+      if (!sent[id]) rows.push([id, 0, '—', '一年沒賣', '近 12 個月沒賣、現在也沒庫存（保留你自己訂的門檻）', 0, 0, 0, 0])
     })
     const ids = rows.map(function (r) {
-      return [txt(r[0])]
+      return [txt(r[2]) || '—', txt(r[0])] // B 重要度、C 產品編號
     })
     const own = ids.map(function (r) {
-      return [Object.prototype.hasOwnProperty.call(mine, r[0]) ? mine[r[0]] : '']
+      return [Object.prototype.hasOwnProperty.call(mine, r[1]) ? mine[r[1]] : '']
     })
     const rest = rows.map(function (r) {
-      return [num(r[1]), txt(r[2]), txt(r[3]), num(r[4]), num(r[5]), num(r[6]), num(r[7])]
+      return [num(r[1]), txt(r[3]), txt(r[4]), num(r[5]), num(r[6]), num(r[7]), num(r[8])]
     })
     if (sh.getMaxRows() < rows.length + 2) sh.insertRowsAfter(sh.getMaxRows(), rows.length + 2 - sh.getMaxRows())
-    // 先寫新的、再清掉多出來的舊列：中途出錯也不會變成整片空白（H 欄不會整欄不見）
-    sh.getRange(3, 2, ids.length, 1).setNumberFormat('@').setValues(ids)
-    sh.getRange(3, 8, own.length, 1).setValues(own)
-    sh.getRange(3, 9, rest.length, 7).setValues(rest)
+    // 先寫新的、再清掉多出來的舊列：中途出錯也不會變成整片空白（I 欄不會整欄不見）
+    sh.getRange(3, 2, ids.length, 2).setNumberFormat('@').setValues(ids)
+    sh.getRange(3, 9, own.length, 1).setValues(own)
+    sh.getRange(3, 10, rest.length, 7).setValues(rest)
     const extra = sh.getMaxRows() - 2 - rows.length
     if (extra > 0) {
-      sh.getRange(3 + rows.length, 2, extra, 1).clearContent()
-      sh.getRange(3 + rows.length, 8, extra, 8).clearContent()
+      sh.getRange(3 + rows.length, 2, extra, 2).clearContent()
+      sh.getRange(3 + rows.length, 9, extra, 8).clearContent()
     }
-    sh.getRange(1, 1).setValue('每項產品「剩幾個要提醒」：用正航近 12 個月的進貨、銷貨算（' + txt(data.note).slice(0, 20) + ' 自動更新，每天一次）。現在庫存每小時跟正航更新；覺得門檻不對，在黃色的 H 欄填自己的數字（填 0＝不提醒）。')
+    sh.getRange(1, 1).setValue('每項產品「剩幾個要提醒」：用正航近 12 個月的進貨、銷貨算（' + txt(data.note).slice(0, 20) + ' 自動更新，每天一次）。重要度照出貨頻率：一年有最多天有人買的前 20% 是 A、再 30% 是 B。覺得門檻不對，在黃色的 I 欄填自己的數字（填 0＝不提醒）。')
     return { ok: true, n: rows.length, kept: own.filter(function (r) { return r[0] !== '' }).length }
   } finally {
     lock.releaseLock()
@@ -1597,27 +1596,12 @@ function writeTable(ss, name, index, table, opt) {
   return { sh: sh, rows: rows }
 }
 
+/**
+ * 11/24 使用者整理分頁：盤點只留「盤差報告」「盤點紀錄」；「總覽」改成快沒貨首頁（公式，不是這裡寫的），
+ * 「庫存」「儲位庫存」不再產生（資料都還在 App 裡）。writeTable、writeDashboard 留著沒用到，之後要再開回來比較快。
+ */
 function writeReports(ss, rep) {
-  // 舊版的「品項庫」改名成「庫存」
-  const old = ss.getSheetByName('品項庫')
-  if (old && !ss.getSheetByName('庫存')) old.setName('庫存')
-  const inv = writeTable(ss, '庫存', 1, rep.items, { timeCols: ['最近盤點'], color: COLOR.green })
-  // 庫存：盤虧標紅、該叫貨標橘（一次設定整張底色，一列一列設會很慢）
-  const st = inv.rows[0].indexOf('狀態')
-  if (inv.rows.length > 1 && st >= 0) {
-    inv.sh.getRange(2, 1, inv.rows.length - 1, inv.rows[0].length).setBackgrounds(
-      inv.rows.slice(1).map(function (r) {
-        const s = String(r[st] || '')
-        const c = s.indexOf('盤虧') >= 0 ? COLOR.loss : s.indexOf('該叫貨') >= 0 ? COLOR.order : null
-        return r.map(function () {
-          return c
-        })
-      }),
-    )
-  }
-  writeTable(ss, '儲位庫存', 2, rep.stock, { timeCols: ['盤點時間'], color: COLOR.blue })
   writeDiff(ss, rep.items)
-  writeDashboard(ss, rep)
   const raw = ss.getSheetByName(RAW)
   if (raw) raw.setTabColor(COLOR.gray)
   // 新試算表預設的空白工作表（工作表1／Sheet1）沒用到就刪掉
