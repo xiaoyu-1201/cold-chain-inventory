@@ -478,13 +478,14 @@ function erpFeed(data, props, P) {
  * 安全存量分析（2026/11/24）：公司電腦每天用正航近 12 個月進銷紀錄算好，送 rows [[產品編號, 建議門檻, 重要度, 分類, 為什麼, 賣出, 月數, 天數, 沒貨先賣天數], …]（已照重要度排好）。
  * 只寫 B（重要度）、C（產品編號）、I（使用者自己訂：照產品編號搬到新的那一列，不會跟錯產品）、J～P；A、D～H 是公式，不碰。鑰匙跟 erpFeed 同一把。
  */
-const USAGE_SHEET = '安全存量分析'
+const USAGE_SHEET = '安全庫存量設定' // 11/24 從「安全存量分析」改名；舊名也認得
 function usageFeed(data, P) {
   const k = String(P.ERP_FEED_KEY || '')
   if (k.length < 24 || sha(String(data.feedKey || '')) !== sha(k)) return { ok: false, error: '正航同步的鑰匙不對：請確認指令碼屬性 ERP_FEED_KEY' }
   const rows = Array.isArray(data.rows) ? data.rows : []
   if (rows.length < 500) return { ok: false, error: '只收到 ' + rows.length + ' 項產品，不正常，這次不更新' }
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(USAGE_SHEET)
+  const ss = SpreadsheetApp.getActiveSpreadsheet()
+  const sh = ss.getSheetByName(USAGE_SHEET) || ss.getSheetByName('安全存量分析')
   if (!sh) return { ok: false, error: '找不到「' + USAGE_SHEET + '」分頁' }
   const lock = LockService.getScriptLock()
   lock.waitLock(30000)
