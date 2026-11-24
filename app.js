@@ -117,7 +117,7 @@ const currentCounter = () => {
 const byName = (s) => (s.byId ? personName(s.byId, s.by) : s.by) || ''
 const MAX_SIDE = 1600 // 照片先縮到長邊 1600px 再上傳：夠看清楚，又快
 /** 版本：設定頁最下面會顯示，用來確認手機拿到的是新版 */
-const VERSION = '4.21.1（11/16・新的 App 圖示：綠色寫字板）'
+const VERSION = '4.21.2（11/24・試算表說明：盤點只寫盤差報告、盤點紀錄）'
 
 /** 店內品項清單（預設值；可以在設定裡改）：給 AI 統一名稱、給修正時選 */
 const DEFAULT_CATALOG = `壓縮機（全密閉、半密閉；看銘牌型號）
@@ -2993,7 +2993,7 @@ async function viewSettings() {
         <li>第一次會要你授權：選自己的帳號 →「進階」→「前往」→ 允許。</li>
         <li>複製「網頁應用程式網址」，貼到上面的格子 → 按「儲存並測試」。</li>
       </ol>
-      <p>試算表會自動建立五張：「總覽」（給主管：品項、件數、該叫貨、盤虧盤盈、儲位盤點進度、圖表）、「庫存」（每個品項實盤、帳面、差異、在哪裡、誰盤的）、「儲位庫存」（每一格放了什麼）、「盤差報告」（實盤≠帳面的，後面三欄給主管填原因、處理方式、確認，重新同步會保留）、「盤點紀錄」（原始資料）。每次同步自動更新，手動改會先跳警告。資料只會寫進你自己的試算表。</p>
+      <p>試算表會自動建立兩張：「盤差報告」（實盤≠帳面的，後面三欄給主管填原因、處理方式、確認，重新同步會保留）、「盤點紀錄」（原始資料）。每次同步自動更新，手動改會先跳警告。資料只會寫進你自己的試算表。</p>
       <p><b>以前連結過的：</b>要有「品項庫」工作表和多台同步，請重新複製程式碼貼上 → 存檔 →「部署」→「管理部署作業」→ 鉛筆（編輯）→ 版本選「新版本」→ 部署（網址不變；會再問一次授權，因為要存到你的雲端硬碟）。</p>
     </details>`
         : ''
@@ -8997,7 +8997,7 @@ async function syncToSheet(sessions) {
   const url = ls.get(LS.sheet)
   if (!url) throw new Error('還沒設定 Google 試算表')
   const rows = reportOf(sessions).detail.map((d) => [d.date, d.time, d.place, d.label, d.brand, d.model, d.spec, d.count, d.boxes, d.source, d.id, d.by])
-  // 報表資料整份一起送（試算表那邊重寫「總覽、庫存、儲位庫存、盤差報告」；舊版試算表程式碼會忽略）
+  // 報表資料整份一起送（試算表那邊 11/24 起只重寫「盤差報告」；舊版試算表程式碼會忽略）
   const report = await sheetReport()
   const body = JSON.stringify({ rows, report, key: ls.get(LS.syncKey) || undefined, dev: deviceId() })
   let confirmed = null
