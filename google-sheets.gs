@@ -572,10 +572,76 @@ function draftFeed(data, P) {
     const last = sh.getLastRow()
     if (last > rows.length + 1) sh.getRange(rows.length + 2, 1, last - rows.length - 1, 2).clearContent()
     sh.getRange(1, 1, 1, 3).setValues([['產品編號', '叫貨單', '更新：' + txt(data.note).slice(0, 20) + '（每小時自動，不要手動改）']])
-    return { ok: true, n: rows.length }
+    // 叫貨紀錄出錯不影響上面的叫貨單
+    let rec = {}
+    try {
+      rec = draftRecord(ss, Array.isArray(data.items) ? data.items : [], txt(data.note).slice(0, 20))
+    } catch (err) {
+      rec = { recErr: String((err && err.message) || err).slice(0, 120) }
+    }
+    return Object.assign({ ok: true, n: rows.length }, rec)
   } finally {
     lock.releaseLock()
   }
+}
+/**
+ * 叫貨紀錄（2026/11/24）：每個月叫貨單上的每一項（月份＋產品＋廠商一筆）都留下來，貨到、日期被改掉也不會消失。
+ * 第一次看到時記下當時的建議訂購量、現在庫存、安全庫存量（老闆還沒填、庫存還沒被加上去的時候）；之後每小時更新老闆填的數量、最後看到的時間。
+ * 隱藏分頁「叫貨紀錄」：A 月份 B 產品編號 C 廠商 D 老闆填的數量 E 第一次看到 F 最後看到 G 那時的建議訂購量 H 那時的現在庫存 I 那時的安全庫存量
+ */
+const RECORD_SHEET = '叫貨紀錄'
+const RECORD_HEAD = ['月份', '產品編號', '廠商', '老闆填的數量', '第一次看到', '最後看到', '那時的建議訂購量', '那時的現在庫存', '那時的安全庫存量']
+function draftRecord(ss, items, note) {
+  if (!items.length) return { recNew: 0 }
+  let sh = ss.getSheetByName(RECORD_SHEET)
+  if (!sh) {
+    sh = ss.insertSheet(RECORD_SHEET, ss.getSheets().length)
+    sh.hideSheet()
+    sh.getRange('A:C').setNumberFormat('@')
+    sh.getRange(1, 1, 1, RECORD_HEAD.length).setValues([RECORD_HEAD])
+    sh.setFrozenRows(1)
+  }
+  const s = function (v) {
+    return String(v == null ? '' : v).trim().slice(0, 100)
+  }
+  const n = function (v) {
+    const x = Number(v)
+    return isFinite(x) ? x : 0
+  }
+  // 那時的數字：從「安全庫存量設定」抓（C 產品編號、G 現在庫存、H 安全庫存量、R 建議訂購量）
+  const now = {}
+  const st = ss.getSheetByName(USAGE_SHEET) || ss.getSheetByName('安全存量分析')
+  if (st && st.getLastRow() >= 3) {
+    st.getRange(3, 3, st.getLastRow() - 2, 16).getValues().forEach(function (r) {
+      const id = String(r[0]).trim()
+      if (id) now[id] = [r[4], r[5], r[15]] // G、H、R
+    })
+  }
+  const last = sh.getLastRow()
+  const old = last >= 2 ? sh.getRange(2, 1, last - 1, RECORD_HEAD.length).getValues() : []
+  const at = {}
+  old.forEach(function (r, i) {
+    at[s(r[0]) + '|' + s(r[1]) + '|' + s(r[2])] = i
+  })
+  let added = 0
+  items.forEach(function (it) {
+    if (!Array.isArray(it) || !s(it[1])) return
+    const key = s(it[0]) + '|' + s(it[1]) + '|' + s(it[2])
+    const q = n(it[3])
+    if (Object.prototype.hasOwnProperty.call(at, key)) {
+      const r = old[at[key]]
+      if (q > 0) r[3] = q
+      r[5] = note
+    } else {
+      const v = now[s(it[1])] || ['', '', '']
+      at[key] = old.length
+      old.push([s(it[0]), s(it[1]), s(it[2]), q > 0 ? q : '', note, note, v[2] === '' ? '' : v[2], v[0], v[1]])
+      added++
+    }
+  })
+  if (old.length > 20000) return { recErr: '叫貨紀錄超過 2 萬筆，先不寫' }
+  sh.getRange(2, 1, old.length, RECORD_HEAD.length).setValues(old)
+  return { recNew: added }
 }
 /** 「公司叫法」分頁：A 叫法、B 產品編號（C 之後隨便寫）；沒有就建一個 */
 function aliasRows(ss) {
