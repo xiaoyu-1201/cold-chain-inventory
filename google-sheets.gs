@@ -530,7 +530,7 @@ function usageFeed(data, P) {
       sh.getRange(3 + rows.length, 2, extra, 2).clearContent()
       sh.getRange(3 + rows.length, 9, extra, 8).clearContent()
     }
-    sh.getRange(1, 1).setValue('每項產品「剩幾個要提醒」：用正航近 12 個月的進貨、銷貨算（' + txt(data.note).slice(0, 20) + ' 自動更新，每天一次）。重要度照出貨頻率：一年有最多天有人買的前 20% 是 A、再 30% 是 B。覺得門檻不對，在黃色的 I 欄填自己的數字（填 0＝不提醒）。')
+    sh.getRange(1, 1).setValue('每項產品的安全庫存量：用正航近 12 個月的進貨、銷貨算（' + txt(data.note).slice(0, 20) + ' 自動更新，每天一次）。重要度照出貨頻率：一年有最多天有人買的前 20% 是 A、再 30% 是 B。覺得安全庫存量不對，在黃色的 I 欄填自己的數字（填 0＝不提醒）。')
     return { ok: true, n: rows.length, kept: own.filter(function (r) { return r[0] !== '' }).length }
   } finally {
     lock.releaseLock()
