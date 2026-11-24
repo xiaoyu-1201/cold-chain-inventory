@@ -476,7 +476,7 @@ function erpFeed(data, props, P) {
   }
 }
 /**
- * 安全存量分析（2026/11/24）：公司電腦每天用正航近 12 個月進銷紀錄算好，送 rows [[產品編號, 建議門檻, 重要度, 分類, 為什麼, 賣出, 月數, 天數, 沒貨先賣天數], …]（已照重要度排好）。
+ * 安全存量分析（2026/11/24）：公司電腦每天用正航近 12 個月進銷紀錄算好，送 rows [[產品編號, 建議門檻, 重要度, 分類, 為什麼, 賣出, 月數, 天數, 沒貨先賣天數, 整箱倍數(0＝沒有)], …]（已照重要度排好）。
  * 只寫 B（重要度）、C（產品編號）、I（使用者自己訂：照產品編號搬到新的那一列，不會跟錯產品）、J～P、S（整箱倍數）；A、D～H、Q、R 是公式，不碰。鑰匙跟 erpFeed 同一把。
  */
 const USAGE_SHEET = '安全庫存量設定' // 11/24 從「安全存量分析」改名；舊名也認得
@@ -547,8 +547,8 @@ function usageFeed(data, P) {
   }
 }
 /**
- * 叫貨單（2026/11/24）：公司電腦每小時送一次 rows [[產品編號, 「11 月・廠商」], …]（同事在正航開、日期填月底最後一個禮拜天、數量還沒填的進貨單）。
- * 寫進隱藏分頁「叫貨單」（A 產品編號、B 哪個月給哪家）；「安全庫存量設定」的公式用它標「已叫貨／還沒列入叫貨」。0 筆也是正常的（還沒開叫貨單）。
+ * 叫貨單（2026/11/24）：公司電腦每小時送一次 rows [[產品編號, 「已訂：…」或「還沒訂：…」], …]（月底禮拜天那張＋日期改成預計到貨日的已訂列）、arrivals [[廠商, 預計到貨, 幾項, 品名]]。
+ * 寫進隱藏分頁「叫貨單」（A 產品編號、B 狀態；E～H 已訂廠商的預計到貨）；「安全庫存量設定」的公式用它標「已訂／還沒訂／還沒列入叫貨」。0 筆也是正常的（還沒開叫貨單）。
  */
 const DRAFT_SHEET = '叫貨單'
 function draftFeed(data, P) {
@@ -580,6 +580,22 @@ function draftFeed(data, P) {
     const last = sh.getLastRow()
     if (last > rows.length + 1) sh.getRange(rows.length + 2, 1, last - rows.length - 1, 2).clearContent()
     sh.getRange(1, 1, 1, 3).setValues([['產品編號', '叫貨單', '更新：' + txt(data.note).slice(0, 20) + '（每小時自動，不要手動改）']])
+    // 已訂、還沒到的廠商（11/24）：E 廠商、F 預計到貨、G 幾項、H 品名；總覽用。一樣先寫再清
+    if (Array.isArray(data.arrivals)) {
+      const ar = data.arrivals
+        .filter(function (r) {
+          return Array.isArray(r) && txt(r[0])
+        })
+        .slice(0, 300)
+        .map(function (r) {
+          return [txt(r[0]), txt(r[1]), Number(r[2]) || 0, txt(r[3])]
+        })
+      sh.getRange('F:F').setNumberFormat('@')
+      if (ar.length) sh.getRange(2, 5, ar.length, 4).setValues(ar)
+      const lastAr = sh.getLastRow()
+      if (lastAr > ar.length + 1) sh.getRange(ar.length + 2, 5, lastAr - ar.length - 1, 4).clearContent()
+      sh.getRange(1, 5, 1, 4).setValues([['廠商', '預計到貨', '幾項', '品名']])
+    }
     // 叫貨紀錄出錯不影響上面的叫貨單
     let rec = {}
     try {
