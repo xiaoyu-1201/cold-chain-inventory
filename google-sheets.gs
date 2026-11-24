@@ -566,10 +566,12 @@ function draftFeed(data, P) {
       .map(function (r) {
         return [txt(r[0]), txt(r[1])]
       })
-    sh.clearContents()
+    // 先寫新的、再清掉多出來的舊列：中途出錯也不會整片空白（「已叫貨」不會全部變成「⚠ 還沒列入」）
     sh.getRange('A:A').setNumberFormat('@')
-    sh.getRange(1, 1, 1, 3).setValues([['產品編號', '叫貨單', '更新：' + txt(data.note).slice(0, 20) + '（每小時自動，不要手動改）']])
     if (rows.length) sh.getRange(2, 1, rows.length, 2).setValues(rows)
+    const last = sh.getLastRow()
+    if (last > rows.length + 1) sh.getRange(rows.length + 2, 1, last - rows.length - 1, 2).clearContent()
+    sh.getRange(1, 1, 1, 3).setValues([['產品編號', '叫貨單', '更新：' + txt(data.note).slice(0, 20) + '（每小時自動，不要手動改）']])
     return { ok: true, n: rows.length }
   } finally {
     lock.releaseLock()
