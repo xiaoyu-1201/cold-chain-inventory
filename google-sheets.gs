@@ -89,6 +89,7 @@ function doPost(e) {
   if (data.action === 'joinGoogle') return json(syncOn ? joinGoogle(data, props) : { ok: false, error: '還沒開啟同步：請先由擁有者在第一台裝置開啟' })
   // 正航自動同步（公司電腦每小時送一次）：用指令碼屬性 ERP_FEED_KEY，不是成員的連結碼
   if (data.action === 'erpFeed') return json(erpFeed(data, props, P))
+  if (data.action === 'usageFeed') return json(usageFeed(data, P))
   const who = syncOn ? whoIs(P, data.key) : null
   if (syncOn && !who) {
     // 申請了、還沒被核准：告訴 App「等一下」，不要當成連結碼錯誤；取消申請（joinWithdraw）就把那一筆拿掉
@@ -473,6 +474,57 @@ function erpFeed(data, props, P) {
     // ERP_FEED_AT 用雲端自己的時間（App 靠它判斷「有新的」）；報表時間另外記（公司電腦的時鐘，給交叉比對基準用）
     props.setProperties({ ERP_FEED_AT: String(Date.now()), ERP_FEED_REPORT: String(Number(data.at) || Date.now()), ERP_FEED_HASH: hash })
     return { ok: true, n: rows.length, aliases: aliases }
+  } finally {
+    lock.releaseLock()
+  }
+}
+/**
+ * 安全存量分析（2026/11/24）：公司電腦每天用正航近 12 個月進銷紀錄算好，送 rows [[產品編號, 建議門檻, 分類, 為什麼, 賣出, 月數, 天數, 沒貨先賣天數], …]。
+ * 只寫 B（產品編號）、H（使用者自己訂：照產品編號搬到新的那一列，不會跟錯產品）、I～O；A、C～G 是公式，不碰。鑰匙跟 erpFeed 同一把。
+ */
+const USAGE_SHEET = '安全存量分析'
+function usageFeed(data, P) {
+  const k = String(P.ERP_FEED_KEY || '')
+  if (k.length < 24 || sha(String(data.feedKey || '')) !== sha(k)) return { ok: false, error: '正航同步的鑰匙不對：請確認指令碼屬性 ERP_FEED_KEY' }
+  const rows = Array.isArray(data.rows) ? data.rows : []
+  if (rows.length < 500) return { ok: false, error: '只收到 ' + rows.length + ' 項產品，不正常，這次不更新' }
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(USAGE_SHEET)
+  if (!sh) return { ok: false, error: '找不到「' + USAGE_SHEET + '」分頁' }
+  const lock = LockService.getScriptLock()
+  lock.waitLock(30000)
+  try {
+    const txt = function (v) {
+      return String(v == null ? '' : v).trim().slice(0, 300)
+    }
+    const num = function (v) {
+      const n = Number(v)
+      return isFinite(n) ? n : 0
+    }
+    // 舊的「自己訂」照產品編號記下來
+    const old = sh.getLastRow() >= 3 ? sh.getRange(3, 2, sh.getLastRow() - 2, 7).getValues() : []
+    const mine = {}
+    old.forEach(function (r) {
+      const id = String(r[0]).trim()
+      if (id && r[6] !== '' && r[6] !== null) mine[id] = r[6]
+    })
+    const ids = rows.map(function (r) {
+      return [txt(r[0])]
+    })
+    const own = ids.map(function (r) {
+      return [Object.prototype.hasOwnProperty.call(mine, r[0]) ? mine[r[0]] : '']
+    })
+    const rest = rows.map(function (r) {
+      return [num(r[1]), txt(r[2]), txt(r[3]), num(r[4]), num(r[5]), num(r[6]), num(r[7])]
+    })
+    if (sh.getMaxRows() < rows.length + 2) sh.insertRowsAfter(sh.getMaxRows(), rows.length + 2 - sh.getMaxRows())
+    const n = Math.max(sh.getMaxRows() - 2, 1)
+    sh.getRange(3, 2, n, 1).clearContent()
+    sh.getRange(3, 8, n, 8).clearContent()
+    sh.getRange(3, 2, ids.length, 1).setNumberFormat('@').setValues(ids)
+    sh.getRange(3, 8, own.length, 1).setValues(own)
+    sh.getRange(3, 9, rest.length, 7).setValues(rest)
+    sh.getRange(1, 1).setValue('每項產品「剩幾個要提醒」：用正航近 12 個月的進貨、銷貨算（' + txt(data.note).slice(0, 20) + ' 自動更新，每天一次）。現在庫存每小時跟正航更新；覺得門檻不對，在黃色的 H 欄填自己的數字（填 0＝不提醒）。')
+    return { ok: true, n: rows.length, kept: own.filter(function (r) { return r[0] !== '' }).length }
   } finally {
     lock.releaseLock()
   }
