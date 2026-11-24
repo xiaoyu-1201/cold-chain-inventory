@@ -507,6 +507,14 @@ function usageFeed(data, P) {
       const id = String(r[0]).trim()
       if (id && r[6] !== '' && r[6] !== null) mine[id] = r[6]
     })
+    // 這次沒送來、但使用者自己訂過的產品（一年沒賣、庫存 0）：保留一列，門檻不要丟掉
+    const sent = {}
+    rows.forEach(function (r) {
+      sent[txt(r[0])] = true
+    })
+    Object.keys(mine).forEach(function (id) {
+      if (!sent[id]) rows.push([id, 0, '一年沒賣', '近 12 個月沒賣、現在也沒庫存（保留你自己訂的門檻）', 0, 0, 0, 0])
+    })
     const ids = rows.map(function (r) {
       return [txt(r[0])]
     })
@@ -517,12 +525,15 @@ function usageFeed(data, P) {
       return [num(r[1]), txt(r[2]), txt(r[3]), num(r[4]), num(r[5]), num(r[6]), num(r[7])]
     })
     if (sh.getMaxRows() < rows.length + 2) sh.insertRowsAfter(sh.getMaxRows(), rows.length + 2 - sh.getMaxRows())
-    const n = Math.max(sh.getMaxRows() - 2, 1)
-    sh.getRange(3, 2, n, 1).clearContent()
-    sh.getRange(3, 8, n, 8).clearContent()
+    // 先寫新的、再清掉多出來的舊列：中途出錯也不會變成整片空白（H 欄不會整欄不見）
     sh.getRange(3, 2, ids.length, 1).setNumberFormat('@').setValues(ids)
     sh.getRange(3, 8, own.length, 1).setValues(own)
     sh.getRange(3, 9, rest.length, 7).setValues(rest)
+    const extra = sh.getMaxRows() - 2 - rows.length
+    if (extra > 0) {
+      sh.getRange(3 + rows.length, 2, extra, 1).clearContent()
+      sh.getRange(3 + rows.length, 8, extra, 8).clearContent()
+    }
     sh.getRange(1, 1).setValue('每項產品「剩幾個要提醒」：用正航近 12 個月的進貨、銷貨算（' + txt(data.note).slice(0, 20) + ' 自動更新，每天一次）。現在庫存每小時跟正航更新；覺得門檻不對，在黃色的 H 欄填自己的數字（填 0＝不提醒）。')
     return { ok: true, n: rows.length, kept: own.filter(function (r) { return r[0] !== '' }).length }
   } finally {
