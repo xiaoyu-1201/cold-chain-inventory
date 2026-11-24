@@ -87,6 +87,7 @@ function doPost(e) {
   // 正航自動同步（公司電腦每小時送一次）：用指令碼屬性 ERP_FEED_KEY，不是成員的連結碼
   if (data.action === 'erpFeed') return json(erpFeed(data, props, P))
   if (data.action === 'usageFeed') return json(usageFeed(data, P))
+  if (data.action === 'draftFeed') return json(draftFeed(data, P))
   const who = syncOn ? whoIs(P, data.key) : null
   if (syncOn && !who) {
     // 申請了、還沒被核准：告訴 App「等一下」，不要當成連結碼錯誤；取消申請（joinWithdraw）就把那一筆拿掉
@@ -533,6 +534,43 @@ function usageFeed(data, P) {
     }
     sh.getRange(1, 1).setValue('每項產品的安全庫存量：用正航近 12 個月的進貨、銷貨算（' + txt(data.note).slice(0, 20) + ' 自動更新，每天一次）。重要度照出貨頻率：一年有最多天有人買的前 20% 是 A、再 30% 是 B。覺得安全庫存量不對，在黃色的 I 欄填自己的數字（填 0＝不提醒）。')
     return { ok: true, n: rows.length, kept: own.filter(function (r) { return r[0] !== '' }).length }
+  } finally {
+    lock.releaseLock()
+  }
+}
+/**
+ * 叫貨單（2026/11/24）：公司電腦每小時送一次 rows [[產品編號, 「11 月・廠商」], …]（同事在正航開、日期填月底最後一個禮拜天、數量還沒填的進貨單）。
+ * 寫進隱藏分頁「叫貨單」（A 產品編號、B 哪個月給哪家）；「安全庫存量設定」的公式用它標「已叫貨／還沒列入叫貨」。0 筆也是正常的（還沒開叫貨單）。
+ */
+const DRAFT_SHEET = '叫貨單'
+function draftFeed(data, P) {
+  const k = String(P.ERP_FEED_KEY || '')
+  if (k.length < 24 || sha(String(data.feedKey || '')) !== sha(k)) return { ok: false, error: '正航同步的鑰匙不對：請確認指令碼屬性 ERP_FEED_KEY' }
+  if (!Array.isArray(data.rows) || data.rows.length > 3000) return { ok: false, error: '叫貨單資料不對，這次不更新' }
+  const ss = SpreadsheetApp.getActiveSpreadsheet()
+  const lock = LockService.getScriptLock()
+  lock.waitLock(30000)
+  try {
+    let sh = ss.getSheetByName(DRAFT_SHEET)
+    if (!sh) {
+      sh = ss.insertSheet(DRAFT_SHEET, ss.getSheets().length)
+      sh.hideSheet()
+    }
+    const txt = function (v) {
+      return String(v == null ? '' : v).trim().slice(0, 200)
+    }
+    const rows = data.rows
+      .filter(function (r) {
+        return Array.isArray(r) && txt(r[0])
+      })
+      .map(function (r) {
+        return [txt(r[0]), txt(r[1])]
+      })
+    sh.clearContents()
+    sh.getRange('A:A').setNumberFormat('@')
+    sh.getRange(1, 1, 1, 3).setValues([['產品編號', '叫貨單', '更新：' + txt(data.note).slice(0, 20) + '（每小時自動，不要手動改）']])
+    if (rows.length) sh.getRange(2, 1, rows.length, 2).setValues(rows)
+    return { ok: true, n: rows.length }
   } finally {
     lock.releaseLock()
   }
