@@ -477,7 +477,7 @@ function erpFeed(data, props, P) {
 }
 /**
  * 安全存量分析（2026/11/24）：公司電腦每天用正航近 12 個月進銷紀錄算好，送 rows [[產品編號, 建議門檻, 重要度, 分類, 為什麼, 賣出, 月數, 天數, 沒貨先賣天數], …]（已照重要度排好）。
- * 只寫 B（重要度）、C（產品編號）、I（使用者自己訂：照產品編號搬到新的那一列，不會跟錯產品）、J～P；A、D～H 是公式，不碰。鑰匙跟 erpFeed 同一把。
+ * 只寫 B（重要度）、C（產品編號）、I（使用者自己訂：照產品編號搬到新的那一列，不會跟錯產品）、J～P、S（整箱倍數）；A、D～H、Q、R 是公式，不碰。鑰匙跟 erpFeed 同一把。
  */
 const USAGE_SHEET = '安全庫存量設定' // 11/24 從「安全存量分析」改名；舊名也認得
 function usageFeed(data, P) {
@@ -527,10 +527,18 @@ function usageFeed(data, P) {
     sh.getRange(3, 2, ids.length, 2).setNumberFormat('@').setValues(ids)
     sh.getRange(3, 9, own.length, 1).setValues(own)
     sh.getRange(3, 10, rest.length, 7).setValues(rest)
+    // S 欄＝老闆通常幾個一起叫（整箱倍數，0＝沒有）；R 欄的建議訂購量公式用它湊整箱（11/24）
+    if (sh.getMaxColumns() < 19) sh.insertColumnsAfter(sh.getMaxColumns(), 19 - sh.getMaxColumns())
+    sh.getRange(3, 19, rows.length, 1).setValues(
+      rows.map(function (r) {
+        return [num(r[9])]
+      }),
+    )
     const extra = sh.getMaxRows() - 2 - rows.length
     if (extra > 0) {
       sh.getRange(3 + rows.length, 2, extra, 2).clearContent()
       sh.getRange(3 + rows.length, 9, extra, 8).clearContent()
+      sh.getRange(3 + rows.length, 19, extra, 1).clearContent()
     }
     sh.getRange(1, 1).setValue('每項產品的安全庫存量：用正航近 12 個月的進貨、銷貨算（' + txt(data.note).slice(0, 20) + ' 自動更新，每天一次）。重要度照出貨頻率：一年有最多天有人買的前 20% 是 A、再 30% 是 B。覺得安全庫存量不對，在黃色的 I 欄填自己的數字（填 0＝不提醒）。')
     return { ok: true, n: rows.length, kept: own.filter(function (r) { return r[0] !== '' }).length }
